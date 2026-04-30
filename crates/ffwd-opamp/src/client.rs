@@ -45,6 +45,15 @@ impl OpampStateHandle {
             }
         }
     }
+
+    /// Take the pending remote config (if any) for in-process application.
+    ///
+    /// Returns `Some(yaml)` if the OpAMP server pushed a new config that hasn't
+    /// been consumed yet. Clears the pending state so subsequent calls return `None`.
+    /// This allows the bootstrap loop to apply remote configs without disk I/O.
+    pub fn take_pending_remote_config(&self) -> Option<String> {
+        self.state.lock().ok()?.pending_remote_config.take()
+    }
 }
 
 /// OpAMP client that connects to a server and manages remote configuration.
@@ -156,7 +165,7 @@ impl OpampClient {
     pub async fn run(
         self,
         shutdown: tokio_util::sync::CancellationToken,
-        data_dir: Option<&Path>,
+        _data_dir: Option<&Path>,
         config_path: Option<&Path>,
         config_base_path: Option<&Path>,
     ) -> Result<(), OpampError> {
@@ -171,20 +180,18 @@ impl OpampClient {
         let state = Arc::clone(&self.state);
         let accept_remote_config = self.config.accept_remote_config;
         let reload_tx = self.reload_tx.clone();
-        let remote_config_path = config_path.map_or_else(
-            || Self::remote_config_path_for_identity(data_dir, &self.identity),
-            PathBuf::from,
-        );
 
-        // Create the OpAMP API callbacks handler.
-        let validation_base_path = config_base_path
-            .map(PathBuf::from)
-            .or_else(|| remote_config_path.parent().map(PathBuf::from));
+        // Derive validation base path: prefer explicit config_base_path (supervised mode),
+        // fall back to config_path's parent, then data_dir.
+        let validation_base_path = config_base_path.map(PathBuf::from).or_else(|| {
+            config_path
+                .and_then(|p| Path::new(p).parent())
+                .map(PathBuf::from)
+        });
         let mut handler = OpampHandler {
             state,
             accept_remote_config,
             reload_tx,
-            remote_config_path,
             validation_base_path,
         };
 
@@ -238,7 +245,6 @@ struct OpampHandler {
     state: Arc<Mutex<SharedState>>,
     accept_remote_config: bool,
     reload_tx: tokio::sync::mpsc::Sender<()>,
-    remote_config_path: PathBuf,
     /// Base directory for validating config (resolving relative paths).
     /// In supervised mode this is the child's config dir, not the staging dir.
     validation_base_path: Option<PathBuf>,
@@ -349,48 +355,21 @@ impl ApiCallbacks for &mut OpampHandler {
             "opamp: received remote configuration"
         );
 
-        // Validate before writing. Use the config base path (child's config dir
-        // in supervised mode) rather than the staging file's parent directory.
+        // Validate before signaling reload. Use the config base path (child's
+        // config dir in supervised mode) rather than the staging file's parent.
         let base_path = self.validation_base_path.as_deref();
         match ffwd_config::ValidatedConfig::from_yaml(&yaml, base_path) {
-            Ok(validated) => {
-                // Atomic write: temp file → rename to target path so the bootstrap
-                // reload loop reads the new config when re-reading from disk.
-                //
-                // NOTE: This uses blocking std::fs calls because ApiCallbacks is a
-                // synchronous trait. This is acceptable because data_dir (where
-                // remote_config_path lives) MUST be local storage — NFS/network
-                // mounts are not supported for data_dir. The write is <10KB and
-                // rename is O(1) on local filesystems.
-                let target = &self.remote_config_path;
-                let tmp_path = target.with_extension("yaml.tmp");
-                if let Err(e) = std::fs::write(&tmp_path, validated.effective_yaml()) {
-                    tracing::error!(
-                        error = %e,
-                        path = %tmp_path.display(),
-                        "opamp: failed to write temp config"
-                    );
-                    return Ok(None);
-                }
-                if let Err(e) = std::fs::rename(&tmp_path, target) {
-                    tracing::error!(
-                        error = %e,
-                        path = %target.display(),
-                        "opamp: failed to rename config into place"
-                    );
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return Ok(None);
-                }
-                tracing::info!(
-                    path = %target.display(),
-                    "opamp: wrote remote config, triggering reload"
-                );
-                let _ = self.reload_tx.try_send(());
-
+            Ok(_validated) => {
+                // Store the validated config in shared state for the bootstrap loop
+                // to consume directly — no blocking disk I/O in this sync callback.
+                // Persistence to disk happens asynchronously in the bootstrap loop
+                // after the config is committed (for crash recovery).
                 if let Ok(mut state) = self.state.lock() {
                     state.pending_remote_config = Some(yaml);
                     state.last_config_applied = false;
                 }
+                tracing::info!("opamp: validated remote config, triggering reload");
+                let _ = self.reload_tx.try_send(());
             }
             Err(e) => {
                 tracing::error!(

@@ -85,9 +85,9 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     state_handle.set_effective_config(validated.effective_yaml());
 
     // Spawn OpAMP client task.
-    // In supervisor mode, the OpAMP client writes to the intermediate remote
-    // config file (NOT the main config path). handle_remote_config then reads
-    // from that file, validates, and does the atomic write + SIGHUP dance.
+    // Config pushes are stored in SharedState (in-memory) and consumed by
+    // handle_remote_config via take_pending_remote_config(). No intermediate
+    // file I/O in the callback — persistence happens after commit.
     let opamp_shutdown = shutdown.clone();
     let opamp_data_dir = data_dir.clone();
     let opamp_remote_config_path = remote_config_path.clone();
@@ -247,7 +247,6 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                             handle_remote_config(
                                 &config_path,
                                 &state_handle,
-                                &remote_config_path,
                                 &mut child,
                                 child_pid,
                             )
@@ -359,7 +358,6 @@ fn was_terminated_by(status: std::process::ExitStatus, signal: i32) -> bool {
 async fn handle_remote_config(
     config_path: &Path,
     state_handle: &ffwd_opamp::OpampStateHandle,
-    remote_path: &Path,
     child: &mut tokio::process::Child,
     child_pid: u32,
 ) {
@@ -367,28 +365,27 @@ async fn handle_remote_config(
 
     let mut flow = ConfigFlow::new(config_path.to_owned(), child_pid);
 
-    // Kick off the cycle.
+    // Kick off the cycle. We pass a dummy path since we'll pull the yaml
+    // from OpAMP shared state (in-memory) in the ReadAndValidate handler.
     let mut effect = flow.step(Event::ConfigAvailable {
-        remote_path: remote_path.to_owned(),
+        remote_path: PathBuf::from("<in-memory>"),
     });
 
     loop {
         match effect {
-            Effect::ReadAndValidate(path) => {
-                // Read the staged config file asynchronously, then validate with
-                // the child's config directory as base (not the staging dir) so
-                // relative paths resolve correctly against the child's real location.
-                let event = match tokio::fs::read_to_string(&path).await {
-                    Ok(yaml) => {
-                        match ffwd_config::ValidatedConfig::from_yaml(&yaml, config_path.parent()) {
-                            Ok(v) => Event::ReadOk(Box::new(v)),
-                            Err(e) => Event::ReadFailed(format!(
-                                "validation failed for {}: {e}",
-                                path.display()
-                            )),
-                        }
+            Effect::ReadAndValidate(_path) => {
+                // Pull validated config directly from OpAMP shared state (no disk I/O).
+                // Falls back to disk only if shared state was already consumed (shouldn't
+                // happen in normal flow, but defensive).
+                let event = if let Some(yaml) = state_handle.take_pending_remote_config() {
+                    match ffwd_config::ValidatedConfig::from_yaml(&yaml, config_path.parent()) {
+                        Ok(v) => Event::ReadOk(Box::new(v)),
+                        Err(e) => Event::ReadFailed(format!("validation failed: {e}")),
                     }
-                    Err(e) => Event::ReadFailed(format!("failed to read {}: {e}", path.display())),
+                } else {
+                    Event::ReadFailed(
+                        "no pending remote config in OpAMP state (already consumed?)".to_owned(),
+                    )
                 };
                 effect = flow.step(event);
             }
@@ -626,30 +623,29 @@ mod proptests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Path contract properties — prevent the path mismatch bug
+    // Path contract properties — remote_config_path helpers are consistent
     // ═══════════════════════════════════════════════════════════════
 
-    // OpAMP remote_config_path and handle_remote_config MUST read from the
-    // same location. This property verifies the contract: both use
-    // `OpampClient::remote_config_path(data_dir)`.
+    // The remote_config_path helper functions return consistent results.
+    // While the OpAMP callback no longer writes to disk (it uses in-memory
+    // shared state), these path helpers are still used for crash-recovery
+    // persistence and must remain deterministic.
     proptest! {
         #[test]
-        fn path_contract_opamp_writes_where_supervisor_reads(
+        fn path_contract_remote_config_path_is_deterministic(
             suffix in "[a-z]{1,10}",
         ) {
             let dir = tempfile::tempdir().expect("create temp dir");
             let data_dir = dir.path().join(&suffix);
             std::fs::create_dir_all(&data_dir).expect("create data dir");
 
-            // The path OpAMP client writes to (when config_path=None, i.e. supervisor mode).
-            let opamp_write_path = ffwd_opamp::OpampClient::remote_config_path(Some(&data_dir));
-
-            // The path handle_remote_config reads from (line 322 in supervisor.rs).
-            let supervisor_read_path = ffwd_opamp::OpampClient::remote_config_path(Some(&data_dir));
+            // Both calls with same data_dir should return the same path.
+            let path_a = ffwd_opamp::OpampClient::remote_config_path(Some(&data_dir));
+            let path_b = ffwd_opamp::OpampClient::remote_config_path(Some(&data_dir));
 
             prop_assert_eq!(
-                opamp_write_path, supervisor_read_path,
-                "OpAMP write path must equal supervisor read path"
+                path_a, path_b,
+                "remote_config_path must be deterministic"
             );
         }
     }

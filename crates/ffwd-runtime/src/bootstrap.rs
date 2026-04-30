@@ -425,6 +425,22 @@ pub async fn run_pipelines(
                                 #[cfg(feature = "opamp")]
                                 if let Some((ref state, _)) = opamp_client {
                                     state.set_effective_config(committed.effective_yaml());
+                                    // Persist to disk for crash recovery — async, non-blocking.
+                                    // If the process restarts before the next OpAMP poll, it
+                                    // will read this file and have the latest config.
+                                    let persist_path = options.config_path.to_owned();
+                                    let persist_yaml = committed.effective_yaml().to_owned();
+                                    tokio::spawn(async move {
+                                        if let Err(e) =
+                                            tokio::fs::write(&persist_path, &persist_yaml).await
+                                        {
+                                            tracing::warn!(
+                                                error = %e,
+                                                path = %persist_path,
+                                                "config reload: failed to persist config for crash recovery"
+                                            );
+                                        }
+                                    });
                                 }
                                 current_config = committed.into_config();
                             }
@@ -626,22 +642,38 @@ pub async fn run_pipelines(
             State::Validating => {
                 // ── Re-read and validate config ──
                 reload_total.add(1, &[]);
-                tracing::info!(path = %options.config_path, "config reload: reading new config");
-                let config_path = options.config_path.to_owned();
-                let new_yaml = match tokio::fs::read_to_string(&config_path).await {
-                    Ok(y) => y,
-                    Err(e) => {
-                        tracing::error!(error = %e, "config reload: failed to read config file");
-                        let effects = coordinator
-                            .step(Event::ConfigInvalid(format!("failed to read config: {e}")));
-                        for effect in effects {
-                            if let Effect::ReportReloadError(_) = effect {
-                                reload_error.add(1, &[]);
+
+                // Prefer in-memory config from OpAMP (avoids disk I/O roundtrip).
+                // Falls back to reading from disk for file-watcher / SIGHUP triggers.
+                #[cfg(feature = "opamp")]
+                let opamp_yaml = opamp_client
+                    .as_ref()
+                    .and_then(|(state, _)| state.take_pending_remote_config());
+                #[cfg(not(feature = "opamp"))]
+                let opamp_yaml: Option<String> = None;
+
+                let new_yaml = if let Some(yaml) = opamp_yaml {
+                    tracing::info!("config reload: using in-memory config from OpAMP");
+                    yaml
+                } else {
+                    tracing::info!(path = %options.config_path, "config reload: reading config from disk");
+                    let config_path = options.config_path.to_owned();
+                    match tokio::fs::read_to_string(&config_path).await {
+                        Ok(y) => y,
+                        Err(e) => {
+                            tracing::error!(error = %e, "config reload: failed to read config file");
+                            let effects = coordinator
+                                .step(Event::ConfigInvalid(format!("failed to read config: {e}")));
+                            for effect in effects {
+                                if let Effect::ReportReloadError(_) = effect {
+                                    reload_error.add(1, &[]);
+                                }
                             }
+                            continue;
                         }
-                        continue;
                     }
                 };
+
                 let validated = match ffwd_config::ValidatedConfig::from_yaml(&new_yaml, base_path)
                 {
                     Ok(v) => v,
