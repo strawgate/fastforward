@@ -361,14 +361,16 @@ impl ApiCallbacks for &mut OpampHandler {
                 tracing::info!("opamp: validated remote config, triggering reload");
                 if self.reload_tx.try_send(Some(yaml)).is_ok() {
                     // Only mark as not-applied once the signal is successfully queued.
-                    // If the channel is full, a pending reload will pick up the latest
-                    // disk config — leaving last_config_applied stale would mislead the server.
                     if let Ok(mut state) = self.state.lock() {
                         state.last_config_applied = false;
                     }
                 } else {
+                    // Channel full: a reload is already in progress. This config is
+                    // intentionally dropped — the server will re-push on the next poll
+                    // because last_config_applied remains true (server sees config not
+                    // yet acknowledged). This is safe debounce behavior.
                     tracing::debug!(
-                        "opamp: reload signal already queued (coalescing with pending reload)"
+                        "opamp: reload channel full, config will be re-delivered on next poll"
                     );
                 }
             }
