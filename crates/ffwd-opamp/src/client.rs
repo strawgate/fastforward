@@ -356,6 +356,12 @@ impl ApiCallbacks for &mut OpampHandler {
             Ok(validated) => {
                 // Atomic write: temp file → rename to target path so the bootstrap
                 // reload loop reads the new config when re-reading from disk.
+                //
+                // NOTE: This uses blocking std::fs calls because ApiCallbacks is a
+                // synchronous trait. This is acceptable because data_dir (where
+                // remote_config_path lives) MUST be local storage — NFS/network
+                // mounts are not supported for data_dir. The write is <10KB and
+                // rename is O(1) on local filesystems.
                 let target = &self.remote_config_path;
                 let tmp_path = target.with_extension("yaml.tmp");
                 if let Err(e) = std::fs::write(&tmp_path, validated.effective_yaml()) {

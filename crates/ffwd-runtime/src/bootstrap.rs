@@ -290,7 +290,7 @@ pub async fn run_pipelines(
         opamp_state.set_effective_config(options.config_yaml);
         let opamp_config_path = PathBuf::from(options.config_path);
         let opamp_base_path = opamp_config_path.parent().map(PathBuf::from);
-        tokio::spawn(async move {
+        let opamp_handle = tokio::spawn(async move {
             if let Err(e) = client
                 .run(
                     shutdown_for_opamp,
@@ -303,7 +303,7 @@ pub async fn run_pipelines(
                 tracing::error!(error = %e, "opamp: client exited with error");
             }
         });
-        Some(opamp_state)
+        Some((opamp_state, opamp_handle))
     } else {
         None
     };
@@ -423,7 +423,7 @@ pub async fn run_pipelines(
                         Effect::CommitConfig => {
                             if let Some(committed) = pending.take() {
                                 #[cfg(feature = "opamp")]
-                                if let Some(ref state) = opamp_client {
+                                if let Some((ref state, _)) = opamp_client {
                                     state.set_effective_config(committed.effective_yaml());
                                 }
                                 current_config = committed.into_config();
@@ -720,6 +720,20 @@ pub async fn run_pipelines(
 
     // ══════════ CLEANUP ══════════
     print_shutdown_stats(&pipeline_metrics, startup_start.elapsed(), use_color);
+
+    // Join the OpAMP task with a bounded timeout to prevent hanging on stuck polls.
+    #[cfg(feature = "opamp")]
+    if let Some((_, opamp_handle)) = opamp_client {
+        match tokio::time::timeout(Duration::from_secs(5), opamp_handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "opamp: task panicked during shutdown");
+            }
+            Err(_) => {
+                tracing::warn!("opamp: task did not exit within 5s, abandoning");
+            }
+        }
+    }
 
     if let Err(e) = meter_provider.shutdown() {
         eprintln!(

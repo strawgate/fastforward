@@ -159,7 +159,20 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
 
             match exit_reason {
                 ChildExit::Signal(sig) => {
-                    forward_signal(child_pid, sig);
+                    // Guard: check if child is still alive before forwarding.
+                    // Prevents signaling a recycled PID if the child died between
+                    // the select! and here (astronomically unlikely but safe).
+                    match child.try_wait() {
+                        Ok(Some(_status)) => {
+                            // Child already exited — no need to signal.
+                            tracing::debug!(
+                                "supervisor: child already exited before signal forward"
+                            );
+                        }
+                        _ => {
+                            forward_signal(child_pid, sig);
+                        }
+                    }
                     shutdown.cancel();
                     wait_or_kill(&mut child, child_pid).await;
                     break 'outer;
@@ -241,7 +254,12 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                             .await;
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "supervisor: failed to check child status");
+                            // Cannot determine child status — treat as crash and respawn.
+                            tracing::error!(
+                                error = %e,
+                                "supervisor: failed to check child status during reload, treating as crash"
+                            );
+                            break; // Respawn via outer loop.
                         }
                     }
                 }
