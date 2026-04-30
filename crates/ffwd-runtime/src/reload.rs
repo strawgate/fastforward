@@ -576,17 +576,18 @@ mod channel_protocol_tests {
     }
 
     #[tokio::test]
-    async fn channel_coalesces_with_latest_wins() {
+    async fn channel_capacity_one_drops_subsequent_sends() {
         let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
 
         // First send fills the channel
         tx.send(Some("config_v1".to_owned())).await.unwrap();
 
-        // Second send would block (capacity=1). Use try_send to verify coalescing.
+        // Second send is rejected (capacity=1). The first-queued config wins.
         let result = tx.try_send(Some("config_v2".to_owned()));
         assert!(result.is_err(), "channel should be full (capacity 1)");
 
-        // Consumer gets the first (queued) config
+        // Consumer gets the first (queued) config — subsequent pushes are lost
+        // until the channel is drained. This is intentional debounce behavior.
         let signal = rx.recv().await.unwrap();
         assert_eq!(signal, Some("config_v1".to_owned()));
     }
