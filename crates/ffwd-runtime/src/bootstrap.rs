@@ -425,20 +425,32 @@ pub async fn run_pipelines(
                                 #[cfg(feature = "opamp")]
                                 if let Some((ref state, _)) = opamp_client {
                                     state.set_effective_config(committed.effective_yaml());
-                                    // Persist to disk for crash recovery — async, non-blocking.
-                                    // If the process restarts before the next OpAMP poll, it
-                                    // will read this file and have the latest config.
-                                    let persist_path = options.config_path.to_owned();
+                                    // Persist to disk atomically for crash recovery.
+                                    // Uses temp file + rename to prevent partial writes.
+                                    let persist_path = PathBuf::from(options.config_path);
                                     let persist_yaml = committed.effective_yaml().to_owned();
                                     tokio::spawn(async move {
+                                        let tmp_path =
+                                            persist_path.with_extension("yaml.opamp-tmp");
                                         if let Err(e) =
-                                            tokio::fs::write(&persist_path, &persist_yaml).await
+                                            tokio::fs::write(&tmp_path, &persist_yaml).await
                                         {
                                             tracing::warn!(
                                                 error = %e,
-                                                path = %persist_path,
-                                                "config reload: failed to persist config for crash recovery"
+                                                path = %persist_path.display(),
+                                                "config reload: failed to write temp file for crash recovery"
                                             );
+                                            return;
+                                        }
+                                        if let Err(e) =
+                                            tokio::fs::rename(&tmp_path, &persist_path).await
+                                        {
+                                            tracing::warn!(
+                                                error = %e,
+                                                path = %persist_path.display(),
+                                                "config reload: failed to rename config for crash recovery"
+                                            );
+                                            let _ = tokio::fs::remove_file(&tmp_path).await;
                                         }
                                     });
                                 }

@@ -369,7 +369,11 @@ impl ApiCallbacks for &mut OpampHandler {
                     state.last_config_applied = false;
                 }
                 tracing::info!("opamp: validated remote config, triggering reload");
-                let _ = self.reload_tx.try_send(());
+                if self.reload_tx.try_send(()).is_err() {
+                    tracing::debug!(
+                        "opamp: reload signal already queued (coalescing with pending reload)"
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!(

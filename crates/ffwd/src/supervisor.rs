@@ -64,8 +64,8 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|e| CliError::Runtime(std::io::Error::other(e)))?;
 
-    // Channel for OpAMP to notify us of new remote config.
-    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(4);
+    // Channel for OpAMP to notify us of new remote config (capacity 1 — coalesces).
+    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(1);
 
     // Resolve agent identity.
     let identity = ffwd_opamp::AgentIdentity::resolve(
@@ -375,17 +375,20 @@ async fn handle_remote_config(
         match effect {
             Effect::ReadAndValidate(_path) => {
                 // Pull validated config directly from OpAMP shared state (no disk I/O).
-                // Falls back to disk only if shared state was already consumed (shouldn't
-                // happen in normal flow, but defensive).
+                // If shared state is empty, this is a duplicate signal (channel capacity
+                // coalescing race) — gracefully no-op rather than error.
                 let event = if let Some(yaml) = state_handle.take_pending_remote_config() {
                     match ffwd_config::ValidatedConfig::from_yaml(&yaml, config_path.parent()) {
                         Ok(v) => Event::ReadOk(Box::new(v)),
                         Err(e) => Event::ReadFailed(format!("validation failed: {e}")),
                     }
                 } else {
-                    Event::ReadFailed(
-                        "no pending remote config in OpAMP state (already consumed?)".to_owned(),
-                    )
+                    // Duplicate signal — previous handler already consumed the config.
+                    // This is expected with capacity-1 channels + multiple rapid pushes.
+                    tracing::debug!(
+                        "supervisor: reload signal with no pending config (duplicate signal, ignoring)"
+                    );
+                    break;
                 };
                 effect = flow.step(event);
             }
