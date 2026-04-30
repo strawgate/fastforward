@@ -249,8 +249,13 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
         }
     }
 
-    // Wait for OpAMP task to finish.
-    let _ = opamp_handle.await;
+    // Wait for OpAMP task to finish (bounded — don't hang on stuck network).
+    match tokio::time::timeout(Duration::from_secs(5), opamp_handle).await {
+        Ok(_) => {}
+        Err(_) => {
+            tracing::warn!("supervisor: opamp task did not exit within 5s, abandoning");
+        }
+    }
     tracing::info!("supervisor: exiting");
     Ok(())
 }
@@ -352,10 +357,10 @@ async fn handle_remote_config(
     loop {
         match effect {
             Effect::ReadAndValidate(path) => {
-                // Read the staged config file, then validate with the child's
-                // config directory as base (not the staging dir) so relative
-                // paths resolve correctly against the child's real location.
-                let event = match std::fs::read_to_string(&path) {
+                // Read the staged config file asynchronously, then validate with
+                // the child's config directory as base (not the staging dir) so
+                // relative paths resolve correctly against the child's real location.
+                let event = match tokio::fs::read_to_string(&path).await {
                     Ok(yaml) => {
                         match ffwd_config::ValidatedConfig::from_yaml(&yaml, config_path.parent()) {
                             Ok(v) => Event::ReadOk(Box::new(v)),
@@ -370,18 +375,22 @@ async fn handle_remote_config(
                 effect = flow.step(event);
             }
             Effect::WriteConfig { config_path, yaml } => {
-                let event = match atomic_write_config(&config_path, &yaml) {
-                    Ok(()) => {
+                // Perform atomic write in a blocking task to avoid stalling the
+                // tokio runtime on slow/network filesystems.
+                let write_result = tokio::task::spawn_blocking(move || {
+                    atomic_write_config(&config_path, &yaml).map(|()| config_path)
+                })
+                .await;
+                let event = match write_result {
+                    Ok(Ok(written_path)) => {
                         tracing::info!(
-                            path = %config_path.display(),
+                            path = %written_path.display(),
                             "supervisor: wrote updated config, sending SIGHUP to child"
                         );
                         Event::WriteOk
                     }
-                    Err(e) => Event::WriteFailed(format!(
-                        "failed to write {}: {e}",
-                        config_path.display()
-                    )),
+                    Ok(Err(e)) => Event::WriteFailed(format!("failed to write config: {e}")),
+                    Err(e) => Event::WriteFailed(format!("write task panicked: {e}")),
                 };
                 effect = flow.step(event);
             }

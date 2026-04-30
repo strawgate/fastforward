@@ -199,9 +199,17 @@ impl OpampClient {
 
         let mut api = Api::new(connection_settings, Box::new(&mut handler));
 
+        // Timeout for individual poll requests — prevents hanging on unresponsive servers.
+        let poll_timeout = Duration::from_secs(30);
+
         // Initial poll: report identity/status to server immediately on connect
         // rather than waiting for the first poll_interval to elapse.
-        api.poll().await;
+        match tokio::time::timeout(poll_timeout, api.poll()).await {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::warn!("opamp: initial poll timed out after {poll_timeout:?}");
+            }
+        }
 
         // Main polling loop.
         loop {
@@ -211,7 +219,12 @@ impl OpampClient {
                     break;
                 }
                 () = tokio::time::sleep(poll_interval) => {
-                    api.poll().await;
+                    match tokio::time::timeout(poll_timeout, api.poll()).await {
+                        Ok(()) => {}
+                        Err(_) => {
+                            tracing::warn!("opamp: poll timed out after {poll_timeout:?}");
+                        }
+                    }
                 }
             }
         }
