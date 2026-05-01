@@ -2154,9 +2154,11 @@ mod verification {
     /// With the stub, tag and length each append 1-10 bytes, plus data_len
     /// bytes of payload.
     /// Bounded to 4 data bytes (vs 8) to keep solver under 60s.
+    /// unwind(12) covers the stub's up-to-10-iteration loop (11 unwinds)
+    /// plus the data comparison and extend_from_slice loops.
     #[kani::proof]
     #[kani::stub(encode_varint, encode_varint_stub)]
-    #[kani::unwind(6)]
+    #[kani::unwind(12)]
     fn verify_encode_bytes_field_content_compositional() {
         let field_number: u32 = kani::any();
         kani::assume(field_number > 0 && field_number <= 100);

@@ -394,8 +394,11 @@ mod verification {
         // inside the RetryAfter arm of merge_child_send_result.
         // Bounded to <= 30_000 ms to keep solver tractable (Duration arithmetic
         // on full u64 causes 500s+ solve times with no extra coverage).
-        let initial_ms: Option<u64> =
-            if kani::any() { Some(kani::any_where(|&v: &u64| v <= 30_000)) } else { None };
+        let initial_ms: Option<u64> = if kani::any() {
+            Some(kani::any_where(|&v: &u64| v <= 30_000))
+        } else {
+            None
+        };
         let mut max_retry = initial_ms.map(Duration::from_millis);
 
         let result = match tag {

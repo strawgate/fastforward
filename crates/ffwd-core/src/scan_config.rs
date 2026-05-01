@@ -231,6 +231,7 @@ mod verification {
     ///
     /// Bounded to 10 bytes to keep solver tractable (~30s vs 534s at 20).
     /// 10 bytes covers all i32 values and most i64 (up to 9,999,999,999).
+    /// See verify_parse_int_fast_overflow_boundary for i64 overflow coverage.
     #[kani::proof]
     #[kani::unwind(12)]
     #[kani::solver(kissat)]
@@ -245,5 +246,56 @@ mod verification {
         let expected = ffwd_kani::numeric::parse_int_oracle(input);
 
         assert!(result == expected, "parse_int_fast disagrees with oracle");
+    }
+
+    /// Targeted proof for i64 overflow boundary in parse_int_fast.
+    ///
+    /// The main oracle proof (verify_parse_int_fast_vs_oracle) is bounded to
+    /// 10 bytes for solver tractability, which doesn't reach i64 overflow
+    /// (19+ digits). This proof specifically covers the overflow region by
+    /// constraining inputs to pure ASCII digits of length 19-20 and an
+    /// optional leading minus sign, then verifying against the oracle.
+    ///
+    /// By restricting to digit-only inputs, the solver state space is
+    /// dramatically smaller than fully symbolic 20-byte arrays.
+    #[kani::proof]
+    #[kani::unwind(22)]
+    #[kani::solver(kissat)]
+    fn verify_parse_int_fast_overflow_boundary() {
+        // 20 bytes: optional minus + up to 20 digits covers the i64 boundary.
+        // i64::MAX = 9223372036854775807 (19 digits)
+        // i64::MIN = -9223372036854775808 (20 chars with minus)
+        let len: usize = kani::any();
+        kani::assume(len >= 18 && len <= 20);
+
+        let has_minus: bool = kani::any();
+        let start = if has_minus { 1 } else { 0 };
+        // Ensure we have at least 1 digit after optional minus
+        kani::assume(len > start);
+
+        let mut bytes = [0u8; 20];
+        if has_minus {
+            bytes[0] = b'-';
+        }
+        // Fill digits as constrained symbolic values (b'0'..=b'9' only)
+        let mut i = start;
+        while i < len {
+            let d: u8 = kani::any();
+            kani::assume(d >= b'0' && d <= b'9');
+            bytes[i] = d;
+            i += 1;
+        }
+
+        let input = &bytes[..len];
+        let result = parse_int_fast(input);
+        let expected = ffwd_kani::numeric::parse_int_oracle(input);
+
+        assert!(
+            result == expected,
+            "overflow boundary: disagrees with oracle"
+        );
+
+        kani::cover!(result.is_none() && len >= 19, "overflow returns None");
+        kani::cover!(result.is_some() && len >= 19, "large valid i64");
     }
 }
