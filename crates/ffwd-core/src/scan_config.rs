@@ -231,7 +231,8 @@ mod verification {
     ///
     /// Bounded to 10 bytes to keep solver tractable (~30s vs 534s at 20).
     /// 10 bytes covers all i32 values and most i64 (up to 9,999,999,999).
-    /// See verify_parse_int_fast_overflow_boundary for i64 overflow coverage.
+    /// See verify_parse_int_fast_mid_range for 11-17 byte coverage and
+    /// verify_parse_int_fast_overflow_boundary for i64 overflow coverage.
     #[kani::proof]
     #[kani::unwind(12)]
     #[kani::solver(kissat)]
@@ -300,5 +301,48 @@ mod verification {
 
         kani::cover!(result.is_none() && len >= 19, "overflow returns None");
         kani::cover!(result.is_some() && len >= 19, "large valid i64");
+    }
+
+    /// Oracle proof for mid-range inputs (11-17 bytes).
+    ///
+    /// Bridges the gap between the main oracle proof (0-10 bytes) and the
+    /// overflow boundary proof (18-20 bytes). Uses digit-only constraints
+    /// with optional leading minus to keep solver time manageable.
+    ///
+    /// Gated behind `kani-slow`: 17-byte constrained array ~30-60s.
+    #[cfg(feature = "kani-slow")]
+    #[kani::proof]
+    #[kani::unwind(19)]
+    #[kani::solver(kissat)]
+    fn verify_parse_int_fast_mid_range() {
+        let len: usize = kani::any();
+        kani::assume(len >= 11 && len <= 17);
+
+        let has_minus: bool = kani::any();
+        let start = if has_minus { 1 } else { 0 };
+        kani::assume(len > start);
+
+        let mut bytes = [0u8; 17];
+        if has_minus {
+            bytes[0] = b'-';
+        }
+        let mut i = start;
+        while i < len {
+            let d: u8 = kani::any();
+            kani::assume(d >= b'0' && d <= b'9');
+            bytes[i] = d;
+            i += 1;
+        }
+
+        let input = &bytes[..len];
+        let result = parse_int_fast(input);
+        let expected = ffwd_kani::numeric::parse_int_oracle(input);
+
+        assert!(
+            result == expected,
+            "mid-range: parse_int_fast disagrees with oracle"
+        );
+
+        kani::cover!(result.is_some() && len >= 15, "large mid-range i64");
     }
 }

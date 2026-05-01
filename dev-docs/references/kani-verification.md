@@ -176,7 +176,8 @@ dramatically increases SAT formula size. Prefer stack-allocated arrays:
 
 ```rust
 // BAD: 500s+ to solve (models allocator)
-let v: Vec<u8> = vec![kani::any(); 16];
+let mut v = Vec::with_capacity(16);
+for _ in 0..16 { v.push(kani::any::<u8>()); }
 
 // GOOD: ~30s (pure stack)
 let a: [u8; 16] = kani::any();
@@ -208,7 +209,7 @@ let bytes: [u8; 20] = kani::any();
 
 // Tests overflow with digit-only constraint: ~30s
 let mut bytes = [0u8; 20];
-for i in 0..len {
+for i in 0..20 {
     let d: u8 = kani::any();
     kani::assume(d >= b'0' && d <= b'9');
     bytes[i] = d;
@@ -221,6 +222,7 @@ If one proof covers a wide domain and takes >60s, split it into focused proofs
 that partition the input space:
 
 - `verify_fn_small_inputs` (len 0-10, fully symbolic)
+- `verify_fn_mid_range` (len 11-17, constrained digits)
 - `verify_fn_overflow_boundary` (len 18-20, constrained digits)
 
 ### Function contracts for repeated callees
