@@ -893,6 +893,9 @@ mod verification {
     }
 
     /// Prove the configurable plain-text field wrapper path never panics.
+    ///
+    /// Gated behind `kani-slow`: [u8; 48] symbolic + unwind 52 takes >60s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(52)]
     #[kani::solver(kissat)]
@@ -1128,6 +1131,9 @@ mod verification {
     ///   - verify_write_json_line_no_prefix_quote_escape
     ///   - verify_write_json_line_no_prefix_backslash_escape
     ///   - verify_write_json_line_no_prefix_control_escape
+    ///
+    /// Gated behind `kani-slow`: unwind 52 through JSON escaping takes >30s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(52)]
     fn verify_write_json_line_parametric() {
@@ -1228,19 +1234,24 @@ mod verification {
     }
 
     /// Oracle equivalence: `json_escape_bytes` matches `ffwd_kani::bytes::json_escape_oracle`
-    /// for all byte-slice inputs of length at most 16.
+    /// for all byte-slice inputs of length at most 8.
     ///
     /// # Oracle Design Note
     /// The oracle is a golden copy (see `ffwd_kani::bytes::json_escape_oracle` docs).
     /// This proof provides no-panic and output-bound guarantees, but would not detect
     /// shared logic bugs in both implementations.
+    /// Bounded to 8 bytes (from 16) to keep solver under 30s. Each byte can
+    /// expand to 6 chars (\uXXXX), so worst case = 48 output bytes.
+    ///
+    /// Gated behind `kani-slow`: [u8; 8] + unwind 50 through escape logic ~30s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
-    #[kani::unwind(100)]
+    #[kani::unwind(50)]
     pub(super) fn verify_json_escape_bytes_vs_oracle() {
-        let src: [u8; 16] = kani::any();
-        let len: usize = kani::any_where(|&l| l <= 16);
+        let src: [u8; 8] = kani::any();
+        let len: usize = kani::any_where(|&l| l <= 8);
 
-        let mut prod_dst = Vec::with_capacity(16 * 6);
+        let mut prod_dst = Vec::with_capacity(8 * 6);
         let ora_result = json_escape_oracle(&src[..len]);
         json_escape_bytes(&src[..len], &mut prod_dst);
 

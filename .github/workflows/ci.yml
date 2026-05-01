@@ -377,24 +377,28 @@ jobs:
   # -------------------------------------------------------------------------
   # Kani formal verification — split into four parallel shards by layer so
   # the slowest one finishes within the hosted-runner budget.
-  # Observed wall-clock medians on main (per-job, --jobs 3):
-  #   kani-core:           ~15 min  (ffwd-core,                ~103 proofs)
-  #   kani-arrow:          ~19 min  (ffwd-arrow,                ~27 proofs;
-  #                                  SIMD/columnar accumulator proofs are
-  #                                  individually expensive — ~42s/proof)
-  #   kani-runtime-types:  ~?? min  (ffwd-runtime + ffwd-types,
-  #                                  ~55 orchestration-layer proofs)
-  #   kani-io-output:      ~?? min  (ffwd-io + ffwd-output +
-  #                                  ffwd-diagnostics + ffwd binary,
-  #                                  ~52 I/O-layer proofs)
-  # The previous monolithic kani-periphery shard (six crates, 107 proofs)
-  # was the long pole at ~21 minutes. The split keeps ownership boundaries
-  # clear while the 120-minute timeout on the two broad shards leaves room
-  # for cold-cache variance and hosted-runner throttling. Revisit this after
-  # collecting stable main-branch runtime history and tune the broad shards
-  # back toward the 90-minute core/arrow budget if the split remains stable.
-  # Each shard uses kissat and --jobs 3 — ubuntu-latest has 4 vCPUs; jobs=3
-  # leaves headroom for solver memory spikes while still using the runner.
+  #
+  # Fast vs slow proofs:
+  #   Proofs gated behind `kani-slow` feature (>30s solver time) run only
+  #   on push-to-main and ci:full PRs. PR CI runs fast proofs only (~5 min
+  #   wall-clock for core shard vs ~45+ min with slow proofs).
+  #
+  # Observed proof counts and timing constraints:
+  #   kani-core:           ~130 fast + ~15 slow proofs (ffwd-core + ffwd-kani)
+  #                        Slow: structural(unwind 65), cri(unwind 52), severity
+  #   kani-arrow:           24 proofs (ffwd-arrow) — all fast
+  #   kani-runtime-types:   63 proofs (ffwd-runtime + ffwd-types) — all fast
+  #   kani-io-output:       59 proofs (ffwd-io + ffwd-output +
+  #                        ffwd-diagnostics + ffwd binary) — all fast
+  #
+  # All shards use --jobs 2 (not 3 or 4). CBMC solver processes consume
+  # 3-5 GB each; at --jobs 3+ on 16 GB runners, memory pressure causes
+  # OOM kills or runner preemption (manifests as "runner shutdown signal"
+  # after only minutes). --jobs 2 keeps peak memory under ~10 GB.
+  #
+  # The core shard gets 120 min (slow proofs need it on main).
+  # Arrow gets 60 min (finishes in ~5 min, but needs compilation time).
+  # Runtime and IO shards get 120 min for cold-cache variance.
   # -------------------------------------------------------------------------
   kani-core:
     name: Kani proofs (core)
@@ -404,7 +408,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 
@@ -413,18 +417,19 @@ jobs:
           save-if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
           key: kani-core
 
-      - name: Run Kani verification (ffwd-core)
+      - name: Run Kani verification (ffwd-core + ffwd-kani)
         uses: model-checking/kani-github-action@v1
         with:
           args: >-
             --solver kissat
-            --jobs 3
+            --jobs 2
             --output-format terse
             -Z function-contracts
             -Z mem-predicates
             -Z stubbing
             -p ffwd-kani
             -p ffwd-core
+            ${{ (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '--features kani-slow' || '' }}
 
   kani-arrow:
     name: Kani proofs (arrow)
@@ -434,7 +439,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -446,14 +451,11 @@ jobs:
       - name: Run Kani verification (ffwd-arrow --lib)
         # ffwd-arrow has a binary with required-features that cargo-kani
         # cannot skip, so verify only the library target.
-        # --jobs 4: arrow proofs are the heaviest per-proof (up to ~90s each
-        # on the make_string_view/scatter families) so saturating all 4
-        # vCPUs here gives more wall-clock return than on the other shards.
         uses: model-checking/kani-github-action@v1
         with:
           args: >-
             --solver kissat
-            --jobs 4
+            --jobs 2
             --output-format terse
             -Z function-contracts
             -Z mem-predicates
@@ -485,7 +487,7 @@ jobs:
         with:
           args: >-
             --solver kissat
-            --jobs 3
+            --jobs 2
             --output-format terse
             -Z function-contracts
             -Z mem-predicates
@@ -518,7 +520,7 @@ jobs:
         with:
           args: >-
             --solver kissat
-            --jobs 3
+            --jobs 2
             --output-format terse
             -Z function-contracts
             -Z mem-predicates
