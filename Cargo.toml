@@ -62,7 +62,7 @@ backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 bytes = "1"
 chrono = { version = "0.4.44", default-features = false }
 clap = "4.5"
-clap_complete = "4.5"
+clap_complete = "4.6"
 clap_complete_nushell = "4.6"
 config = { version = "0.15.22", default-features = false }
 arrow-json = "58"
