@@ -188,6 +188,7 @@ fn pushdown_config() -> ScanConfig {
         extract_all: false,
         line_field_name: None,
         validate_utf8: false,
+        row_predicate: None,
     }
 }
 
@@ -197,6 +198,7 @@ fn select_star() -> ScanConfig {
         extract_all: true,
         line_field_name: None,
         validate_utf8: false,
+        row_predicate: None,
     }
 }
 
