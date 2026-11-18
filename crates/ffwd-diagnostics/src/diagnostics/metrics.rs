@@ -319,6 +319,9 @@ impl PipelineMetrics {
     }
 
     pub fn dec_channel_depth(&self) {
+        // `fetch_update` is deprecated in favor of `try_update` (Rust 1.100), but
+        // `try_update` is newer than the workspace MSRV (1.89).
+        #[allow(deprecated)]
         let _ = self
             .channel_depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));

@@ -253,9 +253,7 @@ fn finalize_fanout_outcome(
 
 impl Sink for AsyncFanoutSink {
     fn begin_batch(&mut self) {
-        for state in &mut self.states {
-            *state = ChildState::Pending;
-        }
+        self.states.fill(ChildState::Pending);
         for sink in &mut self.sinks {
             sink.begin_batch();
         }

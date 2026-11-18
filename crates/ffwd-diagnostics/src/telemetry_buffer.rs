@@ -667,7 +667,7 @@ pub fn sample_all_metrics(
                 description: "Current bottleneck stage",
                 unit: "1",
                 value: MetricValue::U64(1),
-                attributes: vec![("pipeline", pipeline.clone()), ("stage", stage.to_string())],
+                attributes: vec![("pipeline", pipeline), ("stage", stage.to_string())],
                 time_unix_nano: now,
             });
         }
