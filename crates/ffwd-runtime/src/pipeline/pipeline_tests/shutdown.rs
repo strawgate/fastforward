@@ -138,8 +138,10 @@ impl InputSource for OneLinePerPollInput {
 }
 
 /// Blocks every send until `release` is cancelled, then counts delivered rows.
+/// `entered` is set as soon as the first batch reaches the sink.
 struct GatedCountingSink {
     release: CancellationToken,
+    entered: Arc<std::sync::atomic::AtomicBool>,
     rows: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -150,6 +152,7 @@ impl Sink for GatedCountingSink {
         _metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
+            self.entered.store(true, Ordering::Relaxed);
             self.release.cancelled().await;
             self.rows
                 .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
@@ -178,13 +181,16 @@ impl Sink for GatedCountingSink {
 ///
 /// The test is deterministic rather than timing-based:
 /// 1. DrainIngress is queued before `run_async` starts. The run loop's biased
-///    `select!` polls the control channel before the input channel, so it is
-///    handled before any data batch.
+///    `select!` polls the control channel before the input channel, so a batch
+///    reaching the sink proves DrainIngress was already handled. The driver
+///    waits for that before cancelling; otherwise a descheduled run loop could
+///    see shutdown first and the test would pass even with the bug.
 /// 2. The sink blocks, and the single output worker has a one-slot queue, so
 ///    the run loop stalls in `pool.submit` and later batches pile up in the
 ///    bounded input channel.
-/// 3. Once every line has been transformed and the channel holds batches,
-///    shutdown is cancelled and only then is the sink released.
+/// 3. Once a batch is at the sink, every line has been transformed, and the
+///    channel holds batches, shutdown is cancelled and only then is the sink
+///    released.
 ///
 /// Every line must reach the sink. With the bug, the queued batches are lost.
 // `serial` keeps this test from overlapping the `#[serial]` failpoint tests:
@@ -208,6 +214,7 @@ async fn drain_ingress_then_shutdown_delivers_queued_batches() {
 
     let release = CancellationToken::new();
     let delivered_rows = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sink_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
     // One line per batch: each poll yields one line and flushes immediately.
@@ -218,6 +225,7 @@ async fn drain_ingress_then_shutdown_delivers_queued_batches() {
         .with_input("one-line", Box::new(OneLinePerPollInput::new(LINES as usize)))
         .with_sink(Box::new(GatedCountingSink {
             release: release.clone(),
+            entered: Arc::clone(&sink_entered),
             rows: Arc::clone(&delivered_rows),
         }));
 
@@ -230,12 +238,14 @@ async fn drain_ingress_then_shutdown_delivers_queued_batches() {
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
     let gate = release.clone();
+    let entered = Arc::clone(&sink_entered);
     let driver = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let transformed = metrics.transform_in.lines_total.load(Ordering::Relaxed);
             let queued = metrics.channel_depth.load(Ordering::Relaxed);
-            if transformed == LINES && queued > 0 {
+            let at_sink = entered.load(Ordering::Relaxed);
+            if at_sink && transformed == LINES && queued > 0 {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -243,7 +253,7 @@ async fn drain_ingress_then_shutdown_delivers_queued_batches() {
                 gate.cancel();
                 panic!(
                     "setup did not queue batches in the input channel \
-                     (transformed={transformed}, queued={queued})"
+                     (at_sink={at_sink}, transformed={transformed}, queued={queued})"
                 );
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
