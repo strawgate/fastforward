@@ -192,12 +192,12 @@ fn validate_transform_probe_read_only(
             .collect()
     };
 
-    // Probe value "0" stays valid when DataFusion coerces a string column to a
-    // number (e.g. `status >= 400` casts `status` to Int64), so the probe only
-    // fails on genuine planning errors.
+    // Null probe values survive any cast DataFusion inserts (e.g. `status >= 400`
+    // casts `status` to Int64) and cannot trigger value errors such as division
+    // by zero, so the probe only fails on genuine planning errors.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
-        .map(|_| Arc::new(StringArray::from(vec![Some("0")])) as ArrayRef)
+        .map(|_| Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef)
         .collect();
 
     if source_metadata == SourceMetadataStyle::Fastforward {
@@ -1200,5 +1200,33 @@ pipelines:
                 failures
             );
         }
+    }
+
+    #[test]
+    fn transform_probe_accepts_numeric_comparison_and_division() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/logs.json
+        format: json
+    transform: SELECT 100 / int(duration_ms) AS rate FROM logs WHERE status >= 400
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
     }
 }
