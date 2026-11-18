@@ -99,6 +99,8 @@
         Ok,
         RetryAfter(Duration),
         Rejected(&'static str),
+        /// The send never completes.
+        Hang,
     }
 
     struct ScriptedSink {
@@ -123,6 +125,7 @@
                     ScriptedResult::Ok => SendResult::Ok,
                     ScriptedResult::RetryAfter(d) => SendResult::RetryAfter(d),
                     ScriptedResult::Rejected(msg) => SendResult::Rejected(msg.to_string()),
+                    ScriptedResult::Hang => std::future::pending::<SendResult>().await,
                 }
             })
         }

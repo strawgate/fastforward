@@ -171,7 +171,8 @@ drain timeout. When the window closes, a worker in backoff gives up at once and 
 transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
 advanced). The window bounds retries cooperatively: a retry can still start at or just after
 expiry, and a retry that is mid-send is abandoned at its next poll, with the batch held
-(at-least-once). A batch's first attempt still runs until it completes or the drain timeout
+(at-least-once). Because an abandoned send can leave the sink mid-request, that worker then
+holds its remaining batches without sending them. A batch's first attempt still runs until it completes or the drain timeout
 cancels the worker. Without a bound, a down
 output held every shutdown open for the full pool drain timeout (60s), which is longer than the Kubernetes default termination grace period (30s).
 A 10s default leaves room inside that period while still riding out a short collector

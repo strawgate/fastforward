@@ -134,6 +134,44 @@
     }
 
     #[tokio::test(start_paused = true)]
+    async fn pool_does_not_reuse_sink_after_abandoning_a_retry_send() {
+        // Batch 1: the first send asks for a retry, the retry hangs and is
+        // abandoned when the 3s window closes. Batch 2 must then be held
+        // without sending, because the abandoned send may have left the sink
+        // mid-record. The trailing Ok would be consumed if it were sent.
+        let factory = Arc::new(ScriptedSinkFactory::new(
+            "scripted",
+            vec![
+                ScriptedResult::RetryAfter(Duration::from_secs(1)),
+                ScriptedResult::Hang,
+                ScriptedResult::Ok,
+            ],
+        ));
+        let mut pool = OutputWorkerPool::new(
+            Arc::clone(&factory) as Arc<dyn SinkFactory>,
+            1,
+            Duration::from_secs(60),
+            test_metrics(),
+        );
+        pool.set_shutdown_retry_grace(Duration::from_secs(3));
+
+        pool.stop_retrying();
+        pool.submit(empty_work_item()).await;
+        pool.submit(empty_work_item()).await;
+        pool.drain(Duration::from_secs(60)).await;
+
+        for _ in 0..2 {
+            let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
+            assert_eq!(ack.outcome, DeliveryOutcome::PoolClosed);
+        }
+        assert_eq!(
+            factory.steps.lock().unwrap().len(),
+            1,
+            "the second batch must not be sent through the interrupted sink"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pool_zero_shutdown_grace_does_not_retry() {
         let factory = Arc::new(ScriptedSinkFactory::new(
             "scripted",

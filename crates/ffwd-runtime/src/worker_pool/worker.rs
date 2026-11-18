@@ -42,6 +42,10 @@ pub(super) async fn worker_task(
         output_health: Arc::clone(&output_health),
         worker_id: id,
     };
+    // Set once a retry send was dropped mid-flight when the shutdown retry
+    // window closed. The sink may then hold partial state, so later batches
+    // on this worker are held for replay without being sent.
+    let mut is_send_abandoned = false;
     loop {
         tokio::select! {
             biased; // check cancel first
@@ -83,7 +87,14 @@ pub(super) async fn worker_task(
                             resp_bytes = tracing::field::Empty,
                         );
                         let output_name = sink.name().to_string();
-                        let process_result = AssertUnwindSafe(
+                        let process_result = if is_send_abandoned {
+                            tracing::info!(
+                                worker_id = id,
+                                "worker_pool: output send was abandoned at shutdown; batch held for replay without sending"
+                            );
+                            Ok((DeliveryOutcome::PoolClosed, 0, 0))
+                        } else {
+                            AssertUnwindSafe(
                             process_item(
                                 ProcessItemContext {
                                     worker_id: id,
@@ -93,6 +104,7 @@ pub(super) async fn worker_task(
                                     max_retry_delay,
                                     cancel: &cancel,
                                     stop_retrying: &stop_retrying,
+                                    is_send_abandoned: &mut is_send_abandoned,
                                     #[cfg(feature = "turmoil")]
                                     batch_id,
                                 },
@@ -101,7 +113,8 @@ pub(super) async fn worker_task(
                             .instrument(output_span.clone()),
                         )
                         .catch_unwind()
-                        .await;
+                        .await
+                        };
                         let mut recycle_worker_after_ack = false;
                         let (outcome, send_latency_ns, retries) = match process_result {
                             Ok(result) => result,
@@ -208,6 +221,10 @@ pub(super) struct ProcessItemContext<'a> {
     pub(super) cancel: &'a tokio_util::sync::CancellationToken,
     /// Graceful-shutdown signal: once fired, a failed send is not retried.
     pub(super) stop_retrying: &'a tokio_util::sync::CancellationToken,
+    /// Set when a retry send was dropped mid-flight because the retry window
+    /// closed. The sink may hold partial state (for example half a record on
+    /// a TCP stream), so the worker must not send through it again.
+    pub(super) is_send_abandoned: &'a mut bool,
     #[cfg(feature = "turmoil")]
     /// Turmoil-only batch id used for deterministic barrier injection.
     pub(super) batch_id: u64,
@@ -333,6 +350,7 @@ pub(super) async fn process_item(
                     worker_id,
                     "worker_pool: shutdown retry window closed during a retry send; batch held for replay"
                 );
+                *context.is_send_abandoned = true;
                 send_latency_ns += send_start.elapsed().as_nanos() as u64;
                 return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
             }
@@ -761,6 +779,7 @@ mod tests {
                 max_retry_delay: Duration::from_millis(10),
                 cancel: &cancel,
                 stop_retrying: &CancellationToken::new(),
+                is_send_abandoned: &mut false,
                 #[cfg(feature = "turmoil")]
                 batch_id: 0, // test only
             },
@@ -798,6 +817,7 @@ mod tests {
                     max_retry_delay: Duration::from_secs(30),
                     cancel: &cancel,
                     stop_retrying: &stop_retrying,
+                    is_send_abandoned: &mut false,
                     #[cfg(feature = "turmoil")]
                     batch_id: 0, // test only
                 },
@@ -846,6 +866,7 @@ mod tests {
                 max_retry_delay: Duration::from_millis(100),
                 cancel: &cancel,
                 stop_retrying: &stop_retrying,
+                is_send_abandoned: &mut false,
                 #[cfg(feature = "turmoil")]
                 batch_id: 0, // test only
             },
@@ -892,6 +913,7 @@ mod tests {
                 max_retry_delay: Duration::from_secs(30),
                 cancel: &cancel,
                 stop_retrying: &stop_retrying,
+                is_send_abandoned: &mut false,
                 #[cfg(feature = "turmoil")]
                 batch_id: 0, // test only
             },

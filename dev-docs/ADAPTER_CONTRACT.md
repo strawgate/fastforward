@@ -309,8 +309,10 @@ The file path is:
   checkpoint not advanced). Stopping is cooperative, not a hard barrier: a
   retry can start at or just after the window closes, and a retry that is
   mid-send is abandoned the next time the worker polls it. Either way the
-  batch is held, so a send that did land is replayed (at-least-once). A
-  batch's first attempt is not cut short: it runs until it
+  batch is held, so a send that did land is replayed (at-least-once). An
+  abandoned send can leave the sink mid-request (for example half a record on
+  a TCP stream), so that worker then holds its remaining batches without
+  sending them. A batch's first attempt is not cut short: it runs until it
   completes, hits the per-batch send timeout, or the pool drain timeout
   cancels the worker.
   For an output that refuses connections or returns errors, shutdown therefore
