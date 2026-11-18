@@ -1,7 +1,7 @@
 //! Ordered map used by the pipeline state machines.
 //!
 //! Normal builds use `alloc::collections::BTreeMap`. Kani builds use
-//! [`ArrayMap`], a small sorted array with the same observable behavior for
+//! `ArrayMap`, a small sorted array with the same observable behavior for
 //! the methods the pipeline uses.
 //!
 //! Why: CBMC cannot bound a B-tree's height, so every `BTreeMap` operation
@@ -13,7 +13,7 @@
 //! The Kani proofs therefore verify the state-machine logic against this
 //! model, not `BTreeMap` itself. `ArrayMap` has its own tests that check it
 //! against `BTreeMap` (`cargo test -p ffwd-types ord_map`). Its capacity is
-//! [`KANI_MAP_CAPACITY`]; going past it panics, which a proof reports as a
+//! `KANI_MAP_CAPACITY`; going past it panics, which a proof reports as a
 //! failure rather than hiding.
 
 #[cfg(not(kani))]
