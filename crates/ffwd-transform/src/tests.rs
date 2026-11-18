@@ -1775,3 +1775,140 @@ fn test_scan_config_selective_query_does_not_set_line_field() {
         "scan_config.extract_all must be false for a selective query"
     );
 }
+
+// --- Plan cache across batches ---
+
+/// Build a one-column Utf8 batch named `col`.
+fn utf8_batch(col: &str, values: &[&str]) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![Field::new(col, DataType::Utf8, true)]));
+    let array: ArrayRef = Arc::new(StringArray::from(values.to_vec()));
+    RecordBatch::try_new(schema, vec![array]).expect("valid batch")
+}
+
+fn utf8_values(batch: &RecordBatch, col: &str) -> Vec<String> {
+    let array = arrow::compute::cast(
+        batch.column_by_name(col).expect("column present"),
+        &DataType::Utf8,
+    )
+    .expect("castable to Utf8");
+    let array = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("Utf8 array");
+    (0..array.len()).map(|i| array.value(i).to_string()).collect()
+}
+
+/// Enrichment table whose snapshot the test can change between batches.
+struct MutableTable {
+    name: &'static str,
+    snapshot: std::sync::Mutex<Option<RecordBatch>>,
+}
+
+impl MutableTable {
+    fn set(&self, batch: Option<RecordBatch>) {
+        *self.snapshot.lock().expect("lock") = batch;
+    }
+}
+
+impl enrichment::EnrichmentTable for MutableTable {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn snapshot(&self) -> Option<RecordBatch> {
+        self.snapshot.lock().expect("lock").clone()
+    }
+}
+
+#[test]
+fn cached_plan_reads_each_new_batch() {
+    let mut transform = SqlTransform::new("SELECT msg FROM logs WHERE level = 'ERROR'").unwrap();
+
+    let first = transform.execute_blocking(make_test_batch()).unwrap();
+    assert_eq!(utf8_values(&first, "msg"), ["disk full", "oom killed"]);
+    assert!(transform.plan.is_some(), "plan is cached after the first batch");
+
+    let schema = make_test_batch().schema();
+    let second = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["ERROR", "INFO"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["fresh", "ignored"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["1", "2"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let second = transform.execute_blocking(second).unwrap();
+    assert_eq!(utf8_values(&second, "msg"), ["fresh"]);
+}
+
+#[test]
+fn schema_change_replans_against_new_columns() {
+    let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+
+    let first = transform.execute_blocking(utf8_batch("a", &["1"])).unwrap();
+    assert!(first.column_by_name("a").is_some());
+
+    let second = transform.execute_blocking(utf8_batch("b", &["2"])).unwrap();
+    assert!(second.column_by_name("a").is_none());
+    assert_eq!(utf8_values(&second, "b"), ["2"]);
+}
+
+#[test]
+fn cached_plan_sees_updated_enrichment_snapshot() {
+    let env = Arc::new(MutableTable {
+        name: "env",
+        snapshot: std::sync::Mutex::new(Some(utf8_batch("environment", &["staging"]))),
+    });
+    let mut transform =
+        SqlTransform::new("SELECT env.environment FROM logs CROSS JOIN env").unwrap();
+    transform
+        .add_enrichment_table(Arc::clone(&env) as Arc<dyn enrichment::EnrichmentTable>)
+        .unwrap();
+
+    let first = transform.execute_blocking(utf8_batch("a", &["x"])).unwrap();
+    assert_eq!(utf8_values(&first, "environment"), ["staging"]);
+
+    env.set(Some(utf8_batch("environment", &["production"])));
+    let second = transform.execute_blocking(utf8_batch("a", &["x"])).unwrap();
+    assert_eq!(utf8_values(&second, "environment"), ["production"]);
+}
+
+#[test]
+fn enrichment_table_loaded_after_first_batch_is_planned() {
+    let env = Arc::new(MutableTable {
+        name: "env",
+        snapshot: std::sync::Mutex::new(None),
+    });
+    let mut transform =
+        SqlTransform::new("SELECT env.environment FROM logs CROSS JOIN env").unwrap();
+    transform
+        .add_enrichment_table(Arc::clone(&env) as Arc<dyn enrichment::EnrichmentTable>)
+        .unwrap();
+
+    assert!(
+        transform.execute_blocking(utf8_batch("a", &["x"])).is_err(),
+        "unloaded enrichment table is not queryable"
+    );
+
+    env.set(Some(utf8_batch("environment", &["production"])));
+    let loaded = transform.execute_blocking(utf8_batch("a", &["x"])).unwrap();
+    assert_eq!(utf8_values(&loaded, "environment"), ["production"]);
+
+    env.set(None);
+    assert!(
+        transform.execute_blocking(utf8_batch("a", &["x"])).is_err(),
+        "unloaded snapshot is not served from the cached plan"
+    );
+}
+
+#[test]
+fn cached_plan_evaluates_now_per_batch() {
+    let mut transform = SqlTransform::new("SELECT CAST(now() AS VARCHAR) AS t FROM logs").unwrap();
+
+    let first = transform.execute_blocking(utf8_batch("a", &["x"])).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = transform.execute_blocking(utf8_batch("a", &["x"])).unwrap();
+
+    assert_ne!(utf8_values(&first, "t"), utf8_values(&second, "t"));
+}

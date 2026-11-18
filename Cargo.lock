@@ -2413,6 +2413,7 @@ name = "ffwd-transform"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "bytes",
  "csv",
  "datafusion",
