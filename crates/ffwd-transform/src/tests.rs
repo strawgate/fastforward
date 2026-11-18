@@ -156,11 +156,53 @@ fn string_column_compared_to_number_uses_numeric_order() {
 }
 
 #[test]
-fn non_numeric_string_compared_to_number_errors() {
+fn non_numeric_string_compared_to_number_does_not_match() {
+    // make_test_batch has status "200", "500", "not_a_number", "503".
     let batch = make_test_batch();
-    let mut transform = SqlTransform::new("SELECT * FROM logs WHERE status >= 400").unwrap();
-    let err = transform.execute_blocking(batch).unwrap_err();
-    assert!(err.to_string().contains("Cannot cast string"), "{err}");
+    let mut transform = SqlTransform::new("SELECT msg FROM logs WHERE status >= 400").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    assert_eq!(result.num_rows(), 2);
+    assert_utf8_column_value(&result, "msg", 0, "disk full");
+    assert_utf8_column_value(&result, "msg", 1, "oom killed");
+}
+
+#[test]
+fn non_numeric_string_in_between_and_in_list_does_not_match() {
+    let batch = make_test_batch();
+    let mut transform = SqlTransform::new(
+        "SELECT msg FROM logs WHERE status BETWEEN 400 AND 599 OR status IN (200, 201)",
+    )
+    .unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    assert_eq!(result.num_rows(), 3);
+    assert_utf8_column_value(&result, "msg", 0, "started");
+    assert_utf8_column_value(&result, "msg", 1, "disk full");
+    assert_utf8_column_value(&result, "msg", 2, "oom killed");
+}
+
+#[test]
+fn string_number_comparison_in_projection_keeps_column_name() {
+    let batch = make_test_batch();
+    let mut transform = SqlTransform::new("SELECT status >= 400 FROM logs").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    let name = result.schema().field(0).name().clone();
+    assert_eq!(name, "logs.status >= Int64(400)");
+    let flags = result
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
+    assert!(!flags.value(0));
+    assert!(flags.value(1));
+    assert!(flags.is_null(2));
+    assert!(flags.value(3));
+}
+
+#[test]
+fn explicit_cast_of_non_numeric_string_still_errors() {
+    let batch = make_test_batch();
+    let mut transform = SqlTransform::new("SELECT CAST(status AS BIGINT) AS s FROM logs").unwrap();
+    assert!(transform.execute_blocking(batch).is_err());
 }
 
 #[test]

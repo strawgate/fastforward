@@ -207,7 +207,11 @@ impl SqlTransform {
         if self.ctx.is_some() {
             return;
         }
-        let ctx = SessionContext::new();
+        let state = datafusion::execution::SessionStateBuilder::new()
+            .with_default_features()
+            .with_analyzer_rules(crate::lenient_comparison::analyzer_rules())
+            .build();
+        let ctx = SessionContext::new_with_state(state);
 
         // Register custom UDFs once — they persist across batches.
         ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));

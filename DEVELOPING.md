@@ -419,6 +419,6 @@ In `_bench-pair`, the receiver diagnostics HTTP server (`/ready`) can return `20
 
 Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pipeline is registered), then sleep 1 second to let `run_async()` complete socket binding before spawning the sender. Without this grace period, the race window is ~1 ms and triggers roughly 10 % of the time on loaded CI runners. (See PR #1320.)
 
-### DataFusion compares string columns to numbers numerically
+### String-vs-number comparisons are made lenient by an analyzer rule
 
-Since DataFusion 55, `WHERE status >= 400` on a Utf8 `status` column casts the column to Int64 instead of the literal to text. Non-numeric values (`'N/A'`) make the cast, and the whole batch, fail. Mixed-type fields are normalized to Utf8, so they hit this; prefer `int(status)` in SQL. Synthetic probe batches (e.g. `ff validate`) must use null values, not placeholder strings like `"x"` (cast error) or `"0"` (division by zero).
+DataFusion (55+) coerces `WHERE status >= 400` on a Utf8 column by strictly casting the column to Int64, so one non-numeric value (`'N/A'`) fails the query and the pipeline drops the whole batch. `ffwd-transform/src/lenient_comparison.rs` runs before DataFusion's `TypeCoercion` and wraps the string side in `TRY_CAST` for comparisons, `BETWEEN` and `IN`; explicit `CAST` stays strict. If you build a `SessionContext` elsewhere, install `lenient_comparison::analyzer_rules()` too. Synthetic probe batches (e.g. `ff validate`) should use null values, not placeholder strings, so value errors like division by zero don't appear.
