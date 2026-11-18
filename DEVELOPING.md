@@ -418,3 +418,7 @@ Both use the same `StreamingBuilder` (which implements `ScanBuilder`), sharing t
 In `_bench-pair`, the receiver diagnostics HTTP server (`/ready`) can return `200 OK` before `run_async()` has finished binding the actual TCP/UDP receiver sockets. Starting the sender immediately after the readiness check causes intermittent connection-refused failures in CI.
 
 Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pipeline is registered), then sleep 1 second to let `run_async()` complete socket binding before spawning the sender. Without this grace period, the race window is ~1 ms and triggers roughly 10 % of the time on loaded CI runners. (See PR #1320.)
+
+### DataFusion compares string columns to numbers numerically
+
+Since DataFusion 55, `WHERE status >= 400` on a Utf8 `status` column casts the column to Int64 instead of the literal to text. Non-numeric values (`'N/A'`) make the cast, and the whole batch, fail. Mixed-type fields are normalized to Utf8, so they hit this; prefer `int(status)` in SQL. Synthetic probe batches (e.g. `ff validate`) must use null values, not placeholder strings like `"x"` (cast error) or `"0"` (division by zero).
