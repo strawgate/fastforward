@@ -379,9 +379,10 @@ jobs:
   # the slowest one finishes within the hosted-runner budget.
   #
   # Fast vs slow proofs:
-  #   Proofs gated behind `kani-slow` feature (>30s solver time) run only
-  #   on push-to-main and ci:full PRs. PR CI runs fast proofs only (~5 min
-  #   wall-clock for core shard vs ~45+ min with slow proofs).
+  #   Proofs gated behind the `kani-slow` feature (>30s solver time) run in
+  #   the nightly workflow (nightly-testing.yml, job kani-slow) and on PRs
+  #   labelled `ci:full`. PR and push-to-main CI run fast proofs only, so
+  #   a single slow harness can no longer hold main red.
   #
   # Observed proof counts and timing constraints:
   #   kani-core:           ~130 fast + ~15 slow proofs (ffwd-core + ffwd-kani)
@@ -396,7 +397,7 @@ jobs:
   # OOM kills or runner preemption (manifests as "runner shutdown signal"
   # after only minutes). --jobs 2 keeps peak memory under ~10 GB.
   #
-  # The core shard gets 120 min (slow proofs need it on main).
+  # The core shard gets 120 min (headroom for ci:full PRs).
   # Arrow gets 60 min (finishes in ~5 min, but needs compilation time).
   # Runtime and IO shards get 120 min for cold-cache variance.
   # -------------------------------------------------------------------------
@@ -429,7 +430,7 @@ jobs:
             -Z stubbing
             -p ffwd-kani
             -p ffwd-core
-            ${{ (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '--features kani-slow' || '' }}
+            ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') && '--features kani-slow' || '' }}
 
   kani-arrow:
     name: Kani proofs (arrow)

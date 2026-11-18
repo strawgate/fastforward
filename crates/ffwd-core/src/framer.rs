@@ -254,6 +254,9 @@ mod verification {
     /// Prove NewlineFramer produces correct line content — each returned
     /// range contains no newlines, and boundaries align with actual \n bytes.
     /// This is the oracle proof — verifies the framer produces the same lines as naive split-on-newline.
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(18)]

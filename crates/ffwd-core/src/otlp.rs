@@ -236,12 +236,17 @@ pub fn decode_varint(buf: &[u8], pos: usize) -> Result<(u64, usize), &'static st
         }
         let byte = buf[i];
         i += 1;
+        // The 10th byte (shift 63) holds only bit 63 of the u64; any higher
+        // payload bit would be silently shifted out.
+        if shift == 63 && byte & 0x7F > 1 {
+            return Err("varint: too many bytes");
+        }
         value |= ((byte & 0x7F) as u64) << shift;
         if byte & 0x80 == 0 {
             return Ok((value, i));
         }
         shift += 7;
-        if shift >= 64 || (shift == 63 && byte & 0x7F > 1) {
+        if shift >= 64 {
             return Err("varint: too many bytes");
         }
     }
@@ -745,6 +750,21 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_varint_accepts_ten_byte_u64_max() {
+        use alloc::vec::Vec;
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, u64::MAX);
+        assert_eq!(buf.len(), 10);
+        assert_eq!(decode_varint(&buf, 0), Ok((u64::MAX, 10)));
+    }
+
+    #[test]
+    fn decode_varint_rejects_tenth_byte_payload_above_one() {
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        assert!(decode_varint(&buf, 0).is_err());
+    }
 
     #[test]
     fn skip_field_length_overflow_rejected() {
@@ -1284,7 +1304,9 @@ mod verification {
     #[kani::solver(kissat)]
     pub(super) fn verify_bytes_field_total_size_vs_oracle() {
         let field_number: u32 = kani::any();
-        let data_len: usize = kani::any();
+        // Leave headroom for the up-to-20 varint bytes so the sum cannot
+        // overflow; no real payload is within 20 bytes of usize::MAX.
+        let data_len: usize = kani::any_where(|&l: &usize| l <= usize::MAX - 20);
         kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
         kani::cover!(data_len == 0, "empty payload reachable");
         kani::cover!(data_len > 0, "non-empty payload reachable");
@@ -1727,9 +1749,12 @@ mod verification {
     }
 
     /// Prove encode_bytes_field content correctness: tag + length + exact data.
-    #[kani::solver(kissat)]
-    #[kani::proof]
-    #[kani::unwind(12)]
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::solver(kissat))]
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(12))]
     pub(super) fn verify_encode_bytes_field_content() {
         let field_number: u32 = kani::any();
         kani::assume(field_number > 0 && field_number <= 100);
@@ -1908,7 +1933,7 @@ mod verification {
     /// Prove hex_decode roundtrip: for any 16-byte array, hex-encoding then
     /// decoding yields the original bytes.
     #[kani::proof]
-    #[kani::unwind(17)] // 16 bytes + 1
+    #[kani::unwind(33)] // hex_decode validates all 32 input bytes in one loop, + 1
     pub(super) fn verify_hex_decode_roundtrip() {
         let original: [u8; 16] = kani::any();
         // Hex-encode
@@ -2160,6 +2185,9 @@ mod verification {
     /// Bounded to 4 data bytes (vs 8) to keep solver under 60s.
     /// unwind(12) covers the stub's up-to-10-iteration loop (11 unwinds)
     /// plus the data comparison and extend_from_slice loops.
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::stub(encode_varint, encode_varint_stub)]
     #[kani::unwind(12)]

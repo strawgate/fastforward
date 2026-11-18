@@ -8,7 +8,7 @@ description = "Shared oracle and reference implementations for Kani formal verif
 
 [features]
 # Gate expensive Kani proofs (>30s solver time) so PR CI stays fast.
-# Push-to-main and nightly runs use --features kani-slow to verify everything.
+# The nightly workflow and `ci:full` PRs use --features kani-slow.
 kani-slow = []
 
 [lib]

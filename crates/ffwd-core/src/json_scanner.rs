@@ -2573,6 +2573,9 @@ mod verification {
     /// Keep this harness on a small fixed buffer: the new >32-depth overflow
     /// behavior is covered by unit tests and proptests above, while Kani here
     /// focuses on local crash-freedom and bounds without exploding the search.
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(10)]
     #[kani::solver(cadical)]
@@ -2788,6 +2791,9 @@ mod verification {
     ///
     /// Crash-freedom proof: for any 8-byte input, the function must return
     /// normally (no panic, no OOB access, no infinite loop).
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(16)]
     fn verify_decode_json_escapes_no_panic() {

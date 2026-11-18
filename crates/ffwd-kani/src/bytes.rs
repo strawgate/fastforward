@@ -252,6 +252,8 @@ mod verification {
         kani::cover!(res == 0 && bitmask == 0, "zero result");
     }
 
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof_for_contract(json_escape_oracle)]
     #[kani::unwind(22)]
     fn verify_json_escape_oracle_contract() {
@@ -261,6 +263,8 @@ mod verification {
         kani::cover!(_result.len() <= len.saturating_mul(6), "length bound");
     }
 
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(22)]
     fn verify_json_escape_oracle_no_panic() {

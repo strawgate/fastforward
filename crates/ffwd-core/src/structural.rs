@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 /// quotes, never add them).
 #[inline]
 #[cfg_attr(kani, kani::ensures(|result: &u64| *result & !quote_bits == 0))]
+#[cfg_attr(kani, kani::modifies(prev_odd_backslash))]
 #[verified(kani = "verify_compute_real_quotes_vs_oracle")]
 pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
@@ -891,6 +892,8 @@ mod verification {
 
     /// Verify compute_real_quotes contract: result is submask of quote_bits.
     #[kani::proof_for_contract(compute_real_quotes)]
+    #[kani::unwind(65)] // backslash loop clears at least one bit per iteration
+    #[kani::solver(kissat)]
     fn verify_compute_real_quotes_contract() {
         let quote_bits: u64 = kani::any();
         let bs_bits: u64 = kani::any();

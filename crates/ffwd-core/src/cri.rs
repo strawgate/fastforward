@@ -913,6 +913,9 @@ mod verification {
 
     /// Prove a valid CRI line split across chunks is equivalent to the same
     /// line arriving unsplit through the public CRI-to-buffer entrypoint.
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(64)]
     fn verify_process_cri_split_line_matches_unsplit() {
