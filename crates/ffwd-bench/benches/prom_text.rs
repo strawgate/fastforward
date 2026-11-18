@@ -78,8 +78,13 @@ fn histograms(routes: usize) -> String {
         }
         writeln!(s, "http_request_duration_seconds_sum{{{lbl}}} {}.25", r * 3)
             .expect("write to String");
-        writeln!(s, "http_request_duration_seconds_count{{{lbl}}} {}", r * 9)
-            .expect("write to String");
+        // `_count` equals the `+Inf` bucket, as in a real histogram.
+        writeln!(
+            s,
+            "http_request_duration_seconds_count{{{lbl}}} {}",
+            7 * 17 + r
+        )
+        .expect("write to String");
     }
     s
 }

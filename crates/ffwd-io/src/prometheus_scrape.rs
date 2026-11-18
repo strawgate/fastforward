@@ -295,7 +295,8 @@ async fn run_target(
     }
     let mut ticker = tokio::time::interval(settings.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut builder = PromBatchBuilder::new(PromScanConfig::default());
+    let mut builder = PromBatchBuilder::new(PromScanConfig::default())
+        .with_max_label_columns(settings.max_label_columns);
     let mut failing = false;
     let mut last_error_log: Option<Instant> = None;
     let mut suppressed = 0u64;
@@ -354,7 +355,6 @@ enum ScrapeError {
     TooLarge(usize),
     Gzip(io::Error),
     Parse(PromToArrowError),
-    TooManyLabels(usize, usize),
     Arrow(arrow::error::ArrowError),
 }
 
@@ -366,12 +366,17 @@ impl std::fmt::Display for ScrapeError {
             Self::TooLarge(limit) => write!(f, "body exceeds max_body_bytes ({limit})"),
             Self::Gzip(e) => write!(f, "gzip decode failed: {e}"),
             Self::Parse(e) => write!(f, "{e}"),
-            Self::TooManyLabels(n, limit) => {
-                write!(f, "{n} label columns exceed max_label_columns ({limit})")
-            }
             Self::Arrow(e) => write!(f, "arrow: {e}"),
         }
     }
+}
+
+/// True for `application/openmetrics-text` (any parameters).
+fn is_openmetrics_content_type(value: &[u8]) -> bool {
+    let media = value.split(|&b| b == b';').next().unwrap_or_default();
+    media
+        .trim_ascii()
+        .eq_ignore_ascii_case(b"application/openmetrics-text")
 }
 
 async fn scrape_once(
@@ -407,6 +412,10 @@ async fn scrape_once(
     if resp.content_length().is_some_and(|n| n > limit as u64) {
         return Err(ScrapeError::TooLarge(limit));
     }
+    let resp_is_openmetrics = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .is_some_and(|v| is_openmetrics_content_type(v.as_bytes()));
     let is_gzip = resp
         .headers()
         .get(reqwest::header::CONTENT_ENCODING)
@@ -421,6 +430,9 @@ async fn scrape_once(
         buf.extend_from_slice(&chunk);
     }
     let wire_bytes = buf.len() as u64;
+    // OpenMetrics timestamps are float seconds; the text format uses
+    // integer milliseconds.
+    builder.config_mut().openmetrics = resp_is_openmetrics;
     let body: Bytes = if is_gzip {
         gunzip_limited(&buf, limit)?
     } else {
@@ -428,18 +440,6 @@ async fn scrape_once(
     };
 
     let (batch, _stats) = builder.scan(body).map_err(ScrapeError::Parse)?;
-    let labels = batch
-        .schema()
-        .fields()
-        .iter()
-        .filter(|f| !f.name().starts_with("__"))
-        .count();
-    if labels > settings.max_label_columns {
-        return Err(ScrapeError::TooManyLabels(
-            labels,
-            settings.max_label_columns,
-        ));
-    }
     let batch = finish_batch(
         &batch,
         &settings.job,
@@ -626,6 +626,14 @@ mod tests {
 
     /// Serve `body` to every connection with the given extra header lines.
     fn serve(body: Vec<u8>, extra_headers: &'static str) -> String {
+        serve_typed(body, "text/plain; version=0.0.4", extra_headers)
+    }
+
+    fn serve_typed(
+        body: Vec<u8>,
+        content_type: &'static str,
+        extra_headers: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
@@ -634,7 +642,7 @@ mod tests {
                 let mut req = [0u8; 4096];
                 let _ = stream.read(&mut req);
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(head.as_bytes());
@@ -681,6 +689,30 @@ mod tests {
             assert!(batch.column_by_name("__series_id__").is_some());
             assert_eq!(input.health(), ComponentHealth::Healthy);
         }
+    }
+
+    #[test]
+    fn openmetrics_response_timestamps_are_seconds() {
+        assert!(is_openmetrics_content_type(
+            b"application/openmetrics-text; version=1.0.0; charset=utf-8"
+        ));
+        assert!(!is_openmetrics_content_type(b"text/plain; version=0.0.4"));
+        let url = serve_typed(
+            b"# TYPE up gauge\nup 1 1520879607.789\n# EOF\n".to_vec(),
+            "application/openmetrics-text; version=1.0.0",
+            "",
+        );
+        let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
+        settings.interval = Duration::from_millis(50);
+        let mut input =
+            PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
+                .expect("input");
+        let batch = poll_until_batch(&mut input);
+        let ts = batch
+            .column_by_name(std::str::from_utf8(PROM_TIMESTAMP_FIELD).expect("ascii"))
+            .expect("timestamp")
+            .as_primitive::<arrow::datatypes::Int64Type>();
+        assert_eq!(ts.value(0), 1_520_879_607_789);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! Prometheus text exposition → Arrow `RecordBatch`.
 //!
 //! [`PromBatchBuilder`] drives [`ffwd_core::prom_text::scan_prom_text`] into a
-//! [`ColumnarBatchBuilder`]. The whole scrape body is UTF-8-validated once up
-//! front, so every metric name, label value and `# TYPE` token becomes a
-//! zero-copy `Utf8View` that points into the scrape buffer. Only label values
-//! that contain escapes are copied.
+//! purpose-built dense column builder (`PromColumns`). The scanner validates
+//! the whole scrape body as UTF-8 once up front, so every metric name, label
+//! value and `# TYPE` token becomes a zero-copy `Utf8View` that points into
+//! the scrape buffer. Only label values that contain escapes are copied.
 //!
 //! Output schema (one row per sample):
 //!
@@ -26,8 +26,8 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use bytes::Bytes;
 use ffwd_core::prom_text::{
-    PROM_TIMESTAMP_FIELD, PROM_VALUE_FIELD, PromBuilder, PromParseError, PromScanConfig,
-    PromScanStats, PromScratch, scan_prom_text,
+    PROM_TIMESTAMP_FIELD, PROM_VALUE_FIELD, PromBuilder, PromErrorKind, PromParseError,
+    PromScanConfig, PromScanStats, PromScratch, scan_prom_text,
 };
 use ffwd_core::scanner::ScanBuilder;
 
@@ -116,6 +116,11 @@ pub enum PromToArrowError {
     InvalidUtf8,
     /// The body is larger than the 4 GiB addressable by string views.
     TooLarge,
+    /// The body has more label columns than the configured limit.
+    TooManyLabelColumns {
+        /// The configured limit.
+        limit: usize,
+    },
     /// The exposition is malformed; the whole scrape is rejected.
     Parse(PromParseError),
     /// Arrow materialization failed.
@@ -127,6 +132,9 @@ impl std::fmt::Display for PromToArrowError {
         match self {
             Self::InvalidUtf8 => f.write_str("exposition is not valid UTF-8"),
             Self::TooLarge => f.write_str("exposition exceeds 4 GiB"),
+            Self::TooManyLabelColumns { limit } => {
+                write!(f, "label columns exceed max_label_columns ({limit})")
+            }
             Self::Parse(e) => write!(
                 f,
                 "invalid exposition at line {} (byte {}): {:?}",
@@ -234,6 +242,12 @@ struct PromColumns {
     slots: Vec<(Kind, usize)>,
     index: HashMap<Vec<u8>, usize>,
     row: usize,
+    /// Maximum number of label columns (names not starting with `__`).
+    max_labels: usize,
+    labels: usize,
+    /// Slot that swallows writes once `max_labels` is exceeded, so a
+    /// label-heavy body stops allocating new columns.
+    drop_slot: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -241,6 +255,7 @@ enum Kind {
     Str,
     F64,
     I64,
+    Drop,
 }
 
 impl PromColumns {
@@ -254,7 +269,14 @@ impl PromColumns {
             slots: Vec::new(),
             index: HashMap::new(),
             row: 0,
+            max_labels: usize::MAX,
+            labels: 0,
+            drop_slot: None,
         }
+    }
+
+    fn is_over_limit(&self) -> bool {
+        self.drop_slot.is_some()
     }
 
     fn begin_batch(&mut self, buf: Bytes) {
@@ -266,6 +288,8 @@ impl PromColumns {
         self.slots.clear();
         self.index.clear();
         self.row = 0;
+        self.labels = 0;
+        self.drop_slot = None;
     }
 
     #[inline(always)]
@@ -278,6 +302,7 @@ impl PromColumns {
         let num_rows = self.row;
         let original = Buffer::from(self.buf.clone());
         let decoded = Buffer::from_vec(std::mem::take(&mut self.decoded));
+        let blocks: Arc<[Buffer]> = Arc::from([original.clone(), decoded.clone()]);
         let mut fields = Vec::with_capacity(self.slots.len());
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.slots.len());
         for &(kind, i) in &self.slots {
@@ -313,7 +338,7 @@ impl PromColumns {
                     let array = unsafe {
                         StringViewArray::new_unchecked(
                             ScalarBuffer::from(views),
-                            vec![original.clone(), decoded.clone()],
+                            Arc::clone(&blocks),
                             nulls,
                         )
                     };
@@ -340,6 +365,7 @@ impl PromColumns {
                     fields.push(Field::new(name, DataType::Int64, true));
                     arrays.push(Arc::new(Int64Array::new(values.into(), nulls)));
                 }
+                Kind::Drop => {}
             }
         }
         let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
@@ -358,6 +384,18 @@ impl ScanBuilder for PromColumns {
         if let Some(&idx) = self.index.get(key) {
             return idx;
         }
+        if !key.starts_with(b"__") {
+            if self.labels >= self.max_labels {
+                if let Some(idx) = self.drop_slot {
+                    return idx;
+                }
+                let idx = self.slots.len();
+                self.slots.push((Kind::Drop, 0));
+                self.drop_slot = Some(idx);
+                return idx;
+            }
+            self.labels += 1;
+        }
         let name = String::from_utf8_lossy(key).into_owned();
         let kind = match key {
             PROM_VALUE_FIELD => Kind::F64,
@@ -373,7 +411,7 @@ impl ScanBuilder for PromColumns {
                 self.f64s.push(Column::new(name));
                 self.f64s.len() - 1
             }
-            Kind::I64 => {
+            Kind::I64 | Kind::Drop => {
                 self.i64s.push(Column::new(name));
                 self.i64s.len() - 1
             }
@@ -459,6 +497,21 @@ impl PromBatchBuilder {
         }
     }
 
+    /// Reject bodies with more than `limit` label columns (column names that
+    /// do not start with `__`). The limit is enforced while scanning, so a
+    /// label-heavy body stops allocating columns at the limit.
+    #[must_use]
+    pub fn with_max_label_columns(mut self, limit: usize) -> Self {
+        self.columns.max_labels = limit;
+        self
+    }
+
+    /// Scan options used by the next [`scan`](Self::scan), e.g. to switch
+    /// OpenMetrics timestamp parsing per response.
+    pub fn config_mut(&mut self) -> &mut PromScanConfig {
+        &mut self.config
+    }
+
     /// Parse one scrape body into a `RecordBatch` (one row per sample).
     ///
     /// Any malformed line rejects the whole body, matching Prometheus.
@@ -466,23 +519,33 @@ impl PromBatchBuilder {
         if u32::try_from(body.len()).is_err() {
             return Err(PromToArrowError::TooLarge);
         }
-        if simdutf8_compat::validate(&body).is_err() {
-            return Err(PromToArrowError::InvalidUtf8);
-        }
         self.columns.begin_batch(body.clone());
-        let stats = scan_prom_text(&body, &self.config, &mut self.scratch, &mut self.columns)
-            .map_err(PromToArrowError::Parse)?;
+        let result = self.scan_into_columns(&body);
+        if result.is_err() {
+            // Drop the partial batch and the body reference now rather than
+            // at the next scrape.
+            self.columns.begin_batch(Bytes::new());
+        }
+        result
+    }
+
+    fn scan_into_columns(
+        &mut self,
+        body: &Bytes,
+    ) -> Result<(RecordBatch, PromScanStats), PromToArrowError> {
+        // The scanner validates UTF-8 before emitting any row.
+        let stats = scan_prom_text(body, &self.config, &mut self.scratch, &mut self.columns)
+            .map_err(|e| match e.kind {
+                PromErrorKind::InvalidUtf8 => PromToArrowError::InvalidUtf8,
+                _ => PromToArrowError::Parse(e),
+            })?;
+        if self.columns.is_over_limit() {
+            return Err(PromToArrowError::TooManyLabelColumns {
+                limit: self.columns.max_labels,
+            });
+        }
         let batch = self.columns.finish().map_err(PromToArrowError::Arrow)?;
         Ok((batch, stats))
-    }
-}
-
-/// UTF-8 validation of the full body. `std`'s validator has an ASCII fast
-/// path that processes a word at a time; Prometheus bodies are almost always
-/// pure ASCII.
-mod simdutf8_compat {
-    pub(super) fn validate(bytes: &[u8]) -> Result<(), std::str::Utf8Error> {
-        std::str::from_utf8(bytes).map(|_| ())
     }
 }
 
@@ -606,5 +669,26 @@ mod tests {
         let (batch, stats) = b.scan(Bytes::from_static(b"ok 1\n")).expect("valid");
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(stats.samples, 1);
+    }
+
+    #[test]
+    fn label_column_limit_is_enforced_while_scanning() {
+        let mut b = PromBatchBuilder::default().with_max_label_columns(2);
+        let err = b
+            .scan(Bytes::from_static(
+                b"m{a=\"1\",b=\"2\",c=\"3\",d=\"4\"} 1\n",
+            ))
+            .expect_err("too many labels");
+        assert!(matches!(
+            err,
+            PromToArrowError::TooManyLabelColumns { limit: 2 }
+        ));
+        // The builder recovers, and `__` columns do not count.
+        let (batch, _) = b
+            .scan(Bytes::from_static(
+                b"# TYPE m gauge\nm{a=\"1\",b=\"2\"} 1 5\n",
+            ))
+            .expect("within limit");
+        assert_eq!(batch.num_columns(), 6);
     }
 }

@@ -43,28 +43,64 @@ pub const PROM_TYPE_FIELD: &[u8] = b"__type__";
 /// Prefix for labels whose name collides with a synthetic column
 /// (`__value__`, `__timestamp_ms__`, `__type__`). Such labels are invalid in
 /// Prometheus (the `__` prefix is reserved) but are kept rather than dropped.
+/// Quoted label names that already start with this prefix get it once more,
+/// so `"label:__value__"` and a renamed `__value__` never share a column.
 pub const PROM_RESERVED_LABEL_PREFIX: &[u8] = b"label:";
 
-/// Sample-name suffixes that belong to a declared family (histogram,
-/// summary, gauge histogram, OpenMetrics counter / info / `_created`).
-const FAMILY_SUFFIXES: [&[u8]; 8] = [
-    b"_bucket",
-    b"_sum",
-    b"_count",
-    b"_total",
-    b"_created",
-    b"_info",
-    b"_gcount",
-    b"_gsum",
-];
+/// Metric type declared by a `# TYPE` line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FamilyKind {
+    Counter,
+    Gauge,
+    Histogram,
+    GaugeHistogram,
+    Summary,
+    Info,
+    StateSet,
+    Untyped,
+}
 
-/// True when `sample` is the family `family` itself or one of its component
-/// series (`family` + a suffix from [`FAMILY_SUFFIXES`]).
+impl FamilyKind {
+    /// Parse a type token (case-insensitive, like Prometheus). Covers the
+    /// text 0.0.4 types and the OpenMetrics ones.
+    fn parse(token: &[u8]) -> Option<Self> {
+        const KINDS: [(&[u8], FamilyKind); 9] = [
+            (b"counter", FamilyKind::Counter),
+            (b"gauge", FamilyKind::Gauge),
+            (b"histogram", FamilyKind::Histogram),
+            (b"gaugehistogram", FamilyKind::GaugeHistogram),
+            (b"summary", FamilyKind::Summary),
+            (b"info", FamilyKind::Info),
+            (b"stateset", FamilyKind::StateSet),
+            (b"untyped", FamilyKind::Untyped),
+            (b"unknown", FamilyKind::Untyped),
+        ];
+        KINDS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(token))
+            .map(|&(_, kind)| kind)
+    }
+
+    /// Sample-name suffixes that belong to a family of this type.
+    fn suffixes(self) -> &'static [&'static [u8]] {
+        match self {
+            Self::Counter => &[b"_total", b"_created"],
+            Self::Histogram => &[b"_bucket", b"_sum", b"_count", b"_created"],
+            Self::Summary => &[b"_sum", b"_count", b"_created"],
+            Self::GaugeHistogram => &[b"_bucket", b"_gcount", b"_gsum"],
+            Self::Info => &[b"_info"],
+            Self::Gauge | Self::StateSet | Self::Untyped => &[],
+        }
+    }
+}
+
+/// True when `sample` is the family `family` itself or one of the component
+/// series its type allows (e.g. `_bucket` only for histograms).
 #[inline]
-fn belongs_to_family(sample: &[u8], family: &[u8]) -> bool {
+fn belongs_to_family(sample: &[u8], family: &[u8], kind: FamilyKind) -> bool {
     match sample.strip_prefix(family) {
         Some([]) => true,
-        Some(rest) => FAMILY_SUFFIXES.contains(&rest),
+        Some(rest) => kind.suffixes().contains(&rest),
         None => false,
     }
 }
@@ -117,11 +153,19 @@ pub trait PromBuilder: ScanBuilder {
 pub struct PromScanConfig {
     /// Emit the `# TYPE` of the enclosing family into [`PROM_TYPE_FIELD`].
     pub emit_type: bool,
+    /// Parse timestamps as OpenMetrics float seconds instead of Prometheus
+    /// text integer milliseconds. Set this when the scrape response is
+    /// `application/openmetrics-text`. Either way [`PROM_TIMESTAMP_FIELD`]
+    /// holds milliseconds.
+    pub openmetrics: bool,
 }
 
 impl Default for PromScanConfig {
     fn default() -> Self {
-        Self { emit_type: true }
+        Self {
+            emit_type: true,
+            openmetrics: false,
+        }
     }
 }
 
@@ -145,6 +189,10 @@ pub enum PromErrorKind {
     /// An unquoted metric or label name has a byte outside the legacy
     /// Prometheus name charset. Quote the name to use other characters.
     InvalidName,
+    /// A `# TYPE` line is missing its name or has an unknown type.
+    InvalidType,
+    /// The exposition is not valid UTF-8.
+    InvalidUtf8,
 }
 
 /// A scan failure with its 1-based line number and byte offset.
@@ -179,6 +227,8 @@ pub struct PromScratch {
     /// sample. Label sets repeat in the same order within a family, so a byte
     /// compare against the previous key avoids a hash lookup per label.
     key_cache: Vec<(usize, usize, usize)>,
+    /// Decoded name of the current `# TYPE` family.
+    family_name: Vec<u8>,
 }
 
 impl PromScratch {
@@ -315,7 +365,8 @@ const POW10: [f64; 16] = [
 /// `NaN`, `+Inf`, `-Inf`, long mantissas — falls back to `core`'s
 /// correctly-rounded parser.
 #[inline]
-#[verified(kani = "verify_parse_prom_value_integers")]
+// Exactness of the integer fast path: `verify_parse_prom_value_integers`.
+#[verified(kani = "verify_parse_prom_value_no_panic")]
 pub fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
     let (neg, digits) = match bytes.first() {
         Some(b'-') => (true, bytes.get(1..)?),
@@ -349,7 +400,30 @@ pub fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
         }
     }
     let s = core::str::from_utf8(bytes).ok()?;
-    s.parse::<f64>().ok()
+    let v = s.parse::<f64>().ok()?;
+    // `core` rounds out-of-range literals such as `1e999` to infinity;
+    // Prometheus rejects them. Only an explicit `Inf` may be infinite.
+    if v.is_infinite()
+        && !(digits.eq_ignore_ascii_case(b"inf") || digits.eq_ignore_ascii_case(b"infinity"))
+    {
+        return None;
+    }
+    Some(v)
+}
+
+/// Parse an OpenMetrics timestamp (float seconds) into Unix milliseconds,
+/// rounded to the nearest millisecond.
+fn parse_seconds_as_ms(bytes: &[u8]) -> Option<i64> {
+    let ms = parse_prom_value(bytes)? * 1000.0;
+    // Also rejects NaN and infinities.
+    if !(-9.2e18..9.2e18).contains(&ms) {
+        return None;
+    }
+    Some(if ms >= 0.0 {
+        (ms + 0.5) as i64
+    } else {
+        (ms - 0.5) as i64
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -416,11 +490,14 @@ struct Walker<'a, 'b, B: PromBuilder> {
     value_idx: usize,
     ts_idx: usize,
     type_idx: Option<usize>,
-    /// Current `# TYPE` family name span and type token span.
-    family: Option<(usize, usize, usize, usize)>,
+    /// Parse timestamps as OpenMetrics float seconds.
+    openmetrics: bool,
+    /// Current `# TYPE` type token span and kind. The family name itself is
+    /// decoded into `scratch.family_name`.
+    family: Option<(usize, usize, FamilyKind)>,
     /// Span of the last bare metric name that passed validation. Series of
     /// one family sit on consecutive lines, so most names skip the check.
-    last_name: (usize, usize),
+    last_name: Option<(usize, usize)>,
 }
 
 impl<B: PromBuilder> Walker<'_, '_, B> {
@@ -531,7 +608,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             k.clear();
             k.extend_from_slice(raw);
         }
-        if is_reserved_column(&k) {
+        if is_reserved_column(&k) || k.starts_with(PROM_RESERVED_LABEL_PREFIX) {
             k.splice(0..0, PROM_RESERVED_LABEL_PREFIX.iter().copied());
         }
         let idx = self.builder.resolve_field(&k);
@@ -606,8 +683,12 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                         _ => return Err(self.err(pos, PromErrorKind::InvalidLabels)),
                     }
                 }
+                // A bare quoted string is the metric name, allowed only when
+                // the line has no name yet (`up{"other"}` is an error).
                 Some(c @ (b',' | b'}'))
-                    if quoted_name.is_none() && self.byte(key.0.wrapping_sub(1)) == Some(b'"') =>
+                    if !has_name
+                        && quoted_name.is_none()
+                        && self.byte(key.0.wrapping_sub(1)) == Some(b'"') =>
                 {
                     quoted_name = Some(Quoted {
                         start: key.0,
@@ -625,11 +706,12 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
     }
 
     /// Handle a `#` line starting at `pos`. Returns the position after the
-    /// line, or `None` when `# EOF` ends the exposition.
-    fn comment(&mut self, pos: usize) -> Option<usize> {
+    /// line, or `None` when `# EOF` ends the exposition. Comments other than
+    /// `# TYPE` and `# EOF` are ignored.
+    fn comment(&mut self, pos: usize) -> Result<Option<usize>, PromParseError> {
         let end = crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len());
         let line = &self.buf[pos..end];
-        // Tokenize: "#", keyword, name, rest.
+        // Tokenize: "#", keyword, rest.
         let mut toks = line
             .split(|&b| is_blank(b))
             .filter(|t| !t.is_empty())
@@ -637,23 +719,33 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                 let start = t.as_ptr() as usize - self.buf.as_ptr() as usize;
                 (start, start + t.len())
             });
-        let _hash = toks.next();
+        let hash = toks.next();
+        if hash.map(|(s, e)| &self.buf[s..e]) != Some(b"#") {
+            return Ok(Some(end + 1));
+        }
         let keyword = toks.next();
         match keyword.map(|(s, e)| &self.buf[s..e]) {
             Some(b"TYPE") => {
                 let after_kw = keyword.map_or(end, |(_, e)| e);
-                self.family = self.parse_type_line(after_kw, end);
+                self.family = Some(self.parse_type_line(after_kw, end)?);
             }
-            Some(b"EOF") => return None,
+            // Only a bare `# EOF` ends the exposition; `# EOF pending` is
+            // an ordinary comment.
+            Some(b"EOF") if toks.next().is_none() => return Ok(None),
             _ => {}
         }
-        Some(end + 1)
+        Ok(Some(end + 1))
     }
 
     /// Parse the `<name> <type>` part of a `# TYPE` line in `pos..end`.
-    /// The name may be quoted (UTF-8 metric names); quoted names that contain
-    /// escapes are not matched against samples, so they yield `None`.
-    fn parse_type_line(&self, pos: usize, end: usize) -> Option<(usize, usize, usize, usize)> {
+    /// The name may be quoted (UTF-8 metric names) and is decoded into
+    /// `scratch.family_name`. A missing name, a missing or unknown type, or
+    /// anything after the type is an error, as in Prometheus.
+    fn parse_type_line(
+        &mut self,
+        pos: usize,
+        end: usize,
+    ) -> Result<(usize, usize, FamilyKind), PromParseError> {
         let token_end = |from: usize| {
             let mut i = from;
             while i < end && self.byte(i).is_some_and(|b| !is_blank(b)) {
@@ -662,24 +754,58 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             i
         };
         let p = skip_blanks(self.buf, pos);
-        let (name_start, name_end, after) = if self.byte(p) == Some(b'"') {
+        let invalid = |at: usize| PromParseError {
+            line: self.line,
+            offset: at,
+            kind: PromErrorKind::InvalidType,
+        };
+        let (name_start, name_end, escaped, after) = if self.byte(p) == Some(b'"') {
             let mut q = p + 1;
+            let mut escaped = false;
             loop {
+                if q >= end {
+                    return Err(invalid(p));
+                }
                 match self.byte(q) {
-                    _ if q >= end => return None,
-                    Some(b'\\') => return None,
+                    Some(b'\\') => {
+                        escaped = true;
+                        q += 2;
+                    }
                     Some(b'"') => break,
                     _ => q += 1,
                 }
             }
-            (p + 1, q, q + 1)
+            (p + 1, q, escaped, q + 1)
         } else {
             let e = token_end(p);
-            (p, e, e)
+            (p, e, false, e)
         };
+        if name_end <= name_start || name_end > end {
+            return Err(invalid(p));
+        }
         let ts = skip_blanks(self.buf, after);
         let te = token_end(ts);
-        (name_end > name_start && te > ts && ts < end).then_some((name_start, name_end, ts, te))
+        let kind = if ts < te && te <= end {
+            FamilyKind::parse(&self.buf[ts..te])
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
+            return Err(invalid(ts));
+        };
+        let rest = skip_blanks(self.buf, te);
+        if rest < end {
+            return Err(invalid(rest));
+        }
+        let raw = &self.buf[name_start..name_end];
+        let family = &mut self.scratch.family_name;
+        if escaped {
+            unescape_into(raw, family);
+        } else {
+            family.clear();
+            family.extend_from_slice(raw);
+        }
+        Ok((ts, te, kind))
     }
 
     /// Parse one sample line starting at `pos` (first non-blank byte).
@@ -688,6 +814,11 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
     fn sample(&mut self, pos: usize) -> Result<usize, PromParseError> {
         self.builder.begin_row();
         let r = self.sample_row(pos);
+        if let Ok(next) = r {
+            // Raw sample line, for builders that capture lines.
+            let line_end = (next - 1).min(self.buf.len());
+            self.builder.append_line(&self.buf[pos..line_end]);
+        }
         self.builder.end_row();
         r
     }
@@ -700,12 +831,14 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         } else {
             let q = self.cur.next_from(pos);
             let bare = &self.buf[pos..q];
-            let (ls, le) = self.last_name;
-            if le == ls || self.buf.get(ls..le) != Some(bare) {
+            if self
+                .last_name
+                .is_none_or(|(ls, le)| self.buf.get(ls..le) != Some(bare))
+            {
                 if !is_valid_metric_name(bare) {
                     return Err(self.err(pos, PromErrorKind::InvalidName));
                 }
-                self.last_name = (pos, q);
+                self.last_name = Some((pos, q));
             }
             (
                 Some(Quoted {
@@ -745,7 +878,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         // Optional timestamp, then optional OpenMetrics exemplar.
         match self.byte(p) {
             None | Some(b'\n') => {}
-            Some(b'#') => p = self.skip_exemplar(p),
+            Some(b'#') => p = self.skip_exemplar(p)?,
             Some(_) => {
                 let tend = self.cur.next_from(p);
                 let raw_ts = &self.buf[p..tend];
@@ -753,12 +886,16 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                     [b'+', rest @ ..] if rest.first().is_some_and(u8::is_ascii_digit) => rest,
                     other => other,
                 };
-                let ts = parse_int_fast(raw_ts)
-                    .ok_or_else(|| self.err(p, PromErrorKind::InvalidTimestamp))?;
+                let ts = if self.openmetrics {
+                    parse_seconds_as_ms(raw_ts)
+                } else {
+                    parse_int_fast(raw_ts)
+                }
+                .ok_or_else(|| self.err(p, PromErrorKind::InvalidTimestamp))?;
                 self.builder.append_i64_by_idx(self.ts_idx, ts);
                 p = skip_blanks(self.buf, tend);
                 if self.byte(p) == Some(b'#') {
-                    p = self.skip_exemplar(p);
+                    p = self.skip_exemplar(p)?;
                 }
             }
         }
@@ -767,17 +904,30 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             Some(_) => return Err(self.err(p, PromErrorKind::TrailingGarbage)),
         }
 
-        if let (Some(type_idx), Some((fs, fe, ts, te))) = (self.type_idx, self.family)
-            && belongs_to_family(&self.buf[name.start..name.end], &self.buf[fs..fe])
-        {
-            self.builder.append_str_by_idx(type_idx, &self.buf[ts..te]);
+        if let (Some(type_idx), Some((ts, te, kind))) = (self.type_idx, self.family) {
+            let raw = &self.buf[name.start..name.end];
+            let is_member = if name.escaped {
+                unescape_into(raw, &mut self.scratch.decoded);
+                belongs_to_family(&self.scratch.decoded, &self.scratch.family_name, kind)
+            } else {
+                belongs_to_family(raw, &self.scratch.family_name, kind)
+            };
+            if is_member {
+                self.builder.append_str_by_idx(type_idx, &self.buf[ts..te]);
+            }
         }
         Ok(p + 1)
     }
 
+    /// Skip an OpenMetrics exemplar (` # {labels} value [timestamp]`) whose
+    /// `#` is at `pos`. Anything else after the sample is an error.
     #[inline]
-    fn skip_exemplar(&self, pos: usize) -> usize {
-        crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len())
+    fn skip_exemplar(&self, pos: usize) -> Result<usize, PromParseError> {
+        let open = skip_blanks(self.buf, pos + 1);
+        if open == pos + 1 || self.byte(open) != Some(b'{') {
+            return Err(self.err(pos, PromErrorKind::TrailingGarbage));
+        }
+        Ok(crate::byte_search::find_byte(self.buf, b'\n', open).unwrap_or(self.buf.len()))
     }
 }
 
@@ -788,8 +938,12 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
 /// milliseconds, only when present) and, when enabled,
 /// [`PROM_TYPE_FIELD`].
 ///
+/// `buf` must be valid UTF-8, as the text format requires; anything else is
+/// rejected with [`PromErrorKind::InvalidUtf8`] before any row is emitted.
+///
 /// The caller must have started a batch on `builder` over the same `buf`.
 /// On `Err`, the builder holds a partial batch that must be discarded.
+// Output correctness is also proven by `verify_scan_prom_text_name_value_oracle`.
 #[verified(kani = "verify_scan_prom_text_no_panic")]
 pub fn scan_prom_text<B: PromBuilder>(
     buf: &[u8],
@@ -797,6 +951,18 @@ pub fn scan_prom_text<B: PromBuilder>(
     scratch: &mut PromScratch,
     builder: &mut B,
 ) -> Result<PromScanStats, PromParseError> {
+    if let Err(e) = core::str::from_utf8(buf) {
+        let offset = e.valid_up_to();
+        let line = buf
+            .get(..offset)
+            .map_or(0, |b| b.iter().fold(0, |n, &c| n + usize::from(c == b'\n')))
+            + 1;
+        return Err(PromParseError {
+            line,
+            offset,
+            kind: PromErrorKind::InvalidUtf8,
+        });
+    }
     scratch.key_cache.clear();
     let name_idx = builder.resolve_field(PROM_NAME_FIELD);
     let value_idx = builder.resolve_field(PROM_VALUE_FIELD);
@@ -814,8 +980,9 @@ pub fn scan_prom_text<B: PromBuilder>(
         value_idx,
         ts_idx,
         type_idx,
+        openmetrics: config.openmetrics,
         family: None,
-        last_name: (0, 0),
+        last_name: None,
     };
     let mut stats = PromScanStats::default();
     let mut pos = 0usize;
@@ -825,7 +992,7 @@ pub fn scan_prom_text<B: PromBuilder>(
         match w.byte(pos) {
             None => break,
             Some(b'\n') => pos += 1,
-            Some(b'#') => match w.comment(pos) {
+            Some(b'#') => match w.comment(pos)? {
                 Some(next) => pos = next,
                 None => break,
             },
@@ -852,12 +1019,13 @@ mod tests {
     use proptest::prelude::*;
 
     /// Records every builder call as (column name, rendered value) per row.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct Rec {
         names: Vec<Vec<u8>>,
         rows: Vec<Vec<(String, String)>>,
         cur: Vec<(String, String)>,
         open_rows: i32,
+        lines: Vec<String>,
     }
 
     impl Rec {
@@ -899,7 +1067,9 @@ mod tests {
         fn append_null_by_idx(&mut self, _: usize) {
             unreachable!()
         }
-        fn append_line(&mut self, _: &[u8]) {}
+        fn append_line(&mut self, line: &[u8]) {
+            self.lines.push(String::from_utf8_lossy(line).into_owned());
+        }
     }
 
     impl PromBuilder for Rec {
@@ -1164,6 +1334,150 @@ mod tests {
         assert_eq!(rows.len(), 2);
     }
 
+    fn scan_with(input: &[u8], config: PromScanConfig) -> Result<Rec, PromParseError> {
+        let mut rec = Rec::default();
+        let mut scratch = PromScratch::new();
+        scan_prom_text(input, &config, &mut scratch, &mut rec)?;
+        Ok(rec)
+    }
+
+    fn type_of(row: &[(String, String)]) -> Option<&str> {
+        row.iter()
+            .find(|(k, _)| k == "__type__")
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn eof_with_trailing_tokens_is_an_ordinary_comment() {
+        let rows = scan("up 1\n# EOF pending\nother 2\n").expect("should parse");
+        assert_eq!(rows.len(), 2);
+        let rows = scan("up 1\n#  EOF  \nother 2\n").expect("should parse");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn malformed_type_lines_are_errors() {
+        for input in [
+            "# TYPE up invalid\nup 1\n",
+            "# TYPE up\nup 1\n",
+            "# TYPE\nup 1\n",
+            "# TYPE up gauge extra\nup 1\n",
+            "# TYPE \"up gauge\n",
+        ] {
+            let err = scan(input).expect_err(input);
+            assert_eq!(err.kind, PromErrorKind::InvalidType, "{input:?}");
+        }
+        let rows = scan("# TYPE up GAUGE\n# HELP up anything goes\n#comment\nup 1\n")
+            .expect("should parse");
+        assert_eq!(type_of(&rows[0]), Some("GAUGE"));
+    }
+
+    #[test]
+    fn escaped_type_name_keeps_its_type() {
+        let rows = scan("# TYPE \"a\\\"b\" gauge\n{\"a\\\"b\"} 1\n").expect("should parse");
+        assert_eq!(rows[0][0], ("__name__".into(), "a\"b".into()));
+        assert_eq!(type_of(&rows[0]), Some("gauge"));
+    }
+
+    #[test]
+    fn family_suffixes_depend_on_declared_type() {
+        let rows = scan(
+            "# TYPE g gauge\ng 1\ng_total 2\n# TYPE c counter\nc_total 1\nc_bucket 2\n\
+             # TYPE s summary\ns{quantile=\"0.5\"} 1\ns_count 2\ns_bucket 3\n",
+        )
+        .expect("should parse");
+        let types: Vec<_> = rows.iter().map(|r| type_of(r)).collect();
+        assert_eq!(
+            types,
+            vec![
+                Some("gauge"),
+                None,
+                Some("counter"),
+                None,
+                Some("summary"),
+                Some("summary"),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_name_after_bare_name_is_an_error() {
+        let err = scan("up{\"other\"} 1\n").expect_err("two names");
+        assert_eq!(err.kind, PromErrorKind::InvalidLabels);
+    }
+
+    #[test]
+    fn quoted_label_with_reserved_prefix_does_not_collide() {
+        let rows = scan("m{__value__=\"a\",\"label:__value__\"=\"b\"} 1\n").expect("should parse");
+        assert_eq!(rows[0][0], ("label:__value__".into(), "a".into()));
+        assert_eq!(rows[0][1], ("label:label:__value__".into(), "b".into()));
+    }
+
+    #[test]
+    fn out_of_range_values_are_rejected() {
+        for input in ["m 1e999\n", "m -1e999\n"] {
+            assert_eq!(
+                scan(input).expect_err(input).kind,
+                PromErrorKind::InvalidValue
+            );
+        }
+        let rows = scan("a +Inf\nb -inf\nc Infinity\n").expect("explicit infinities");
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn exemplars_need_hash_space_brace() {
+        assert!(scan("m 1 # {a=\"b\"} 2\n").is_ok());
+        assert!(scan("m 1 5 # {a=\"b\"} 2 3\n").is_ok());
+        for input in ["m 1 # trailing\n", "m 1 #{a=\"b\"} 2\n", "m 1 5 #\n"] {
+            assert_eq!(
+                scan(input).expect_err(input).kind,
+                PromErrorKind::TrailingGarbage,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn openmetrics_timestamps_are_seconds() {
+        let config = PromScanConfig {
+            openmetrics: true,
+            ..PromScanConfig::default()
+        };
+        let rec = scan_with(b"a 1 1520879607.789\nb 2 1520879607\nc 3 1.5e3\n", config)
+            .expect("should parse");
+        let ts: Vec<_> = rec.rows.iter().map(|r| r[2].1.clone()).collect();
+        assert_eq!(ts, vec!["1520879607789", "1520879607000", "1500000"]);
+        let err = scan_with(b"a 1 NaN\n", config).expect_err("nan timestamp");
+        assert_eq!(err.kind, PromErrorKind::InvalidTimestamp);
+        // Text format stays integer milliseconds.
+        let err = scan("a 1 1.5\n").expect_err("float timestamp");
+        assert_eq!(err.kind, PromErrorKind::InvalidTimestamp);
+    }
+
+    #[test]
+    fn invalid_utf8_is_rejected_before_any_row() {
+        let input = b"ok 1\nm{a=\"\xff\"} 1\n";
+        let mut rec = Rec::default();
+        let mut scratch = PromScratch::new();
+        let err = scan_prom_text(input, &PromScanConfig::default(), &mut scratch, &mut rec)
+            .expect_err("invalid utf-8");
+        assert_eq!(err.kind, PromErrorKind::InvalidUtf8);
+        assert_eq!(err.line, 2);
+        assert!(rec.rows.is_empty());
+    }
+
+    #[test]
+    fn each_sample_emits_its_raw_line() {
+        let rec = scan_with(
+            b"# TYPE up gauge\n  up 1\nm{a=\"b\"} 2 3\nlast 4",
+            PromScanConfig::default(),
+        )
+        .expect("should parse");
+        assert_eq!(rec.lines, vec!["up 1", "m{a=\"b\"} 2 3", "last 4"]);
+    }
+
     #[test]
     fn value_fast_path_matches_core_parser() {
         for s in [
@@ -1232,7 +1546,9 @@ mod tests {
             samples in proptest::collection::vec(
                 (
                     "[a-z_][a-z0-9_]{0,20}",
-                    proptest::collection::vec(("[a-z_][a-z0-9_]{0,8}", "[ -~]{0,30}"), 0..5),
+                    // Reserved `__` keys (`__name__`, `__type__`) have their
+                    // own tests; keep them out of the round trip.
+                    proptest::collection::vec(("[a-z][a-z0-9_]{0,8}", "[ -~]{0,30}"), 0..5),
                     -1.0e12f64..1.0e12,
                     proptest::option::of(0i64..2_000_000_000_000),
                 ),
@@ -1346,6 +1662,91 @@ mod verification {
     impl PromBuilder for NullBuilder {
         fn append_f64_by_idx(&mut self, _: usize, _: f64) {}
         fn append_i64_by_idx(&mut self, _: usize, _: i64) {}
+    }
+
+    /// The value parser never panics on any input of up to 8 bytes.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_parse_prom_value_no_panic() {
+        let buf: [u8; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= buf.len());
+        let r = parse_prom_value(&buf[..len]);
+        kani::cover!(r.is_some(), "parsed");
+        kani::cover!(r.is_none(), "rejected");
+    }
+
+    /// Records the name and value of each row, for the oracle proof.
+    struct OneRow {
+        name: [u8; 4],
+        name_len: usize,
+        value: Option<f64>,
+        rows: usize,
+    }
+    impl ScanBuilder for OneRow {
+        fn begin_row(&mut self) {}
+        fn end_row(&mut self) {
+            self.rows += 1;
+        }
+        fn resolve_field(&mut self, key: &[u8]) -> usize {
+            if key == PROM_NAME_FIELD {
+                0
+            } else if key == PROM_VALUE_FIELD {
+                1
+            } else {
+                2
+            }
+        }
+        fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
+            if idx == 0 && value.len() <= self.name.len() {
+                self.name[..value.len()].copy_from_slice(value);
+                self.name_len = value.len();
+            }
+        }
+        fn append_int_by_idx(&mut self, _: usize, _: &[u8]) {}
+        fn append_float_by_idx(&mut self, _: usize, _: &[u8]) {}
+        fn append_bool_by_idx(&mut self, _: usize, _: bool) {}
+        fn append_null_by_idx(&mut self, _: usize) {}
+        fn append_line(&mut self, _: &[u8]) {}
+    }
+    impl PromBuilder for OneRow {
+        fn append_f64_by_idx(&mut self, idx: usize, value: f64) {
+            if idx == 1 {
+                self.value = Some(value);
+            }
+        }
+        fn append_i64_by_idx(&mut self, _: usize, _: i64) {}
+    }
+
+    /// Oracle: for every `<name> <digit>\n` line with a one- or two-letter
+    /// name, the scanner emits exactly one row whose name is the input name
+    /// and whose value is the digit.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_scan_prom_text_name_value_oracle() {
+        let a: u8 = kani::any();
+        let b: u8 = kani::any();
+        let d: u8 = kani::any();
+        let two: bool = kani::any();
+        kani::assume(a.is_ascii_lowercase() && b.is_ascii_lowercase() && d.is_ascii_digit());
+        let (buf, name_len) = if two {
+            ([a, b, b' ', d, b'\n'], 2)
+        } else {
+            ([a, b' ', d, b'\n', b'\n'], 1)
+        };
+        let mut out = OneRow {
+            name: [0; 4],
+            name_len: 0,
+            value: None,
+            rows: 0,
+        };
+        let mut scratch = PromScratch::new();
+        let r = scan_prom_text(&buf, &PromScanConfig::default(), &mut scratch, &mut out);
+        assert!(r.is_ok());
+        assert_eq!(out.rows, 1);
+        assert_eq!(&out.name[..out.name_len], &buf[..name_len]);
+        assert_eq!(out.value, Some(f64::from(d - b'0')));
+        kani::cover!(two, "two-letter name");
     }
 
     /// The scanner never panics on any 8-byte input.
