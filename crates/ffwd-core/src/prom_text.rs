@@ -39,9 +39,12 @@ pub const PROM_VALUE_FIELD: &[u8] = b"__value__";
 pub const PROM_TIMESTAMP_FIELD: &[u8] = b"__timestamp_ms__";
 /// Column holding the metric family type from `# TYPE` (e.g. `counter`).
 pub const PROM_TYPE_FIELD: &[u8] = b"__type__";
+/// Column the Arrow layer appends with each sample's series id. Reserved here
+/// so an exposition label of that name is prefixed instead of overwritten.
+pub const PROM_SERIES_ID_FIELD: &[u8] = b"__series_id__";
 
 /// Prefix for labels whose name collides with a synthetic column
-/// (`__value__`, `__timestamp_ms__`, `__type__`). Such labels are invalid in
+/// (`__value__`, `__timestamp_ms__`, `__type__`, `__series_id__`). Such labels are invalid in
 /// Prometheus (the `__` prefix is reserved) but are kept rather than dropped.
 /// Quoted label names that already start with this prefix get it once more,
 /// so `"label:__value__"` and a renamed `__value__` never share a column.
@@ -133,7 +136,10 @@ fn is_valid_label_name(name: &[u8]) -> bool {
 
 #[inline(always)]
 fn is_reserved_column(key: &[u8]) -> bool {
-    key == PROM_VALUE_FIELD || key == PROM_TIMESTAMP_FIELD || key == PROM_TYPE_FIELD
+    key == PROM_VALUE_FIELD
+        || key == PROM_TIMESTAMP_FIELD
+        || key == PROM_TYPE_FIELD
+        || key == PROM_SERIES_ID_FIELD
 }
 
 /// Builder extension used by the Prometheus scanner for pre-parsed numbers.
@@ -193,6 +199,8 @@ pub enum PromErrorKind {
     InvalidType,
     /// The exposition is not valid UTF-8.
     InvalidUtf8,
+    /// An OpenMetrics exemplar (`# {labels} value [timestamp]`) is malformed.
+    InvalidExemplar,
 }
 
 /// A scan failure with its 1-based line number and byte offset.
@@ -296,7 +304,8 @@ pub fn prom_structural_mask(block: &[u8; 64]) -> u64 {
 /// is correct.
 struct Cursor<'a> {
     buf: &'a [u8],
-    block: usize,
+    /// Index of the 64-byte block `mask` describes; `None` before the first load.
+    block: Option<usize>,
     mask: u64,
 }
 
@@ -304,7 +313,7 @@ impl<'a> Cursor<'a> {
     fn new(buf: &'a [u8]) -> Self {
         Self {
             buf,
-            block: usize::MAX,
+            block: None,
             mask: 0,
         }
     }
@@ -336,8 +345,8 @@ impl<'a> Cursor<'a> {
                 return len;
             }
             let block = pos >> 6;
-            if block != self.block {
-                self.block = block;
+            if self.block != Some(block) {
+                self.block = Some(block);
                 self.mask = self.load(block);
             }
             let m = self.mask & (u64::MAX << (pos & 63));
@@ -739,8 +748,9 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
 
     /// Parse the `<name> <type>` part of a `# TYPE` line in `pos..end`.
     /// The name may be quoted (UTF-8 metric names) and is decoded into
-    /// `scratch.family_name`. A missing name, a missing or unknown type, or
-    /// anything after the type is an error, as in Prometheus.
+    /// `scratch.family_name`. A missing or (unquoted) invalid name, a missing
+    /// or unknown type, or anything after the type is an error, as in
+    /// Prometheus.
     fn parse_type_line(
         &mut self,
         pos: usize,
@@ -798,6 +808,10 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             return Err(invalid(rest));
         }
         let raw = &self.buf[name_start..name_end];
+        // Unquoted names use the legacy charset, as on sample lines.
+        if p == name_start && !is_valid_metric_name(raw) {
+            return Err(invalid(p));
+        }
         let family = &mut self.scratch.family_name;
         if escaped {
             unescape_into(raw, family);
@@ -919,15 +933,82 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         Ok(p + 1)
     }
 
-    /// Skip an OpenMetrics exemplar (` # {labels} value [timestamp]`) whose
-    /// `#` is at `pos`. Anything else after the sample is an error.
+    /// Validate and skip an OpenMetrics exemplar (` # {labels} value
+    /// [timestamp]`) whose `#` is at `pos`. Returns the position of the line
+    /// end. Exemplars are not emitted; they are checked so a malformed line
+    /// still rejects the scrape. Anything after the sample that is not
+    /// `# {` is trailing garbage.
     #[inline]
-    fn skip_exemplar(&self, pos: usize) -> Result<usize, PromParseError> {
+    fn skip_exemplar(&mut self, pos: usize) -> Result<usize, PromParseError> {
         let open = skip_blanks(self.buf, pos + 1);
         if open == pos + 1 || self.byte(open) != Some(b'{') {
             return Err(self.err(pos, PromErrorKind::TrailingGarbage));
         }
-        Ok(crate::byte_search::find_byte(self.buf, b'\n', open).unwrap_or(self.buf.len()))
+        let bad = |w: &Self, at: usize| w.err(at, PromErrorKind::InvalidExemplar);
+        // Label set: `}` or `name="value"` pairs separated by `,`.
+        let mut p = skip_blanks(self.buf, open + 1);
+        if self.byte(p) != Some(b'}') {
+            loop {
+                let key_end = if self.byte(p) == Some(b'"') {
+                    self.read_quoted(p + 1)?.1
+                } else {
+                    let mut e = p;
+                    while self
+                        .byte(e)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    {
+                        e += 1;
+                    }
+                    if !is_valid_label_name(&self.buf[p..e]) {
+                        return Err(bad(self, p));
+                    }
+                    e
+                };
+                p = skip_blanks(self.buf, key_end);
+                if self.byte(p) != Some(b'=') {
+                    return Err(bad(self, p));
+                }
+                p = skip_blanks(self.buf, p + 1);
+                if self.byte(p) != Some(b'"') {
+                    return Err(bad(self, p));
+                }
+                p = skip_blanks(self.buf, self.read_quoted(p + 1)?.1);
+                match self.byte(p) {
+                    Some(b',') => p = skip_blanks(self.buf, p + 1),
+                    Some(b'}') => break,
+                    _ => return Err(bad(self, p)),
+                }
+                // A trailing comma before `}` is allowed.
+                if self.byte(p) == Some(b'}') {
+                    break;
+                }
+            }
+        }
+        // `p` is at `}`. Value, then an optional float-seconds timestamp.
+        let token = |w: &Self, from: usize| {
+            let mut e = from;
+            while w.byte(e).is_some_and(|b| !is_blank(b) && b != b'\n') {
+                e += 1;
+            }
+            e
+        };
+        let vs = skip_blanks(self.buf, p + 1);
+        let ve = token(self, vs);
+        if vs == p + 1 || ve == vs || parse_prom_value(&self.buf[vs..ve]).is_none() {
+            return Err(bad(self, vs));
+        }
+        let mut p = skip_blanks(self.buf, ve);
+        if p > ve && !matches!(self.byte(p), None | Some(b'\n')) {
+            let te = token(self, p);
+            if parse_seconds_as_ms(&self.buf[p..te]).is_none() {
+                return Err(bad(self, p));
+            }
+            p = skip_blanks(self.buf, te);
+        }
+        match self.byte(p) {
+            None | Some(b'\n') => Ok(p),
+            Some(_) => Err(bad(self, p)),
+        }
     }
 }
 
@@ -1363,6 +1444,8 @@ mod tests {
             "# TYPE\nup 1\n",
             "# TYPE up gauge extra\nup 1\n",
             "# TYPE \"up gauge\n",
+            "# TYPE 1up gauge\n",
+            "# TYPE up-down gauge\n",
         ] {
             let err = scan(input).expect_err(input);
             assert_eq!(err.kind, PromErrorKind::InvalidType, "{input:?}");
@@ -1430,10 +1513,32 @@ mod tests {
     fn exemplars_need_hash_space_brace() {
         assert!(scan("m 1 # {a=\"b\"} 2\n").is_ok());
         assert!(scan("m 1 5 # {a=\"b\"} 2 3\n").is_ok());
+        assert!(scan("m 1 # {} 2 1.5\n").is_ok());
+        assert!(scan("m 1 # {a=\"x\\\"y\", \"b.c\"=\"d\",} 2\n").is_ok());
         for input in ["m 1 # trailing\n", "m 1 #{a=\"b\"} 2\n", "m 1 5 #\n"] {
             assert_eq!(
                 scan(input).expect_err(input).kind,
                 PromErrorKind::TrailingGarbage,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_exemplars_are_rejected() {
+        for input in [
+            "m 1 # {a=b} 2\n",
+            "m 1 # {a=\"b\" 2\n",
+            "m 1 # {1a=\"b\"} 2\n",
+            "m 1 # {a=\"b\"}\n",
+            "m 1 # {a=\"b\"}2\n",
+            "m 1 # {a=\"b\"} x\n",
+            "m 1 # {a=\"b\"} 2 later\n",
+            "m 1 # {a=\"b\"} 2 3 4\n",
+        ] {
+            assert_eq!(
+                scan(input).expect_err(input).kind,
+                PromErrorKind::InvalidExemplar,
                 "{input:?}"
             );
         }
@@ -1747,6 +1852,7 @@ mod verification {
         assert_eq!(&out.name[..out.name_len], &buf[..name_len]);
         assert_eq!(out.value, Some(f64::from(d - b'0')));
         kani::cover!(two, "two-letter name");
+        kani::cover!(!two, "one-letter name");
     }
 
     /// The scanner never panics on any 8-byte input.

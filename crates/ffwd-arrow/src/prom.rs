@@ -3,8 +3,10 @@
 //! [`PromBatchBuilder`](crate::prom::PromBatchBuilder) drives [`ffwd_core::prom_text::scan_prom_text`] into a
 //! purpose-built dense column builder (`PromColumns`). The scanner validates
 //! the whole scrape body as UTF-8 once up front, so every metric name, label
-//! value and `# TYPE` token becomes a zero-copy `Utf8View` that points into
-//! the scrape buffer. Only label values that contain escapes are copied.
+//! value and `# TYPE` token becomes a `Utf8View` without re-validation:
+//! strings of at most 12 bytes are stored inline in the view, longer ones
+//! reference the scrape buffer zero-copy, and strings with escapes are
+//! decoded into a second buffer that their views reference instead.
 //!
 //! Output schema (one row per sample):
 //!
@@ -26,18 +28,24 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use bytes::Bytes;
 use ffwd_core::prom_text::{
-    PROM_TIMESTAMP_FIELD, PROM_VALUE_FIELD, PromBuilder, PromErrorKind, PromParseError,
-    PromScanConfig, PromScanStats, PromScratch, scan_prom_text,
+    PROM_NAME_FIELD, PROM_TIMESTAMP_FIELD, PROM_TYPE_FIELD, PROM_VALUE_FIELD, PromBuilder,
+    PromErrorKind, PromParseError, PromScanConfig, PromScanStats, PromScratch, scan_prom_text,
 };
 use ffwd_core::scanner::ScanBuilder;
 
 /// Column holding a stable 64-bit identity of each sample's series.
 ///
-/// The id hashes the metric name and every non-null label (column name and
+/// The id hashes the metric name and every non-empty label (column name and
 /// value), so it does not depend on label order or on which other columns
 /// the batch happens to contain. Use it to group, join or deduplicate series
 /// without comparing every label column.
 pub const PROM_SERIES_ID_FIELD: &str = "__series_id__";
+
+/// Default limit on distinct label columns in one body.
+pub const DEFAULT_MAX_LABEL_COLUMNS: usize = 1000;
+/// Default limit on null cells padded into sparse columns for one body
+/// (16 Mi cells, 256 MiB of string views at worst).
+pub const DEFAULT_MAX_PADDED_CELLS: usize = 1 << 24;
 
 /// Seed for the series hash. Changing it changes every series id.
 const SERIES_SEED: u64 = 0x6666_7764_7072_6f6d;
@@ -45,10 +53,11 @@ const SERIES_SEED: u64 = 0x6666_7764_7072_6f6d;
 /// Return `batch` with a [`PROM_SERIES_ID_FIELD`] `UInt64` column appended.
 ///
 /// Label columns are the string columns other than `__name__` and `__type__`
-/// (and any column whose name starts with `__`). Each non-null label
+/// (and any column whose name starts with `__`). Each non-empty label
 /// contributes `xxh64(value, seed = xxh64(column name))`; contributions are
-/// summed, which makes the id independent of column order. Rows without a
-/// name hash only their labels.
+/// summed, which makes the id independent of column order. Empty values are
+/// skipped because Prometheus treats `a=""` as no label `a`. Rows without a
+/// name hash only their labels. Schema metadata is kept.
 pub fn append_series_id(batch: &RecordBatch) -> Result<RecordBatch, ArrowError> {
     use arrow::array::{Array, AsArray, UInt64Array};
     use xxhash_rust::xxh64::xxh64;
@@ -64,6 +73,9 @@ pub fn append_series_id(batch: &RecordBatch) -> Result<RecordBatch, ArrowError> 
         }
         let col_seed = xxh64(name.as_bytes(), SERIES_SEED);
         let mut add = |row: usize, value: &[u8]| {
+            if value.is_empty() {
+                return;
+            }
             let h = xxh64(value, col_seed);
             if let Some(id) = ids.get_mut(row) {
                 *id = id.wrapping_add(h.rotate_left(17) ^ h);
@@ -97,16 +109,21 @@ pub fn append_series_id(batch: &RecordBatch) -> Result<RecordBatch, ArrowError> 
             _ => {}
         }
     }
-    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut fields: Vec<arrow::datatypes::FieldRef> = schema.fields().iter().cloned().collect();
     let mut arrays: Vec<ArrayRef> = batch.columns().to_vec();
     if let Some(pos) = fields.iter().position(|f| f.name() == PROM_SERIES_ID_FIELD) {
         fields.remove(pos);
         arrays.remove(pos);
     }
-    fields.push(Field::new(PROM_SERIES_ID_FIELD, DataType::UInt64, false));
+    fields.push(Arc::new(Field::new(
+        PROM_SERIES_ID_FIELD,
+        DataType::UInt64,
+        false,
+    )));
     arrays.push(Arc::new(UInt64Array::from(ids)));
     let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
-    RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &opts)
+    let schema = Schema::new_with_metadata(fields, schema.metadata().clone());
+    RecordBatch::try_new_with_options(Arc::new(schema), arrays, &opts)
 }
 
 /// Errors from [`PromBatchBuilder::scan`].
@@ -118,6 +135,12 @@ pub enum PromToArrowError {
     TooLarge,
     /// The body has more label columns than the configured limit.
     TooManyLabelColumns {
+        /// The configured limit.
+        limit: usize,
+    },
+    /// Sparse label columns would need more null padding than the limit,
+    /// i.e. the dense output would be far larger than the body.
+    TooManyPaddedCells {
         /// The configured limit.
         limit: usize,
     },
@@ -135,6 +158,11 @@ impl std::fmt::Display for PromToArrowError {
             Self::TooManyLabelColumns { limit } => {
                 write!(f, "label columns exceed max_label_columns ({limit})")
             }
+            Self::TooManyPaddedCells { limit } => write!(
+                f,
+                "sparse labels would pad more than {limit} null cells; \
+                 reduce label cardinality or split the target"
+            ),
             Self::Parse(e) => write!(
                 f,
                 "invalid exposition at line {} (byte {}): {:?}",
@@ -169,14 +197,19 @@ impl<T: Copy + Default> Column<T> {
         }
     }
 
-    /// First write wins: a second write to the same row is ignored.
+    /// First write wins: a second write to the same row is ignored. Null
+    /// padding for skipped rows is taken from `budget`; a write whose padding
+    /// does not fit is dropped and the budget marked exhausted.
     #[inline(always)]
     #[allow(clippy::indexing_slicing)]
-    fn set(&mut self, row: usize, value: T) {
+    fn set(&mut self, row: usize, value: T, budget: &mut PadBudget) {
         if self.values.len() > row {
             return;
         }
         if self.values.len() < row {
+            if !budget.take(row - self.values.len()) {
+                return;
+            }
             self.values.resize(row, T::default());
         }
         self.values.push(value);
@@ -203,6 +236,42 @@ impl<T: Copy + Default> Column<T> {
         self.valid.clear();
         self.count = 0;
         (values, nulls)
+    }
+}
+
+/// Null cells that sparse columns may pad, per body.
+struct PadBudget {
+    limit: usize,
+    left: usize,
+    exhausted: bool,
+}
+
+impl PadBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            left: limit,
+            exhausted: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.left = self.limit;
+        self.exhausted = false;
+    }
+
+    #[cold]
+    fn take(&mut self, cells: usize) -> bool {
+        match self.left.checked_sub(cells) {
+            Some(rest) => {
+                self.left = rest;
+                true
+            }
+            None => {
+                self.exhausted = true;
+                false
+            }
+        }
     }
 }
 
@@ -242,8 +311,11 @@ struct PromColumns {
     slots: Vec<(Kind, usize)>,
     index: HashMap<Vec<u8>, usize>,
     row: usize,
-    /// Maximum number of label columns (names not starting with `__`).
+    /// Maximum number of label columns (every column but the synthetic
+    /// `__name__`, `__value__`, `__timestamp_ms__` and `__type__`).
     max_labels: usize,
+    /// Null padding allowed for sparse columns, scan and finish combined.
+    pad: PadBudget,
     labels: usize,
     /// Slot that swallows writes once `max_labels` is exceeded, so a
     /// label-heavy body stops allocating new columns.
@@ -269,7 +341,8 @@ impl PromColumns {
             slots: Vec::new(),
             index: HashMap::new(),
             row: 0,
-            max_labels: usize::MAX,
+            max_labels: DEFAULT_MAX_LABEL_COLUMNS,
+            pad: PadBudget::new(DEFAULT_MAX_PADDED_CELLS),
             labels: 0,
             drop_slot: None,
         }
@@ -290,6 +363,29 @@ impl PromColumns {
         self.row = 0;
         self.labels = 0;
         self.drop_slot = None;
+        self.pad.reset();
+    }
+
+    /// Charge the padding `finish` will add to the budget. False when the
+    /// budget is (or would be) exhausted.
+    fn reserve_finish_padding(&mut self) -> bool {
+        let rows = self.row;
+        // Columns that were never written are left out of the batch.
+        let pad = |len: usize, count: usize| {
+            if count == 0 {
+                0
+            } else {
+                rows.saturating_sub(len)
+            }
+        };
+        let missing = self
+            .strs
+            .iter()
+            .map(|c| pad(c.values.len(), c.count))
+            .chain(self.f64s.iter().map(|c| pad(c.values.len(), c.count)))
+            .chain(self.i64s.iter().map(|c| pad(c.values.len(), c.count)))
+            .fold(0usize, usize::saturating_add);
+        !self.pad.exhausted && self.pad.take(missing)
     }
 
     #[inline(always)]
@@ -384,7 +480,11 @@ impl ScanBuilder for PromColumns {
         if let Some(&idx) = self.index.get(key) {
             return idx;
         }
-        if !key.starts_with(b"__") {
+        let is_synthetic = matches!(
+            key,
+            PROM_NAME_FIELD | PROM_VALUE_FIELD | PROM_TIMESTAMP_FIELD | PROM_TYPE_FIELD
+        );
+        if !is_synthetic {
             if self.labels >= self.max_labels {
                 if let Some(idx) = self.drop_slot {
                     return idx;
@@ -433,7 +533,7 @@ impl ScanBuilder for PromColumns {
         let offset = (value.as_ptr() as usize).wrapping_sub(self.buf.as_ptr() as usize);
         debug_assert!(offset + value.len() <= self.buf.len());
         let view = make_view(value, 0, offset as u32);
-        self.strs[i].set(self.row, view);
+        self.strs[i].set(self.row, view, &mut self.pad);
     }
     #[inline(always)]
     #[allow(clippy::indexing_slicing)]
@@ -447,7 +547,7 @@ impl ScanBuilder for PromColumns {
         };
         self.decoded.extend_from_slice(value);
         let view = make_view(value, 1, offset);
-        self.strs[i].set(self.row, view);
+        self.strs[i].set(self.row, view, &mut self.pad);
     }
     fn append_int_by_idx(&mut self, _idx: usize, _value: &[u8]) {}
     fn append_float_by_idx(&mut self, _idx: usize, _value: &[u8]) {}
@@ -461,14 +561,14 @@ impl PromBuilder for PromColumns {
     #[allow(clippy::indexing_slicing)]
     fn append_f64_by_idx(&mut self, idx: usize, value: f64) {
         if let (Kind::F64, i) = self.slot(idx) {
-            self.f64s[i].set(self.row, value);
+            self.f64s[i].set(self.row, value, &mut self.pad);
         }
     }
     #[inline(always)]
     #[allow(clippy::indexing_slicing)]
     fn append_i64_by_idx(&mut self, idx: usize, value: i64) {
         if let (Kind::I64, i) = self.slot(idx) {
-            self.i64s[i].set(self.row, value);
+            self.i64s[i].set(self.row, value, &mut self.pad);
         }
     }
 }
@@ -497,12 +597,24 @@ impl PromBatchBuilder {
         }
     }
 
-    /// Reject bodies with more than `limit` label columns (column names that
-    /// do not start with `__`). The limit is enforced while scanning, so a
-    /// label-heavy body stops allocating columns at the limit.
+    /// Reject bodies with more than `limit` label columns (default
+    /// [`DEFAULT_MAX_LABEL_COLUMNS`]). Every column counts except the
+    /// synthetic `__name__`, `__value__`, `__timestamp_ms__` and `__type__`.
+    /// The limit is enforced while scanning, so a label-heavy body stops
+    /// allocating columns at the limit.
     #[must_use]
     pub fn with_max_label_columns(mut self, limit: usize) -> Self {
         self.columns.max_labels = limit;
+        self
+    }
+
+    /// Reject bodies whose sparse label columns would need more than `limit`
+    /// null cells in the dense output (default
+    /// [`DEFAULT_MAX_PADDED_CELLS`]). Bounds memory for bodies with many
+    /// rarely-used labels, where rows × columns far exceeds the body size.
+    #[must_use]
+    pub fn with_max_padded_cells(mut self, limit: usize) -> Self {
+        self.columns.pad = PadBudget::new(limit);
         self
     }
 
@@ -542,6 +654,11 @@ impl PromBatchBuilder {
         if self.columns.is_over_limit() {
             return Err(PromToArrowError::TooManyLabelColumns {
                 limit: self.columns.max_labels,
+            });
+        }
+        if !self.columns.reserve_finish_padding() {
+            return Err(PromToArrowError::TooManyPaddedCells {
+                limit: self.columns.pad.limit,
             });
         }
         let batch = self.columns.finish().map_err(PromToArrowError::Arrow)?;
@@ -683,12 +800,84 @@ mod tests {
             err,
             PromToArrowError::TooManyLabelColumns { limit: 2 }
         ));
-        // The builder recovers, and `__` columns do not count.
+        // The builder recovers, and the synthetic columns do not count.
         let (batch, _) = b
             .scan(Bytes::from_static(
                 b"# TYPE m gauge\nm{a=\"1\",b=\"2\"} 1 5\n",
             ))
             .expect("within limit");
         assert_eq!(batch.num_columns(), 6);
+        // Exposition labels starting with `__` do count.
+        let err = b
+            .scan(Bytes::from_static(b"m{__a=\"1\",__b=\"2\",__c=\"3\"} 1\n"))
+            .expect_err("too many labels");
+        assert!(matches!(
+            err,
+            PromToArrowError::TooManyLabelColumns { limit: 2 }
+        ));
+    }
+
+    #[test]
+    fn padded_cell_budget_bounds_sparse_output() {
+        // 4 rows; label `x` first appears on the last row (3 padded cells
+        // during the scan), `y` only on the first (3 more at finish).
+        let body = b"m{y=\"1\"} 1\nm 2\nm 3\nm{x=\"1\"} 4\n";
+        let mut b = PromBatchBuilder::default().with_max_padded_cells(5);
+        assert!(matches!(
+            b.scan(Bytes::from_static(body)),
+            Err(PromToArrowError::TooManyPaddedCells { limit: 5 })
+        ));
+        let mut b = PromBatchBuilder::default().with_max_padded_cells(6);
+        let (batch, _) = b.scan(Bytes::from_static(body)).expect("fits");
+        assert_eq!(batch.num_rows(), 4);
+        // The budget is per body.
+        assert!(b.scan(Bytes::from_static(body)).is_ok());
+    }
+
+    #[test]
+    fn series_id_label_from_exposition_is_kept() {
+        let batch = scan("m{__series_id__=\"7\"} 1\n");
+        let batch = append_series_id(&batch).expect("series id");
+        let kept = batch
+            .column_by_name("label:__series_id__")
+            .expect("prefixed label")
+            .as_string_view();
+        assert_eq!(kept.value(0), "7");
+        assert_eq!(
+            batch
+                .column_by_name(PROM_SERIES_ID_FIELD)
+                .expect("id")
+                .data_type(),
+            &DataType::UInt64
+        );
+        assert_eq!(
+            PROM_SERIES_ID_FIELD.as_bytes(),
+            ffwd_core::prom_text::PROM_SERIES_ID_FIELD
+        );
+    }
+
+    #[test]
+    fn series_id_ignores_empty_labels_and_keeps_metadata() {
+        let a = scan("m{a=\"\"} 1\n");
+        let b = scan("m 1\n");
+        let id = |batch: &RecordBatch| {
+            append_series_id(batch)
+                .expect("id")
+                .column_by_name(PROM_SERIES_ID_FIELD)
+                .expect("id")
+                .as_primitive::<arrow::datatypes::UInt64Type>()
+                .value(0)
+        };
+        assert_eq!(id(&a), id(&b));
+        let meta = std::collections::HashMap::from([("k".to_string(), "v".to_string())]);
+        let with_meta = b
+            .clone()
+            .with_schema(Arc::new(b.schema().as_ref().clone().with_metadata(meta)))
+            .expect("schema");
+        let out = append_series_id(&with_meta).expect("id");
+        assert_eq!(
+            out.schema().metadata().get("k").map(String::as_str),
+            Some("v")
+        );
     }
 }
