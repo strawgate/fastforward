@@ -132,6 +132,7 @@ to publish the listener ports.
 ```bash
 docker run -d \
   --name ffwd \
+  -e OTEL_ENDPOINT=https://collector.internal:4318 \
   -v ./config.yaml:/etc/ffwd/config.yaml:ro \
   -v ffwd-data:/var/lib/ffwd \
   -p 9090:9090 \
