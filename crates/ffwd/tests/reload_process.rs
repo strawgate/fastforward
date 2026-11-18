@@ -9,23 +9,8 @@ mod process_reload {
     use std::time::Duration;
 
     fn ff_binary() -> std::path::PathBuf {
-        let mut path = std::env::current_exe()
-            .expect("current exe")
-            .parent()
-            .expect("parent")
-            .parent()
-            .expect("grandparent")
-            .to_path_buf();
-        path.push("ff");
-        if !path.exists() {
-            path = std::env::current_exe()
-                .expect("current exe")
-                .parent()
-                .expect("parent")
-                .to_path_buf();
-            path.push("ff");
-        }
-        path
+        // Cargo builds the `ff` bin for integration tests and exposes its path.
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_ff"))
     }
 
     fn minimal_config() -> &'static str {

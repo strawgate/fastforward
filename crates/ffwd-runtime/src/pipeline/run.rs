@@ -86,9 +86,9 @@ impl Pipeline {
         // Transforms are moved to CPU workers (scan + SQL happens there).
         #[cfg(not(feature = "turmoil"))]
         let manager = {
-            let transforms: Vec<SourcePipeline> = self.input_transforms.drain(..).collect();
+            let transforms: Vec<SourcePipeline> = std::mem::take(&mut self.input_transforms);
             super::input_pipeline::InputPipelineManager::spawn(
-                self.inputs.drain(..).collect(),
+                std::mem::take(&mut self.inputs),
                 transforms,
                 tx.clone(),
                 Arc::clone(&self.metrics),
@@ -384,12 +384,17 @@ impl Pipeline {
     /// Apply a pool `AckItem` at the worker/checkpoint seam.
     ///
     /// Called from the `select!` loop when a pool worker finishes a batch.
-    #[allow(clippy::unused_async)] // async required for turmoil barrier await
+    // async required for turmoil barrier await. `unknown_lints` covers
+    // toolchains older than Rust 1.100, which lack `unused_async_trait_impl`.
+    #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
     pub(super) async fn apply_pool_ack(&mut self, ack: AckItem) -> bool {
         let batch_id = ack.batch_id;
         #[cfg(feature = "turmoil")]
         let outcome_for_event = ack.outcome.clone();
-        if self
+        // `fetch_update` is deprecated in favor of `try_update` (Rust 1.100), but
+        // `try_update` is newer than the workspace MSRV (1.89).
+        #[allow(deprecated)]
+        let is_underflow = self
             .metrics
             .inflight_batches
             .fetch_update(
@@ -397,8 +402,8 @@ impl Pipeline {
                 std::sync::atomic::Ordering::Relaxed,
                 |value| value.checked_sub(1),
             )
-            .is_err()
-        {
+            .is_err();
+        if is_underflow {
             tracing::warn!(
                 batch_id,
                 "pipeline: received ack with zero inflight_batches counter"

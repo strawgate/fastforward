@@ -391,7 +391,7 @@ pub async fn run_pipelines(
                         Err(e) => {
                             let effects = coordinator.step(Event::BuildFailed {
                                 pipeline: name.clone(),
-                                error: e.clone(),
+                                error: e,
                             });
                             for effect in effects {
                                 match effect {
