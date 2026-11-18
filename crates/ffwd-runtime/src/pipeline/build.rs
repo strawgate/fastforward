@@ -640,6 +640,12 @@ impl Pipeline {
         let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
         let (worker_control_tx, _worker_control_rx) = tokio::sync::broadcast::channel(16);
 
+        let shutdown_retry_grace = config.shutdown_retry_grace_ms.map_or(
+            crate::worker_pool::DEFAULT_SHUTDOWN_RETRY_GRACE,
+            Duration::from_millis,
+        );
+        pool.set_shutdown_retry_grace(shutdown_retry_grace.min(DEFAULT_POOL_DRAIN_TIMEOUT));
+
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
@@ -663,6 +669,7 @@ impl Pipeline {
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
             pool_drain_timeout: DEFAULT_POOL_DRAIN_TIMEOUT,
+            shutdown_retry_grace,
             control_tx,
             control_rx,
             worker_control_tx,
@@ -748,6 +755,7 @@ mod tests {
             batch_target_bytes: None,
             batch_timeout_ms: None,
             poll_interval_ms: None,
+            shutdown_retry_grace_ms: None,
         }
     }
 
@@ -768,6 +776,57 @@ mod tests {
     }
 
     #[test]
+    fn from_config_defaults_shutdown_retry_grace_to_ten_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+        let config = minimal_config(log_path.display().to_string());
+
+        let pipeline =
+            Pipeline::from_config("default", &config, &ffwd_test_utils::test_meter(), None)
+                .expect("pipeline should build");
+        assert_eq!(
+            pipeline.effective_shutdown_retry_grace(),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            pipeline.pool.shutdown_retry_grace().grace(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn shutdown_retry_grace_is_configurable_and_capped_by_drain_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+        let mut config = minimal_config(log_path.display().to_string());
+        config.shutdown_retry_grace_ms = Some(2_500);
+
+        let mut pipeline =
+            Pipeline::from_config("default", &config, &ffwd_test_utils::test_meter(), None)
+                .expect("pipeline should build");
+        assert_eq!(
+            pipeline.pool.shutdown_retry_grace().grace(),
+            Duration::from_millis(2_500)
+        );
+
+        pipeline.set_pool_drain_timeout(Duration::from_secs(1));
+        assert_eq!(
+            pipeline.pool.shutdown_retry_grace().grace(),
+            Duration::from_secs(1),
+            "the retry window must not outlast the drain timeout"
+        );
+
+        pipeline.set_pool_drain_timeout(Duration::from_secs(60));
+        assert_eq!(
+            pipeline.pool.shutdown_retry_grace().grace(),
+            Duration::from_millis(2_500),
+            "raising the drain timeout restores the configured window"
+        );
+    }
+
+    #[test]
     fn from_config_uses_explicit_data_dir_for_checkpoint_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_path = dir.path().join("in.log");
@@ -783,6 +842,7 @@ mod tests {
             batch_target_bytes: None,
             batch_timeout_ms: None,
             poll_interval_ms: None,
+            shutdown_retry_grace_ms: None,
         };
 
         let pipeline = Pipeline::from_config_with_data_dir(
@@ -905,6 +965,7 @@ mod tests {
             batch_target_bytes: None,
             batch_timeout_ms: None,
             poll_interval_ms: None,
+            shutdown_retry_grace_ms: None,
         };
 
         let err = Pipeline::from_config("default", &config, &ffwd_test_utils::test_meter(), None)
@@ -957,6 +1018,7 @@ mod tests {
             batch_target_bytes: None,
             batch_timeout_ms: None,
             poll_interval_ms: None,
+            shutdown_retry_grace_ms: None,
         };
 
         let result =

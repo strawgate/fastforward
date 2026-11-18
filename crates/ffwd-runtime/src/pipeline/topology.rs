@@ -87,6 +87,7 @@ mod tests {
             batch_target_bytes: None,
             batch_timeout_ms: None,
             poll_interval_ms: None,
+            shutdown_retry_grace_ms: None,
         }
     }
 

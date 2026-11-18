@@ -443,6 +443,10 @@ In `_bench-pair`, the receiver diagnostics HTTP server (`/ready`) can return `20
 
 Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pipeline is registered), then sleep 1 second to let `run_async()` complete socket binding before spawning the sender. Without this grace period, the race window is ~1 ms and triggers roughly 10 % of the time on loaded CI runners. (See PR #1320.)
 
+### A saturated output pool hides the shutdown signal from the pipeline loop
+
+When an output is down and the worker pool is full, `run_async` sits inside `submit_batch` waiting for a worker slot, so its `select!` never sees the shutdown token. Workers retry forever, so the slot never frees, and shutdown waits out the whole pool drain timeout (60s). That is why `run_async` spawns a small task that opens the pool's shutdown retry window (`ShutdownRetryGrace::begin`) the moment the token fires, independently of the loop. When the window (`shutdown_retry_grace_ms`, default 10s) closes, the busy worker gives up its batch without acking it, the blocked submit completes, and the loop exits. An unacked batch is not durably held: checkpointed inputs (files) replay it from their last committed checkpoint on restart, while inputs without checkpoints (TCP/UDP/OTLP receivers) lose it. A test that only uses a few hundred lines never fills the pool and passes without the fix; `shutdown_with_down_output_and_saturated_pool_exits_promptly` uses 50,000 lines and 64-byte batches for this reason.
+
 ### String-vs-number SQL comparisons are strict
 
 Since DataFusion 55, `WHERE status >= 400` on a Utf8 column strictly casts the column to Int64. One non-numeric value (`'N/A'`) fails the query and the pipeline drops the whole batch. This is intentional for now (we follow upstream); users write `int(status) >= 400` for fields that may hold text. A lenient analyzer rule (TRY_CAST for comparisons, BETWEEN, IN) was prototyped in PR #2921 and removed; see DESIGN.md. Synthetic probe batches (e.g. `ff validate`) must use null values, not placeholder strings, so they don't trip value errors like this cast or division by zero.

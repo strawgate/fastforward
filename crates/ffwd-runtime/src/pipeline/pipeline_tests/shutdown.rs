@@ -522,6 +522,90 @@ pipelines:
     );
 }
 
+/// Shutdown must not wait out the pool drain timeout when the output is down
+/// and the worker pool is saturated.
+///
+/// With one worker retrying a failing sink and its queue full, the pipeline
+/// loop is parked inside `submit_batch` and cannot see the shutdown token. The
+/// pool's stop-retrying signal has to follow shutdown on its own so the worker
+/// gives up, the blocked submit completes, and the loop exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_with_down_output_and_saturated_pool_exits_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("saturated_down_output.log");
+
+    // Enough data for many batches, so the single worker's queue fills up.
+    let mut data = String::new();
+    for i in 0..50_000 {
+        data.push_str(&format!(r#"{{"i":{i}}}"#));
+        data.push('\n');
+    }
+    std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+    let yaml = single_pipeline_yaml(
+        &format!("type: file\npath: \"{}\"\nformat: json", log_path.display()),
+        "type: stdout\nformat: json",
+    );
+    let config = ffwd_config::Config::load_str(&yaml).unwrap();
+    let pipe_cfg = &config.pipelines["default"];
+    let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+    // One worker, queue capacity 1, sink always fails transiently: after two
+    // batches every submit blocks until the worker frees up.
+    pipeline = pipeline.with_sink(Box::new(FailingSink::new(u32::MAX)));
+    pipeline.batch_target_bytes = 64;
+    pipeline.batch_timeout = Duration::from_millis(10);
+    // Keep the production drain default so a regression shows up as a long
+    // stall; use a short retry window so the test stays quick.
+    pipeline.set_pool_drain_timeout(Duration::from_secs(60));
+    pipeline.set_shutdown_retry_grace(Duration::from_secs(1));
+
+    // Cancel only once the pool is saturated: with one worker stuck on batch
+    // 0 and batch 1 queued, a third batch id means the loop has entered
+    // `submit_batch` for batch 2 and is parked there.
+    let shutdown = CancellationToken::new();
+    let sd = shutdown.clone();
+    let metrics = Arc::clone(pipeline.metrics());
+    let canceller = tokio::spawn(async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while metrics.next_batch_id.load(Ordering::Relaxed) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pool never saturated: the loop did not reach a third submit"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let cancelled_at = std::time::Instant::now();
+        sd.cancel();
+        cancelled_at
+    });
+
+    let result = tokio::time::timeout(Duration::from_secs(10), pipeline.run_async(&shutdown)).await;
+    let finished_at = std::time::Instant::now();
+
+    assert!(
+        result.is_ok(),
+        "shutdown stalled behind a saturated pool with a down output"
+    );
+    assert!(result.unwrap().is_ok(), "pipeline should shut down cleanly");
+    let cancelled_at = canceller.await.expect("canceller task");
+    let elapsed = finished_at.duration_since(cancelled_at);
+    // Workers keep retrying for the 1s window, then give up well before the
+    // 60s drain timeout.
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "workers should keep retrying for the grace window, shutdown took {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_secs(4), "shutdown took {elapsed:?}");
+    assert_eq!(
+        pipeline
+            .metrics
+            .dropped_batches_total
+            .load(Ordering::Relaxed),
+        0,
+        "undelivered batches must be held for replay, not dropped"
+    );
+}
+
 /// Rapid repeated shutdown signals must not cause panics.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_repeated_shutdown_signals() {

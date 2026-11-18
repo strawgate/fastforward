@@ -113,6 +113,7 @@ tla/
   MCDeliveryRetry.tla           — TLC config
   DeliveryRetry.cfg             — safety model (backoff invariants)
   DeliveryRetry.liveness.cfg    — liveness model (terminal reachable under fairness)
+  DeliveryRetry.graceful.cfg    — graceful-shutdown liveness (bounded retry window terminates)
   DeliveryRetry.coverage.cfg    — reachability guards
 
   # Worker pool dispatch (MRU dispatch, spawn-or-wait, 3-phase drain)
@@ -325,12 +326,22 @@ RetryAfter, timeout) retries indefinitely with exponential backoff capped at
 `MaxBackoffMs`. Terminal exits are: Ok (delivered), Rejected (permanent failure),
 or Cancel (shutdown). Liveness depends on sink recovery OR shutdown cancellation.
 
+Graceful shutdown is modeled separately from hard cancellation, in two steps.
+`BeginShutdown` opens the bounded retry window (`ShutdownRetryGrace::begin`,
+called when the shutdown token fires, when the pipeline loop exits, and by
+pool drain); workers keep retrying normally while it is open. `StopRetrying`
+closes the window when the grace timer fires: after that a transient failure
+or a pending backoff ends the batch as PoolClosed. `GracefulSpec` removes
+fairness on Cancel, gives the grace timer weak fairness, and proves that
+shutdown alone terminates the loop with the sink down (`ShutdownTerminates`).
+
 ### Model parameters
 
 | Config | InitialBackoffMs | MaxBackoffMs | MaxRetries |
 |--------|------------------|--------------|------------|
 | Safety | 100 | 1600 | 5 |
 | Liveness | 100 | 800 | 3 |
+| Graceful | 100 | 800 | 3 |
 | Coverage | 100 | 1600 | 5 |
 
 ### What it proves
@@ -353,6 +364,12 @@ or Cancel (shutdown). Liveness depends on sink recovery OR shutdown cancellation
 | `CancelTerminates` | Liveness | cancellation leads to Terminal |
 | `TerminalIsStable` | Liveness | Terminal is eventually stable |
 | `BackoffEventuallyResolves` | Liveness | WaitingBackoff always resolves |
+| `StopOnlyAfterShutdown` | Safety | the retry window closes only after shutdown began |
+| `StopRetryingIsSticky` | Safety (temporal) | stop_retrying never un-fires |
+| `NoRetryAfterStop` | Safety (temporal) | no new backoff round after stop_retrying |
+| `StopRetryingTerminates` | Liveness (GracefulSpec) | stop_retrying alone leads to Terminal, with no fairness on Cancel |
+| `ShutdownTerminates` | Liveness (GracefulSpec) | once shutdown begins, the bounded retry window guarantees Terminal |
+| `HealthySinkDelivers` | Liveness (GracefulSpec) | a healthy sink still delivers when shutdown may begin at any time |
 | `SendingReachable` | Reachability | Sending state is reachable |
 | `OkReachable` | Reachability | Ok outcome is reachable |
 | `RejectedReachable` | Reachability | Rejected outcome is reachable |
@@ -362,12 +379,16 @@ or Cancel (shutdown). Liveness depends on sink recovery OR shutdown cancellation
 | `BackoffCapReached` | Reachability | backoff reaches MaxBackoffMs |
 | `MultipleRetriesOccur` | Reachability | multiple retries occur |
 | `SinkRecoveryReachable` | Reachability | sink recovery after failure is reachable |
+| `GracefulGiveUpReachable` | Reachability | PoolClosed via stop_retrying without hard cancel |
+| `DeliveredAfterStopReachable` | Reachability | delivery still succeeds after stop_retrying |
+| `DeliveredDuringGraceReachable` | Reachability | a retried batch is delivered inside the shutdown grace window |
 
 ### Run
 
 ```bash
 just tlc MCDeliveryRetry.tla DeliveryRetry.cfg
 just tlc MCDeliveryRetry.tla DeliveryRetry.liveness.cfg
+just tlc MCDeliveryRetry.tla DeliveryRetry.graceful.cfg
 just tlc MCDeliveryRetry.tla DeliveryRetry.coverage.cfg
 ```
 

@@ -39,5 +39,5 @@ mod pool;
 mod types;
 mod worker;
 
-pub use pool::OutputWorkerPool;
+pub use pool::{DEFAULT_SHUTDOWN_RETRY_GRACE, OutputWorkerPool, ShutdownRetryGrace};
 pub use types::{AckItem, DeliveryOutcome, WorkItem};

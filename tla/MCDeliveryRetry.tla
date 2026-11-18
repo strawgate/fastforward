@@ -6,7 +6,7 @@
  *   DeliveryRetry.tla      — clean spec, no TLC overrides
  *   MCDeliveryRetry.tla    — this file, TLC-specific constants
  *
- * THREE MODELS:
+ * FOUR MODELS:
  *
  * 1. SAFETY (DeliveryRetry.cfg):
  *    Checks TypeOK, BackoffCapRespected, BackoffMonotonic, structural
@@ -16,7 +16,11 @@
  *    Checks TerminalReachable, HealthySinkDelivers, CancelTerminates,
  *    BackoffEventuallyResolves under Fairness.
  *
- * 3. COVERAGE (DeliveryRetry.coverage.cfg):
+ * 3. GRACEFUL (DeliveryRetry.graceful.cfg):
+ *    Checks StopRetryingTerminates, ShutdownTerminates and HealthySinkDelivers under
+ *    GracefulSpec (no fairness on Cancel).
+ *
+ * 4. COVERAGE (DeliveryRetry.coverage.cfg):
  *    Reachability witnesses for all interesting states.
  *)
 

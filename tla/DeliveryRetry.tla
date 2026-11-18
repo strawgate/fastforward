@@ -15,11 +15,19 @@
  *   3. On Rejected: terminal permanent failure (Rejected)
  *   4. On IoError/RetryAfter/Timeout: exponential backoff, retry forever
  *   5. On cancel (shutdown): terminal (PoolClosed)
+ *   6. Once graceful shutdown begins (stop_retrying): the send in progress
+ *      and queued sends still run, but a transient failure, or a backoff
+ *      already under way, ends the batch as PoolClosed instead of retrying
  *
  * Key insight: the code deliberately retries FOREVER for transient
  * errors (Filebeat-style). Liveness depends on sink recovery OR
  * shutdown cancellation. Without either, the loop runs indefinitely —
  * and that is correct by design (backpressure, not data loss).
+ *
+ * Graceful shutdown (stop_retrying) is a separate, earlier signal than
+ * hard cancellation. GracefulSpec drops the fairness on Cancel and proves
+ * that stop_retrying alone terminates the loop, even with the sink down,
+ * while a healthy sink still delivers.
  *
  * What this spec does NOT model (verified separately):
  *   - Jitter in backoff delays (orthogonal to liveness)
@@ -63,9 +71,13 @@ VARIABLES
     retryCount,  \* Number of retry attempts so far
     backoffMs,   \* Current backoff delay in milliseconds
     cancelled,   \* Whether shutdown cancellation was observed
-    sinkState    \* Remote sink condition: "Healthy" | "Transient" | "Permanent"
+    sinkState,   \* Remote sink condition: "Healthy" | "Transient" | "Permanent"
+    stopRetrying,   \* Whether the shutdown retry window closed (pool stop token fired)
+    shutdownStarted, \* Whether shutdown began, opening the bounded retry window
+    okPhase,         \* Shutdown phase when ReceiveOk fired: "None" | "Running" | "Grace" | "Stopped"
+    retriedInGrace   \* Whether a retry Send started while the grace window was open
 
-vars == <<state, outcome, retryCount, backoffMs, cancelled, sinkState>>
+vars == <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 (* ---------------------------------------------------------------------------
  * Backoff computation
@@ -95,6 +107,10 @@ TypeOK ==
     /\ backoffMs \in 0..MaxBackoffMs
     /\ cancelled \in BOOLEAN
     /\ sinkState \in {"Healthy", "Transient", "Permanent"}
+    /\ stopRetrying \in BOOLEAN
+    /\ shutdownStarted \in BOOLEAN
+    /\ okPhase \in {"None", "Running", "Grace", "Stopped"}
+    /\ retriedInGrace \in BOOLEAN
 
 (* ---------------------------------------------------------------------------
  * Initial state
@@ -107,6 +123,10 @@ Init ==
     /\ backoffMs  = 0
     /\ cancelled  = FALSE
     /\ sinkState  = "Healthy"
+    /\ stopRetrying = FALSE
+    /\ shutdownStarted = FALSE
+    /\ okPhase = "None"
+    /\ retriedInGrace = FALSE
 
 (* ---------------------------------------------------------------------------
  * Environment actions (sink state changes)
@@ -119,19 +139,19 @@ Init ==
 SinkRecover ==
     /\ sinkState = "Transient"
     /\ sinkState' = "Healthy"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Sink enters transient failure (network error, timeout, rate limit).
 SinkFail ==
     /\ sinkState = "Healthy"
     /\ sinkState' = "Transient"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Sink enters permanent failure mode (schema rejection, 4xx).
 SinkPermanentFail ==
     /\ sinkState \in {"Healthy", "Transient"}
     /\ sinkState' = "Permanent"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 (* ---------------------------------------------------------------------------
  * Worker actions
@@ -139,10 +159,15 @@ SinkPermanentFail ==
 
 \* Send: transition from Idle or WaitingBackoff to Sending.
 \* Models the start of sink.send_batch().
+\* After stop_retrying fires, a batch already in backoff does not send again
+\* (wait_before_retry checks the token before and during the sleep), but a
+\* batch that has not been tried yet (Idle) still gets its attempt.
 Send ==
-    /\ state \in {"Idle", "WaitingBackoff"}
+    /\ \/ state = "Idle"
+       \/ (state = "WaitingBackoff" /\ ~stopRetrying)
     /\ state' = "Sending"
-    /\ UNCHANGED <<outcome, retryCount, backoffMs, cancelled, sinkState>>
+    /\ retriedInGrace' = (retriedInGrace \/ (state = "WaitingBackoff" /\ shutdownStarted /\ ~stopRetrying))
+    /\ UNCHANGED <<outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
 
 \* ReceiveOk: sink accepted the batch. Terminal success.
 \* Maps to Ok(SendResult::Ok) in process_item.
@@ -151,7 +176,10 @@ ReceiveOk ==
     /\ sinkState = "Healthy"
     /\ state'   = "Terminal"
     /\ outcome' = "Ok"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState>>
+    /\ okPhase' = IF stopRetrying THEN "Stopped"
+                  ELSE IF shutdownStarted THEN "Grace"
+                  ELSE "Running"
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, retriedInGrace>>
 
 \* ReceiveRejected: sink permanently rejected the batch. Terminal failure.
 \* Maps to Ok(SendResult::Rejected) in process_item.
@@ -160,7 +188,7 @@ ReceiveRejected ==
     /\ sinkState = "Permanent"
     /\ state'   = "Terminal"
     /\ outcome' = "Rejected"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState>>
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* ReceiveTransient: transient failure, compute next backoff and wait.
 \* Maps to Ok(SendResult::IoError), Ok(SendResult::RetryAfter), and
@@ -169,13 +197,14 @@ ReceiveRejected ==
 ReceiveTransient ==
     /\ state = "Sending"
     /\ sinkState = "Transient"
+    /\ ~stopRetrying
     /\ retryCount < MaxRetries
     /\ state'      = "WaitingBackoff"
     /\ retryCount' = retryCount + 1
     /\ backoffMs'  = IF retryCount = 0
                      THEN InitialBackoffMs
                      ELSE NextBackoff(backoffMs)
-    /\ UNCHANGED <<outcome, cancelled, sinkState>>
+    /\ UNCHANGED <<outcome, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Cancel: shutdown signal observed. Can happen in any non-terminal state.
 \* Models cancel.cancelled() in the tokio::select! arms of process_item.
@@ -188,7 +217,68 @@ Cancel ==
     /\ cancelled' = TRUE
     /\ state'     = "Terminal"
     /\ outcome'   = "Cancelled"
-    /\ UNCHANGED <<retryCount, backoffMs, sinkState>>
+    /\ UNCHANGED <<retryCount, backoffMs, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
+
+\* BeginShutdown: graceful shutdown begins and the bounded retry window
+\* opens. Models ShutdownRetryGrace::begin, called when the shutdown token
+\* fires, when the pipeline loop exits, and by pool drain. Workers keep
+\* retrying normally while the window is open.
+BeginShutdown ==
+    /\ ~shutdownStarted
+    /\ shutdownStarted' = TRUE
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, okPhase, retriedInGrace>>
+
+\* StopRetrying: the retry window closes (grace timer, capped by the drain
+\* timeout). Models the ShutdownRetryGrace stop token firing. The token is
+\* sticky and may fire in any worker state, but only after shutdown began.
+StopRetrying ==
+    /\ shutdownStarted
+    /\ ~stopRetrying
+    /\ stopRetrying' = TRUE
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, shutdownStarted, okPhase, retriedInGrace>>
+
+\* GiveUpTransient: a send fails transiently after stop_retrying fired. The
+\* batch is not retried; it resolves as PoolClosed (held for replay).
+\* Maps to wait_before_retry returning false on its is_cancelled() check.
+GiveUpTransient ==
+    /\ state = "Sending"
+    /\ sinkState = "Transient"
+    /\ stopRetrying
+    /\ state'   = "Terminal"
+    /\ outcome' = "Cancelled"
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
+
+\* AbortBackoff: stop_retrying fires while the worker sleeps in backoff.
+\* Maps to the stop_retrying.cancelled() arm in wait_before_retry.
+AbortBackoff ==
+    /\ state = "WaitingBackoff"
+    /\ stopRetrying
+    /\ state'   = "Terminal"
+    /\ outcome' = "Cancelled"
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
+
+\* AbortRetrySend: the retry window closes while a retry (not a batch's
+\* first attempt) is mid-send. Maps to the stop_retrying.cancelled() arm
+\* guarded by is_retry in process_item's send select!. Stopping is
+\* cooperative: in Rust the token can fire just after the pre-send check,
+\* so a retry can start at expiry. Send's ~stopRetrying guard is atomic
+\* here, but StopRetrying may fire in the very next step, which covers that
+\* race: the retry then ends via AbortRetrySend or a sink response.
+AbortRetrySend ==
+    /\ state = "Sending"
+    /\ retryCount > 0
+    /\ stopRetrying
+    /\ state'   = "Terminal"
+    /\ outcome' = "Cancelled"
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
+
+\* Any response to an in-progress send. Under stop_retrying one of these is
+\* always enabled while Sending, whatever the sink state.
+SendCompletes ==
+    \/ ReceiveOk
+    \/ ReceiveRejected
+    \/ ReceiveTransient
+    \/ GiveUpTransient
 
 (* ---------------------------------------------------------------------------
  * Next-state relation
@@ -200,6 +290,11 @@ Next ==
     \/ ReceiveRejected
     \/ ReceiveTransient
     \/ Cancel
+    \/ BeginShutdown
+    \/ StopRetrying
+    \/ GiveUpTransient
+    \/ AbortBackoff
+    \/ AbortRetrySend
     \/ SinkRecover
     \/ SinkFail
     \/ SinkPermanentFail
@@ -235,8 +330,28 @@ Fairness ==
     /\ WF_vars(ReceiveRejected)
     /\ WF_vars(ReceiveTransient)
     /\ WF_vars(Cancel)
+    /\ WF_vars(GiveUpTransient)
+    /\ WF_vars(AbortBackoff)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+(*
+ * Graceful-shutdown fairness: as Fairness, but with NO fairness on Cancel,
+ * so hard cancellation may never happen. Used by
+ * DeliveryRetry.graceful.cfg to show that stop_retrying alone ends the
+ * retry loop. WF(SendCompletes) rather than WF on each receive action: a
+ * flapping sink can keep each individual receive from staying enabled,
+ * but some response to the send stays enabled once stop_retrying is set.
+ * No WF on BeginShutdown: the environment is not obliged to shut down.
+ * WF(StopRetrying): once shutdown begins, the grace timer always fires.
+ *)
+GracefulFairness ==
+    /\ WF_vars(Send)
+    /\ WF_vars(SendCompletes)
+    /\ WF_vars(AbortBackoff)
+    /\ WF_vars(StopRetrying)
+
+GracefulSpec == Init /\ [][Next]_vars /\ GracefulFairness
 
 (* ===========================================================================
  * SAFETY INVARIANTS
@@ -292,6 +407,17 @@ TerminalIsAbsorbing ==
 OutcomeIsStable ==
     [][outcome # "None" => outcome' = outcome]_vars
 
+\* stop_retrying is a sticky token — once fired, it stays fired.
+StopRetryingIsSticky ==
+    [][stopRetrying => stopRetrying']_vars
+
+\* The retry window can only close after shutdown began.
+StopOnlyAfterShutdown == stopRetrying => shutdownStarted
+
+\* Once the retry window closes, no batch enters another backoff round.
+NoRetryAfterStop ==
+    [][stopRetrying => retryCount' = retryCount]_vars
+
 (* ===========================================================================
  * LIVENESS PROPERTIES (under Fairness)
  *
@@ -331,6 +457,15 @@ TerminalIsStable == <>[](state = "Terminal")
 BackoffEventuallyResolves ==
     (state = "WaitingBackoff") ~> (state # "WaitingBackoff")
 
+\* Checked under GracefulSpec (no fairness on Cancel): graceful shutdown
+\* alone ends the retry loop, even if the sink never recovers. This is why
+\* a down output no longer holds shutdown open for the pool drain timeout.
+StopRetryingTerminates == stopRetrying ~> (state = "Terminal")
+
+\* Checked under GracefulSpec: once shutdown begins, the bounded retry
+\* window guarantees every delivery ends, even if the sink never recovers.
+ShutdownTerminates == shutdownStarted ~> (state = "Terminal")
+
 (* ===========================================================================
  * REACHABILITY ASSERTIONS (vacuity guards — kani::cover!() equivalent)
  *
@@ -365,5 +500,16 @@ MultipleRetriesOccur == ~(retryCount > 1)
 
 \* Sink recovery after transient failure is reachable.
 SinkRecoveryReachable == ~(sinkState = "Healthy" /\ retryCount > 0)
+
+\* Graceful shutdown ends a batch as PoolClosed without hard cancellation.
+GracefulGiveUpReachable ==
+    ~(state = "Terminal" /\ outcome = "Cancelled" /\ stopRetrying /\ ~cancelled)
+
+\* A batch can still be delivered after the retry window closes.
+DeliveredAfterStopReachable == ~(okPhase = "Stopped")
+
+\* A batch can retry inside the grace window and then be delivered.
+DeliveredDuringGraceReachable ==
+    ~(okPhase = "Grace" /\ retriedInGrace)
 
 =============================================================================
