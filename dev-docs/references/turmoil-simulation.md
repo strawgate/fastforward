@@ -25,6 +25,10 @@ Guidance for deterministic concurrency simulation tests.
 - Tests that pass only for one schedule because assertions are too weak.
 - Flake triage without seed replay, making regressions irreproducible.
 - Tests that only assert final totals and miss link-level backlog or transition-order regressions.
+- Random link failures (`fail_rate`) on raw turmoil TCP: turmoil never retransmits, so a dropped
+  segment stalls the receiver for the rest of the connection while every sender write succeeds.
+  Use `TurmoilTcpSink::with_ack_timeout` with `run_acking_tcp_server` so loss surfaces as a
+  retryable send error.
 
 ## Local Debug Aids
 
@@ -36,6 +40,13 @@ Guidance for deterministic concurrency simulation tests.
 ```bash
 TURMOIL_SEED=42 cargo test --features turmoil --test turmoil_sim -- --nocapture
 for seed in {1..100}; do TURMOIL_SEED=$seed cargo test --features turmoil --test turmoil_sim; done
+```
+
+Nightly seed sweep (same script CI runs; records each failing seed and test name in `<out-dir>/failures.tsv`):
+
+```bash
+scripts/turmoil-seed-sweep.sh <shard-index> <shard-count> <total-seeds> <out-dir>
+scripts/turmoil-seed-sweep.sh 0 1 20 /tmp/turmoil-sweep   # seeds 1..20 locally
 ```
 
 Replay and history-specific checks:
