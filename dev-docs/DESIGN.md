@@ -161,6 +161,23 @@ Bit (drops the route, retries via a backlog). If a batch is rejected, the data i
 batch is lost — the correct behavior for a forwarder where corrupted or oversized data
 cannot be retried, but it must be metered.
 
+### Output retries stop when shutdown begins
+
+Output workers retry transient failures forever while running, so a down output turns into
+backpressure, not data loss. Once shutdown begins (`stop_retrying`, fired as soon as the
+pipeline's shutdown token is cancelled), workers stop retrying: queued and in-progress
+batches still get their delivery attempt, but a transient failure resolves as `PoolClosed`
+(held, checkpoint not advanced) instead of backing off. Without this, a down output held
+every shutdown open for the full pool drain timeout (60s), which is longer than the
+Kubernetes default termination grace period.
+
+Trade-off: checkpointed inputs (files) replay held batches on restart. Non-checkpointed
+inputs (TCP, UDP, OTLP receivers) lose a batch that hits a transient error during shutdown.
+They already lost it after the drain timeout, and usually to SIGKILL first. This matches
+Filebeat's default (`shutdown_timeout: 0`, no waiting for acks at shutdown). Vector instead
+waits up to its graceful shutdown limit (60s). Modeled in `tla/DeliveryRetry.tla`
+(`GracefulSpec`).
+
 ### Per-source independent checkpoints
 
 Each source has its own `committed[s]`. A slow source doesn't block a fast source from
