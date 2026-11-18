@@ -286,8 +286,7 @@ impl StreamingBuilder {
                 let decoded_block = decoded_arrow_buf
                     .as_ref()
                     .map(|buf| builder.append_block(buf.clone()));
-                for row in 0..num_rows {
-                    let (offset, len) = self.line_views[row];
+                for &(offset, len) in &self.line_views {
                     append_string_view(
                         &mut builder,
                         original_block,
