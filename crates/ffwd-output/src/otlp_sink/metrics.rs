@@ -8,8 +8,9 @@
 //!
 //! - `job` → resource `service.name`, `instance` → `service.instance.id`.
 //! - `__type__` is matched case-insensitively.
-//! - `__type__ = counter` → monotonic cumulative `Sum`. (OpenMetrics
-//!   `_created` start-time samples are skipped by the scanner.)
+//! - `__type__ = counter` → monotonic cumulative `Sum`.
+//! - `__type__ = created` (OpenMetrics `_created` start-time samples) are
+//!   not exported.
 //! - `gauge`, `unknown`/untyped, `info`, `stateset`, `gaugehistogram` and
 //!   samples without a type → `Gauge`.
 //! - `histogram` → cumulative `Histogram`, rebuilt from the `_bucket`
@@ -155,6 +156,8 @@ enum TypeTag {
     Counter,
     Histogram,
     Summary,
+    /// An OpenMetrics `_created` (start-time) sample.
+    Created,
     Other,
 }
 
@@ -166,6 +169,8 @@ impl TypeTag {
             Self::Histogram
         } else if ty.eq_ignore_ascii_case("summary") {
             Self::Summary
+        } else if ty.eq_ignore_ascii_case("created") {
+            Self::Created
         } else {
             Self::Other
         }
@@ -415,6 +420,8 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
                 (name, Kind::Gauge, Role::Point)
             }
         }
+        // Start times aren't exported as points (no start-time support yet).
+        TypeTag::Created => (name, Kind::Gauge, Role::Skip),
         TypeTag::Other => (name, Kind::Gauge, Role::Point),
     }
 }
@@ -1265,10 +1272,19 @@ mod tests {
     }
 
     #[test]
+    fn start_time_samples_are_not_exported() {
+        let b = batch(&[
+            ("jobs_total", 3.0, None, Some("counter"), &[]),
+            ("jobs_created", 1.7e9, None, Some("created"), &[]),
+        ]);
+        let req = decode(&b);
+        assert_eq!(metric_names(&req), vec!["jobs_total".to_string()]);
+    }
+
+    #[test]
     fn created_series_next_to_a_total_is_kept() {
-        // OpenMetrics `_created` samples never reach the encoder (the
-        // scanner skips them), so any `*_created` here is a real series,
-        // typed or not.
+        // Only `__type__ = created` marks a start time; any other
+        // `*_created` series is real, typed or not.
         let c = Some("counter");
         let b = batch(&[
             ("jobs_total", 10.0, None, c, &[]),

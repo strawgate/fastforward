@@ -38,7 +38,12 @@ pub const PROM_VALUE_FIELD: &[u8] = b"__value__";
 /// Column holding the optional exposition timestamp (Unix milliseconds).
 pub const PROM_TIMESTAMP_FIELD: &[u8] = b"__timestamp_ms__";
 /// Column holding the metric family type from `# TYPE` (e.g. `counter`).
+/// In OpenMetrics, the `<family>_created` sample of a counter, histogram or
+/// summary gets [`PROM_TYPE_CREATED`] instead: it is the series' start time,
+/// not a measurement.
 pub const PROM_TYPE_FIELD: &[u8] = b"__type__";
+/// [`PROM_TYPE_FIELD`] value of an OpenMetrics start-time (`_created`) sample.
+pub const PROM_TYPE_CREATED: &[u8] = b"created";
 /// Column the Arrow layer appends with each sample's series id. Reserved here
 /// so an exposition label of that name is prefixed instead of overwritten.
 pub const PROM_SERIES_ID_FIELD: &[u8] = b"__series_id__";
@@ -824,41 +829,10 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         Ok((ts, te, kind))
     }
 
-    /// True when the sample at `pos` is the `<family>_created` sample of an
-    /// OpenMetrics counter, histogram or summary. That sample is the
-    /// series' start time, not a measurement, so it is not emitted as a row.
-    /// Prometheus text has no such sample, so there `foo_created` is always
-    /// an ordinary series.
-    #[inline]
-    fn is_openmetrics_created(&self, pos: usize) -> bool {
-        if !self.openmetrics {
-            return false;
-        }
-        let Some((_, _, kind)) = self.family else {
-            return false;
-        };
-        if !matches!(
-            kind,
-            FamilyKind::Counter | FamilyKind::Histogram | FamilyKind::Summary
-        ) {
-            return false;
-        }
-        let rest = self
-            .buf
-            .get(pos..)
-            .and_then(|r| r.strip_prefix(self.scratch.family_name.as_slice()))
-            .and_then(|r| r.strip_prefix(b"_created".as_slice()));
-        matches!(rest.and_then(|r| r.first()), Some(b'{' | b' ' | b'\t'))
-    }
-
     /// Parse one sample line starting at `pos` (first non-blank byte).
     /// The row is closed on error too, so the caller can discard the batch.
     #[inline(always)]
     fn sample(&mut self, pos: usize) -> Result<usize, PromParseError> {
-        if self.is_openmetrics_created(pos) {
-            let end = crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len());
-            return Ok(end + 1);
-        }
         self.builder.begin_row();
         let r = self.sample_row(pos);
         if let Ok(next) = r {
@@ -953,14 +927,29 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
 
         if let (Some(type_idx), Some((ts, te, kind))) = (self.type_idx, self.family) {
             let raw = &self.buf[name.start..name.end];
-            let is_member = if name.escaped {
+            let decoded: &[u8] = if name.escaped {
                 unescape_into(raw, &mut self.scratch.decoded);
-                belongs_to_family(&self.scratch.decoded, &self.scratch.family_name, kind)
+                &self.scratch.decoded
             } else {
-                belongs_to_family(raw, &self.scratch.family_name, kind)
+                raw
             };
-            if is_member {
-                self.builder.append_str_by_idx(type_idx, &self.buf[ts..te]);
+            if belongs_to_family(decoded, &self.scratch.family_name, kind) {
+                let is_created = self.openmetrics
+                    && matches!(
+                        kind,
+                        FamilyKind::Counter | FamilyKind::Histogram | FamilyKind::Summary
+                    )
+                    && decoded.len() > self.scratch.family_name.len()
+                    && decoded.ends_with(b"_created");
+                // The raw name ends in the same bytes as the decoded one
+                // (escapes never produce letters), so the type value can
+                // borrow the buffer like every other value.
+                let ty = if is_created && raw.ends_with(PROM_TYPE_CREATED) {
+                    &self.buf[name.end - PROM_TYPE_CREATED.len()..name.end]
+                } else {
+                    &self.buf[ts..te]
+                };
+                self.builder.append_str_by_idx(type_idx, ty);
             }
         }
         Ok(p + 1)
@@ -1534,19 +1523,35 @@ mod tests {
     }
 
     #[test]
-    fn openmetrics_created_samples_are_not_emitted() {
+    fn openmetrics_created_samples_are_typed_created() {
         let rows = scan_om(
             "# TYPE jobs counter\njobs_total 3\njobs_created 1.7e9\n\
              # TYPE lat histogram\nlat_bucket{le=\"+Inf\"} 1\nlat_count 1\nlat_created{a=\"b\"} 1.7e9\n\
+             # TYPE \"my.metric\" counter\n{\"my.metric_total\"} 3\n{\"my.metric_created\"} 1.7e9\n\
              # TYPE w_created counter\nw_created 4\n# EOF\n",
         )
         .expect("should parse");
-        let names: Vec<_> = rows.iter().map(|r| r[r.len() - 3].1.clone()).collect();
-        assert_eq!(rows.len(), 4, "{names:?}");
-        assert!(rows.iter().all(|r| {
-            !r.iter()
-                .any(|(k, v)| k == "__name__" && (v == "jobs_created" || v == "lat_created"))
-        }));
+        let types: Vec<_> = rows.iter().map(|r| type_of(r)).collect();
+        assert_eq!(
+            types,
+            vec![
+                Some("counter"),
+                Some("created"),
+                Some("histogram"),
+                Some("histogram"),
+                Some("created"),
+                Some("counter"),
+                Some("created"),
+                Some("counter"),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_openmetrics_created_sample_is_rejected() {
+        let err = scan_om("# TYPE jobs counter\njobs_created not-a-number\n# EOF\n")
+            .expect_err("bad value");
+        assert_eq!(err.kind, PromErrorKind::InvalidValue);
     }
 
     #[test]

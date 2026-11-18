@@ -377,7 +377,8 @@ with a string `__name__` and numeric `__value__` to the metrics endpoint, so SQL
 that produces those columns is log-to-metric for free. Histograms and summaries
 are rebuilt from their component samples; incomplete or inconsistent ones are
 dropped rather than guessed. OpenMetrics `<family>_created` samples (start
-times) are skipped by the scanner until start-time tracking exists.
+times) keep their row with `__type__ = created` and are not exported as points
+until start-time tracking exists.
 
 **Alternative considered:** a separate metrics data model in the pipeline. Rejected
 because it would fork every transform and sink; metric rows reuse the log
