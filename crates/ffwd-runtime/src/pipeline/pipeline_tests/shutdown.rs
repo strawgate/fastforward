@@ -559,28 +559,43 @@ async fn shutdown_with_down_output_and_saturated_pool_exits_promptly() {
     pipeline.set_pool_drain_timeout(Duration::from_secs(60));
     pipeline.set_shutdown_retry_grace(Duration::from_secs(1));
 
+    // Cancel only once the pool is saturated: with one worker stuck on batch
+    // 0 and batch 1 queued, a third batch id means the loop has entered
+    // `submit_batch` for batch 2 and is parked there.
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    let metrics = Arc::clone(pipeline.metrics());
+    let canceller = tokio::spawn(async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while metrics.next_batch_id.load(Ordering::Relaxed) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pool never saturated: the loop did not reach a third submit"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let cancelled_at = std::time::Instant::now();
         sd.cancel();
+        cancelled_at
     });
 
-    let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(10), pipeline.run_async(&shutdown)).await;
+    let finished_at = std::time::Instant::now();
 
     assert!(
         result.is_ok(),
         "shutdown stalled behind a saturated pool with a down output"
     );
     assert!(result.unwrap().is_ok(), "pipeline should shut down cleanly");
-    let elapsed = started.elapsed();
-    // 500ms before shutdown plus the 1s retry window.
+    let cancelled_at = canceller.await.expect("canceller task");
+    let elapsed = finished_at.duration_since(cancelled_at);
+    // Workers keep retrying for the 1s window, then give up well before the
+    // 60s drain timeout.
     assert!(
-        elapsed >= Duration::from_millis(1400),
+        elapsed >= Duration::from_millis(900),
         "workers should keep retrying for the grace window, shutdown took {elapsed:?}"
     );
-    assert!(elapsed < Duration::from_secs(5), "shutdown took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(4), "shutdown took {elapsed:?}");
     assert_eq!(
         pipeline
             .metrics
