@@ -12,6 +12,7 @@ Prints a JSON list for `strategy.matrix.include`, one object per shard:
 Usage:
     scripts/kani_plan.py --all
     scripts/kani_plan.py --changed-files '["crates/ffwd-io/src/x.rs"]'
+    scripts/kani_plan.py --changed-files-from changed.json
 """
 
 from __future__ import annotations
@@ -54,7 +55,12 @@ GLOBAL_INPUTS = {
     "scripts/kani_shard.py",
     "dev-docs/verification/kani-boundary-contract.toml",
     "scripts/verify_kani_boundary_contract.py",
+    "scripts/verify_verification_trigger_contract.py",
 }
+
+# dorny/paths-filter lists PR files through the GitHub API, which stops at
+# 3,000 files. A list that long may be truncated, so plan everything.
+MAX_LISTED_FILES = 3000
 
 
 def workspace_crates() -> dict[str, tuple[str, set[str]]]:
@@ -96,7 +102,7 @@ def transitive_deps(crates: dict[str, tuple[str, set[str]]], name: str) -> set[s
 
 
 def affected_kani_crates(changed: list[str]) -> set[str]:
-    if any(path in GLOBAL_INPUTS for path in changed):
+    if len(changed) >= MAX_LISTED_FILES or any(path in GLOBAL_INPUTS for path in changed):
         return set(SHARDS)
     crates = workspace_crates()
     touched = {
@@ -121,9 +127,20 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="plan every shard")
     group.add_argument("--changed-files", help="JSON list of changed paths")
+    group.add_argument(
+        "--changed-files-from", help="file holding a JSON list of changed paths"
+    )
     args = parser.parse_args()
 
-    selected = set(SHARDS) if args.all else affected_kani_crates(json.loads(args.changed_files))
+    if args.all:
+        selected = set(SHARDS)
+    else:
+        raw = (
+            Path(args.changed_files_from).read_text(encoding="utf-8")
+            if args.changed_files_from
+            else args.changed_files
+        )
+        selected = affected_kani_crates(json.loads(raw.strip() or "[]"))
     print(json.dumps(build_matrix(selected), separators=(",", ":")))
     return 0
 

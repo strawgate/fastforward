@@ -213,13 +213,16 @@ KANI_JOB_NAMES = [
 ]
 
 
-def extract_kani_plan_crates() -> set[str]:
-    """Crates named in the SHARDS table of scripts/kani_plan.py."""
-    tree = ast.parse((ROOT / "scripts" / "kani_plan.py").read_text(encoding="utf-8"))
+def extract_kani_plan_crates(source: str | None = None) -> set[str]:
+    """Crates the SHARDS table of scripts/kani_plan.py gives at least one shard."""
+    if source is None:
+        source = (ROOT / "scripts" / "kani_plan.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
     for node in ast.walk(tree):
         target = getattr(node, "target", None)
         if isinstance(target, ast.Name) and target.id == "SHARDS" and node.value is not None:
-            return set(ast.literal_eval(node.value))
+            shards = ast.literal_eval(node.value)
+            return {crate for crate, count in shards.items() if isinstance(count, int) and count > 0}
     raise ValueError("scripts/kani_plan.py missing SHARDS table")
 
 
@@ -273,7 +276,7 @@ def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
     if any("scripts/kani_shard.py" in line for line in kani_block):
         for line in kani_block:
             crates |= set(re.findall(r"\bcrate:\s*([A-Za-z0-9_-]+)", line))
-        if any("kani_matrix" in line for line in kani_block):
+        if any(re.search(r"\binclude:.*kani_matrix", line) for line in kani_block):
             crates |= extract_kani_plan_crates()
 
     return crates
@@ -577,6 +580,37 @@ jobs:
       - run: echo hi
 """
         self.assertEqual(extract_kani_args_crates(ci_text), {"ffwd-core", "ffwd-arrow"})
+
+    def test_extract_kani_args_crates_dynamic_matrix_uses_plan(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    if: needs.changes.outputs.kani_matrix != '[]'
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.kani_matrix) }}
+    steps:
+      - run: python3 scripts/kani_shard.py --crate ${{ matrix.crate }}
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), extract_kani_plan_crates())
+
+    def test_extract_kani_args_crates_literal_include_ignores_plan(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    if: needs.changes.outputs.kani_matrix != '[]'
+    strategy:
+      matrix:
+        include:
+          - { crate: ffwd-core, shard: 1, of: 1 }
+    steps:
+      - run: python3 scripts/kani_shard.py --crate ${{ matrix.crate }}
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), {"ffwd-core"})
+
+    def test_extract_kani_plan_crates_skips_zero_shards(self) -> None:
+        source = 'SHARDS: dict[str, int] = {"ffwd-core": 0, "ffwd-arrow": 2}\n'
+        self.assertEqual(extract_kani_plan_crates(source), {"ffwd-arrow"})
 
     def test_extract_kani_args_crates_uses_kani_action_step(self) -> None:
         ci_text = """

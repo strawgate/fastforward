@@ -106,13 +106,18 @@ jobs:
       - name: Plan Kani shards
         id: kani-plan
         env:
-          CHANGED_FILES: ${{ steps.filter.outputs.all_files }}
           RUN_ALL: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
         run: |
           if [ "$RUN_ALL" = "true" ]; then
             matrix=$(python3 scripts/kani_plan.py --all)
           else
-            matrix=$(python3 scripts/kani_plan.py --changed-files "${CHANGED_FILES:-[]}")
+            # Write the list to a file: a large PR's list can exceed the
+            # per-string limit for environment variables and argv. It is a
+            # single JSON line, so it cannot end the heredoc early.
+            cat > "$RUNNER_TEMP/changed-files.json" <<'KANI_CHANGED_FILES_EOF'
+          ${{ steps.filter.outputs.all_files }}
+          KANI_CHANGED_FILES_EOF
+            matrix=$(python3 scripts/kani_plan.py --changed-files-from "$RUNNER_TEMP/changed-files.json")
           fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Kani shards: $(echo "$matrix" | python3 -c 'import json,sys; m=json.load(sys.stdin); print(len(m), sorted({e["crate"] for e in m}))')"
