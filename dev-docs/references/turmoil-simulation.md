@@ -26,7 +26,8 @@ Guidance for deterministic concurrency simulation tests.
 - Flake triage without seed replay, making regressions irreproducible.
 - Tests that only assert final totals and miss link-level backlog or transition-order regressions.
 - Random link failures (`fail_rate`) on raw turmoil TCP: turmoil never retransmits, so a dropped
-  segment stalls the receiver for the rest of the connection while every sender write succeeds.
+  segment stalls the receiver for the rest of the connection, while sender writes can still succeed
+  without delivery (or block later once flow-control credits run out).
   Use `TurmoilTcpSink::with_ack_timeout` with `run_acking_tcp_server` so loss surfaces as a
   retryable send error.
 
@@ -42,11 +43,14 @@ TURMOIL_SEED=42 cargo test --features turmoil --test turmoil_sim -- --nocapture
 for seed in {1..100}; do TURMOIL_SEED=$seed cargo test --features turmoil --test turmoil_sim; done
 ```
 
-Nightly seed sweep (same script CI runs; records each failing seed and test name in `<out-dir>/failures.tsv`):
+Nightly seed sweep: the same script CI runs. Arguments are shard index, shard count, total seeds and
+output directory. Each failing seed is recorded in `<out-dir>/failures.tsv` as `<seed>\t<test>`; when
+no test name is available the second field is `TIMEOUT ...` or `UNKNOWN ...`, so read
+`<out-dir>/logs/seed-<N>.log` instead of using it as a test filter. Requires GNU `timeout` (with
+`--kill-after`) and `jq` (unless `TURMOIL_SIM_BIN` points at a prebuilt test binary).
 
 ```bash
-scripts/turmoil-seed-sweep.sh <shard-index> <shard-count> <total-seeds> <out-dir>
-scripts/turmoil-seed-sweep.sh 0 1 20 /tmp/turmoil-sweep   # seeds 1..20 locally
+scripts/turmoil-seed-sweep.sh 0 1 20 /tmp/turmoil-sweep   # seeds 1..20 in one shard
 ```
 
 Replay and history-specific checks:

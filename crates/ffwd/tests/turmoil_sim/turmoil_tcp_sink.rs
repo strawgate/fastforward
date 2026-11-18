@@ -7,7 +7,8 @@
 //! Turmoil's simulated TCP has no retransmission: when a link is randomly
 //! partitioned (`fail_rate`), in-flight segments are silently discarded and
 //! the receiver stalls forever waiting for the missing sequence number, while
-//! the sender sees every write succeed. Tests that inject random link failures
+//! sender writes can still succeed without delivery (or later block once
+//! flow-control credits run out). Tests that inject random link failures
 //! must therefore enable [`TurmoilTcpSink::with_ack_timeout`] (paired with
 //! `run_acking_tcp_server`) so lost data surfaces as a send error and the
 //! worker pool retries the batch, the way a real transport would.
@@ -125,13 +126,16 @@ impl Sink for TurmoilTcpSink {
                     }
                     payload.push(b'\n');
                 }
-                let stream = self.stream.as_mut().expect("connected above");
-                if let Err(e) = Self::send_acked(stream, &payload, batch.num_rows(), limit).await {
-                    // Lost segment or ack: abandon this connection so the
-                    // retry starts on a fresh one.
-                    self.stream = None;
+                // Take the stream out for the exchange so an error, or the
+                // worker cancelling this future, leaves no half-acked
+                // connection behind for the retry to reuse.
+                let mut stream = self.stream.take().expect("connected above");
+                if let Err(e) =
+                    Self::send_acked(&mut stream, &payload, batch.num_rows(), limit).await
+                {
                     return SendResult::IoError(e);
                 }
+                self.stream = Some(stream);
                 self.delivered_rows
                     .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                 return SendResult::Ok;

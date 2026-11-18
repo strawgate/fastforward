@@ -153,9 +153,12 @@ jobs:
         run: cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run
       - name: Run turmoil tests with shard-assigned seeds
         env:
-          # Stop starting new seeds well before the job timeout so results
-          # are always uploaded instead of the shard being cancelled.
+          # Stop starting new seeds well before the 75-minute job timeout so
+          # results are always uploaded. Budget: ~10 min setup/build + 50 min
+          # of seeds + one last seed (<= 5 min + 30 s kill grace) + upload.
+          # Healthy seeds take 5-20 s, so the per-seed cap only catches hangs.
           TURMOIL_SWEEP_BUDGET_SECS: "3000"
+          TURMOIL_SEED_TIMEOUT_SECS: "300"
         run: |
           scripts/turmoil-seed-sweep.sh "${{ matrix.shard_index }}" 8 1000 \
             "turmoil-sweep/shard-${{ matrix.shard_index }}"
@@ -163,7 +166,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: turmoil-sweep-shard-${{ matrix.shard_index }}-${{ github.run_id }}
+          name: turmoil-sweep-shard-${{ matrix.shard_index }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: turmoil-sweep/
           if-no-files-found: ignore
           retention-days: 30
@@ -180,7 +183,7 @@ jobs:
       - name: Download turmoil shard results
         uses: actions/download-artifact@v8
         with:
-          pattern: turmoil-sweep-shard-*-${{ github.run_id }}
+          pattern: turmoil-sweep-shard-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/turmoil-artifacts
           # Every shard writes into its own shard-<N>/ directory, so merging
           # keeps a stable layout whether one or many artifacts match.
@@ -193,12 +196,18 @@ jobs:
           repro_file="$(mktemp)"
           failed_shards=0
           total_fail_count=0
+          shards_with_results=0
+          unfinished_shards=""
 
           # Locate shard result directories by their marker file rather than
           # by artifact directory names.
           while IFS= read -r shard_file; do
             shard_dir="$(dirname "$shard_file")"
             shard="$(cat "$shard_file")"
+            shards_with_results=$((shards_with_results + 1))
+            if [ ! -f "$shard_dir/summary.txt" ]; then
+              unfinished_shards="${unfinished_shards} ${shard}"
+            fi
             failures_tsv="$shard_dir/failures.tsv"
             fail_count=0
             if [ -s "$shard_dir/failed_seeds.txt" ]; then
@@ -220,7 +229,11 @@ jobs:
               awk -F'\t' 'NR <= 25 { printf "  - seed `%s`: `%s`\n", $1, $2 }
                 END { if (NR > 25) printf "  - ... %d more (see artifact)\n", NR - 25 }' "$failures_tsv"
             } >>"$summary_file"
-            awk -F'\t' '$2 !~ / / { printf "TURMOIL_SEED=%s cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim %s -- --exact\n", $1, $2 }' \
+            # Named tests replay with --exact; TIMEOUT/UNKNOWN rows replay the
+            # whole suite serially, as the sweep ran it.
+            awk -F'\t' '
+              $2 ~ /^(TIMEOUT|UNKNOWN)/ { printf "TURMOIL_SEED=%s cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim -- --test-threads=1\n", $1; next }
+              { printf "TURMOIL_SEED=%s cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim %s -- --exact\n", $1, $2 }' \
               "$failures_tsv" >>"$repro_file"
           done < <(find /tmp/turmoil-artifacts -type f -name shard.txt | sort)
 
@@ -255,6 +268,10 @@ jobs:
             fi
             echo
             echo "- Failed shards: ${failed_shards}"
+            echo "- Shards with results: ${shards_with_results}/8 (missing shards failed before the sweep ran; check the run)"
+            if [ -n "$unfinished_shards" ]; then
+              echo "- Shards that stopped mid-sweep:${unfinished_shards}"
+            fi
             echo "- Total failed seeds: ${total_fail_count}"
             echo
             cat "$summary_file"

@@ -596,7 +596,7 @@ fn tcp_hold_release_burst_delivery() {
 ///
 /// Turmoil TCP never retransmits: a random partition silently discards
 /// in-flight segments and the receiver then stalls on the sequence gap for
-/// the rest of the connection, while every sender write still "succeeds".
+/// the rest of the connection, while sender writes can still "succeed".
 /// The sink therefore waits for per-line acks with a timeout, so a lost
 /// segment surfaces as a send error and the worker pool retries the batch on
 /// a fresh connection. Without acks, seeds such as 63, 67, 153 and 329
@@ -649,15 +649,19 @@ fn tcp_intermittent_failures_with_fail_rate() {
     // Every line must arrive at least once: retries may duplicate lines whose
     // ack was lost, but none may be silently dropped.
     let received = server_check.received_lines.load(Ordering::Relaxed);
-    let distinct = server_check
+    let delivered_nums: std::collections::BTreeSet<u64> = server_check
         .distinct_lines
         .lock()
         .expect("distinct_lines lock")
-        .len();
-    assert_eq!(
-        distinct, 50,
-        "expected all 50 distinct lines despite 0.1% fail rate (seed={seed}), \
-         got {distinct} distinct of {received} received"
+        .iter()
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter_map(|v| v.get("num").and_then(serde_json::Value::as_u64))
+        .collect();
+    let missing: Vec<u64> = (0..50).filter(|n| !delivered_nums.contains(n)).collect();
+    assert!(
+        missing.is_empty(),
+        "expected every line 0..50 despite 0.1% fail rate (seed={seed}); \
+         missing {missing:?} ({received} lines received)"
     );
 }
 

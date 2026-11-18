@@ -18,7 +18,9 @@
 # Outputs (all inside <out-dir>, which is self-describing so the report job
 # does not depend on how upload/download-artifact lays out directories):
 #   shard.txt          "<index>/<count>"
-#   failures.tsv       one "<seed>\t<test name>" line per failing test
+#   failures.tsv       one "<seed>\t<test name>" line per failing test; the
+#                      second field is "TIMEOUT ..." or "UNKNOWN ..." when no
+#                      test name is available (see logs/seed-<N>.log)
 #   failed_seeds.txt   one failing seed per line
 #   skipped_seeds.txt  seeds not run because the time budget ran out
 #   summary.txt        run/failed/skipped counts
@@ -40,6 +42,13 @@ OUT_DIR=$4
 BUDGET_SECS=${TURMOIL_SWEEP_BUDGET_SECS:-3000}
 SEED_TIMEOUT_SECS=${TURMOIL_SEED_TIMEOUT_SECS:-600}
 
+is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+if ! is_uint "$SHARD_INDEX" || ! is_uint "$SHARD_COUNT" || ! is_uint "$TOTAL_SEEDS" \
+  || [ "$SHARD_COUNT" -lt 1 ] || [ "$SHARD_INDEX" -ge "$SHARD_COUNT" ]; then
+  echo "ERROR: need 0 <= shard-index < shard-count and numeric total-seeds" >&2
+  exit 2
+fi
+
 mkdir -p "$OUT_DIR/logs"
 : >"$OUT_DIR/failures.tsv"
 : >"$OUT_DIR/failed_seeds.txt"
@@ -48,9 +57,11 @@ echo "${SHARD_INDEX}/${SHARD_COUNT}" >"$OUT_DIR/shard.txt"
 
 BIN=${TURMOIL_SIM_BIN:-}
 if [ -z "$BIN" ]; then
-  BIN=$(cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run --message-format=json 2>/dev/null \
+  # Cargo diagnostics stay on stderr; a failed build falls through to the
+  # missing-binary error below instead of aborting under pipefail.
+  BIN=$(cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run --message-format=json \
     | jq -r 'select(.executable != null and (.target.kind // [] | index("test"))) | .executable' \
-    | head -1)
+    | sed -n '1p') || BIN=""
 fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   echo "ERROR: could not find turmoil test binary" >&2
@@ -88,12 +99,16 @@ for seed in $(seq 1 "$TOTAL_SEEDS"); do
     cp "$seed_out" "$OUT_DIR/logs/seed-${seed}.log"
     echo "$seed" >>"$OUT_DIR/failed_seeds.txt"
 
-    # libtest prints a final "failures:" block that lists one test per
-    # indented line, terminated by a blank line.
+    # libtest ends with a "failures:" block listing one test per indented
+    # line just before "test result:". Captured test output can also contain
+    # "failures:" lines, so keep only the last block seen before the summary.
     tests=$(awk '
-      /^failures:$/ { block++; next }
-      block >= 2 && /^    [^ ]/ { sub(/^    /, ""); print; next }
-      block >= 2 && /^$/ { exit }
+      /^failures:$/ { list = ""; inblock = 1; next }
+      /^test result:/ { exit }
+      inblock && /^    [^ ]/ { sub(/^    /, ""); list = list $0 "\n"; next }
+      inblock && /^$/ { next }
+      inblock { inblock = 0; list = "" }
+      END { printf "%s", list }
     ' "$seed_out")
     if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
       tests="TIMEOUT after ${SEED_TIMEOUT_SECS}s"
