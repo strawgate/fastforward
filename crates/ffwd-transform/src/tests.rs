@@ -135,6 +135,35 @@ fn test_filter() {
 }
 
 #[test]
+fn string_column_compared_to_number_uses_numeric_order() {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "status",
+        DataType::Utf8,
+        true,
+    )]));
+    let status: ArrayRef = Arc::new(StringArray::from(vec![
+        Some("50"),
+        Some("404"),
+        Some("500"),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![status]).unwrap();
+    let mut transform = SqlTransform::new("SELECT status FROM logs WHERE status >= 400").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    // "50" would sort after "400" as text; DataFusion 55 compares numerically.
+    assert_eq!(result.num_rows(), 2);
+    assert_utf8_column_value(&result, "status", 0, "404");
+    assert_utf8_column_value(&result, "status", 1, "500");
+}
+
+#[test]
+fn non_numeric_string_compared_to_number_errors() {
+    let batch = make_test_batch();
+    let mut transform = SqlTransform::new("SELECT * FROM logs WHERE status >= 400").unwrap();
+    let err = transform.execute_blocking(batch).unwrap_err();
+    assert!(err.to_string().contains("Cannot cast string"), "{err}");
+}
+
+#[test]
 fn wildcard_filter_preserves_sql_visible_internal_metadata() {
     let batch = make_source_metadata_batch();
     let mut transform = SqlTransform::new("SELECT * FROM logs WHERE __source_id = 2").unwrap();

@@ -55,7 +55,7 @@ edition = "2024"
 rust-version = "1.89"
 
 [workspace.dependencies]
-arrow = { version = "58", default-features = false, features = [
+arrow = { version = "59", default-features = false, features = [
     "ipc_compression",
 ] }
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
@@ -65,12 +65,12 @@ clap = "4.5"
 clap_complete = "4.5"
 clap_complete_nushell = "4.6"
 config = { version = "0.15.22", default-features = false }
-arrow-json = "58"
-parquet = { version = "58", default-features = false, features = [
+arrow-json = "59"
+parquet = { version = "59", default-features = false, features = [
     "arrow",
     "zstd",
 ] }
-datafusion = { version = "53", default-features = false, features = [
+datafusion = { version = "55", default-features = false, features = [
     "sql",
     "string_expressions",
     "unicode_expressions",
@@ -80,16 +80,16 @@ datafusion = { version = "53", default-features = false, features = [
 fail = "0.5"
 futures-util = "0.3"
 globset = "0.4"
-opentelemetry = { version = "0.31", default-features = false, features = [
+opentelemetry = { version = "0.33", default-features = false, features = [
     "trace",
     "metrics",
 ] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = [
+opentelemetry_sdk = { version = "0.33", default-features = false, features = [
     "trace",
     "metrics",
     "rt-tokio",
 ] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
     "http-proto",
     "reqwest-client",
     "trace",
@@ -101,7 +101,7 @@ sonic-rs = "0.5"
 tokio = { version = "1" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.34"
 turmoil = "0.7"
 walkdir = "2"
 smallvec = { version = "1", features = ["union"] }

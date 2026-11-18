@@ -192,9 +192,12 @@ fn validate_transform_probe_read_only(
             .collect()
     };
 
+    // Probe value "0" stays valid when DataFusion coerces a string column to a
+    // number (e.g. `status >= 400` casts `status` to Int64), so the probe only
+    // fails on genuine planning errors.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
-        .map(|_| Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef)
+        .map(|_| Arc::new(StringArray::from(vec![Some("0")])) as ArrayRef)
         .collect();
 
     if source_metadata == SourceMetadataStyle::Fastforward {

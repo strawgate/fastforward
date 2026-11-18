@@ -286,6 +286,7 @@ fn populate_generated_record(
         if let Some(any) = otlp_any_value_from_array(*arr, row) {
             record.attributes.push(KeyValue {
                 key: name.clone(),
+                key_strindex: 0,
                 value: Some(any),
             });
         }
@@ -298,6 +299,7 @@ fn populate_resource_attributes(resource: &mut Resource, metadata: &BatchMetadat
     for (k, v) in metadata.resource_attrs.iter() {
         resource.attributes.push(KeyValue {
             key: k.clone(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(Value::StringValue(v.clone())),
             }),

@@ -7,6 +7,7 @@ fn projected_fallback_for_array_attr_matches_prost() {
                     body: Some(any_string("fallback body")),
                     attributes: vec![KeyValue {
                         key: "tags".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::ArrayValue(ArrayValue {
                                 values: vec![any_string("x"), any_string("y")],
@@ -42,6 +43,7 @@ fn projected_mixed_primitive_and_complex_attrs_match_prost() {
                         kv_i64("count", 42),
                         KeyValue {
                             key: "nested_list".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::KvlistValue(KeyValueList {
                                     values: vec![kv_string("deep", "val")],
@@ -150,6 +152,7 @@ fn projected_complex_anyvalue_escapes_control_chars_quotes_and_backslashes_like_
                                     value: Some(Value::KvlistValue(KeyValueList {
                                         values: vec![KeyValue {
                                             key: weird.into(),
+                                            key_strindex: 0,
                                             value: Some(any_string(weird)),
                                         }],
                                     })),
@@ -159,10 +162,12 @@ fn projected_complex_anyvalue_escapes_control_chars_quotes_and_backslashes_like_
                     }),
                     attributes: vec![KeyValue {
                         key: weird.into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::KvlistValue(KeyValueList {
                                 values: vec![KeyValue {
                                     key: weird.into(),
+                                    key_strindex: 0,
                                     value: Some(any_string(weird)),
                                 }],
                             })),
@@ -205,10 +210,12 @@ fn projected_complex_anyvalue_non_finite_and_negative_zero_match_prost() {
                     }),
                     attributes: vec![KeyValue {
                         key: "float.edge.cases".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::KvlistValue(KeyValueList {
                                 values: vec![KeyValue {
                                     key: "value".into(),
+                                    key_strindex: 0,
                                     value: Some(AnyValue {
                                         value: Some(Value::DoubleValue(-0.0)),
                                     }),

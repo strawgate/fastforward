@@ -17,7 +17,6 @@
 //!
 //! Returns NULL fields for unresolvable IPs (private ranges, malformed, not in DB).
 
-use std::any::Any;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -104,10 +103,6 @@ impl GeoLookupUdf {
 }
 
 impl ScalarUDFImpl for GeoLookupUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "geo_lookup"
     }

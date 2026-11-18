@@ -128,6 +128,7 @@ fn semantic_request() -> ExportLogsServiceRequest {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::StringValue("checkout-api".into())),
                     }),
@@ -144,24 +145,28 @@ fn semantic_request() -> ExportLogsServiceRequest {
                     attributes: vec![
                         KeyValue {
                             key: "request_count".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::IntValue(7)),
                             }),
                         },
                         KeyValue {
                             key: "latency_ratio".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::DoubleValue(3.5)),
                             }),
                         },
                         KeyValue {
                             key: "sampled".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::BoolValue(true)),
                             }),
                         },
                         KeyValue {
                             key: "payload_hex".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::BytesValue(vec![0x00, 0x01, 0x02, 0xff])),
                             }),

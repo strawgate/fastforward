@@ -300,7 +300,9 @@ fn write_any_value_json(value: &AnyValue, out: &mut Vec<u8>) -> bool {
             out.push(b']');
             true
         }
-        None => false,
+        // Profiles-only dictionary reference; the OTLP spec says non-profiling
+        // signals must treat it as absent.
+        Some(Value::StringValueStrindex(_)) | None => false,
     }
 }
 

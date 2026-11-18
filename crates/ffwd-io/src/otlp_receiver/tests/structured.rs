@@ -44,12 +44,14 @@ fn make_test_request() -> Vec<u8> {
                         attributes: vec![
                             KeyValue {
                                 key: "service".into(),
+                                key_strindex: 0,
                                 value: Some(AnyValue {
                                     value: Some(Value::StringValue("myapp".into())),
                                 }),
                             },
                             KeyValue {
                                 key: "payload".into(),
+                                key_strindex: 0,
                                 value: Some(AnyValue {
                                     value: Some(Value::BytesValue(vec![0x01, 0x02, 0x03, 0x04])),
                                 }),
@@ -64,6 +66,7 @@ fn make_test_request() -> Vec<u8> {
                         }),
                         attributes: vec![KeyValue {
                             key: "status".into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::IntValue(500)),
                             }),
@@ -128,6 +131,7 @@ fn structured_batch_preserves_boolean_type_and_dotted_attributes() {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::StringValue("checkout-api".into())),
                     }),
@@ -138,6 +142,7 @@ fn structured_batch_preserves_boolean_type_and_dotted_attributes() {
                 log_records: vec![LogRecord {
                     attributes: vec![KeyValue {
                         key: "sampled".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::BoolValue(true)),
                         }),
@@ -184,6 +189,7 @@ fn structured_batch_preserves_resource_boolean_type() {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "resource.sampled".into(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::BoolValue(true)),
                     }),
@@ -218,6 +224,7 @@ fn structured_values_are_serialized_deterministically() {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "resource.labels".into(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::ArrayValue(ArrayValue {
                             values: vec![
@@ -249,23 +256,27 @@ fn structured_values_are_serialized_deterministically() {
                     }),
                     attributes: vec![KeyValue {
                         key: "ctx".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::KvlistValue(KeyValueList {
                                 values: vec![
                                     KeyValue {
                                         key: "b".into(),
+                                        key_strindex: 0,
                                         value: Some(AnyValue {
                                             value: Some(Value::StringValue("two".into())),
                                         }),
                                     },
                                     KeyValue {
                                         key: "a".into(),
+                                        key_strindex: 0,
                                         value: Some(AnyValue {
                                             value: Some(Value::IntValue(1)),
                                         }),
                                     },
                                     KeyValue {
                                         key: "a".into(),
+                                        key_strindex: 0,
                                         value: Some(AnyValue {
                                             value: Some(Value::IntValue(3)),
                                         }),
@@ -319,18 +330,21 @@ fn canonical_fields_are_not_shadowed_by_attribute_collisions() {
                     attributes: vec![
                         KeyValue {
                             key: field_names::FLAGS.into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::StringValue("shadow-flags".into())),
                             }),
                         },
                         KeyValue {
                             key: field_names::SCOPE_NAME.into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::StringValue("shadow-scope".into())),
                             }),
                         },
                         KeyValue {
                             key: field_names::SCOPE_VERSION.into(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(Value::StringValue("shadow-version".into())),
                             }),
@@ -465,6 +479,7 @@ fn record_attributes_override_resource_attributes_in_structured_batch() {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::StringValue("resource".into())),
                     }),
@@ -475,6 +490,7 @@ fn record_attributes_override_resource_attributes_in_structured_batch() {
                 log_records: vec![LogRecord {
                     attributes: vec![KeyValue {
                         key: "service.name".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::StringValue("record".into())),
                         }),

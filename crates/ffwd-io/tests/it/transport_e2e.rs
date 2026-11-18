@@ -612,6 +612,7 @@ fn otlp_protobuf_roundtrip() {
                     }),
                     attributes: vec![KeyValue {
                         key: "env".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::StringValue("prod".into())),
                         }),
@@ -685,6 +686,7 @@ fn otlp_gzip_protobuf_roundtrip() {
                     }),
                     attributes: vec![KeyValue {
                         key: "env".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::StringValue("prod".into())),
                         }),
