@@ -183,7 +183,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      checks: write  # needed by rustsec/audit-check@v2 to create check run annotations
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
@@ -261,11 +260,12 @@ jobs:
       - name: Unused dependencies check
         run: cargo machete
 
+      # Run cargo-audit directly: rustsec/audit-check failed the job with a
+      # "Not Found" error updating its own check run, even after a clean audit.
+      - uses: taiki-e/install-action@cargo-audit
+
       - name: Security audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ github.token }}
-          args: "--deny=vuln --deny=unsound --deny=yanked"
+        run: cargo audit --deny unsound --deny yanked
 
   # -------------------------------------------------------------------------
   # Tests — Linux and macOS in parallel
