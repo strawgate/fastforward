@@ -587,16 +587,48 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                 (start, start + t.len())
             });
         let _hash = toks.next();
-        match toks.next().map(|(s, e)| &self.buf[s..e]) {
+        let keyword = toks.next();
+        match keyword.map(|(s, e)| &self.buf[s..e]) {
             Some(b"TYPE") => {
-                if let (Some(name), Some(ty)) = (toks.next(), toks.next()) {
-                    self.family = Some((name.0, name.1, ty.0, ty.1));
-                }
+                let after_kw = keyword.map_or(end, |(_, e)| e);
+                self.family = self.parse_type_line(after_kw, end);
             }
             Some(b"EOF") => return None,
             _ => {}
         }
         Some(end + 1)
+    }
+
+    /// Parse the `<name> <type>` part of a `# TYPE` line in `pos..end`.
+    /// The name may be quoted (UTF-8 metric names); quoted names that contain
+    /// escapes are not matched against samples, so they yield `None`.
+    fn parse_type_line(&self, pos: usize, end: usize) -> Option<(usize, usize, usize, usize)> {
+        let token_end = |from: usize| {
+            let mut i = from;
+            while i < end && self.byte(i).is_some_and(|b| !is_blank(b)) {
+                i += 1;
+            }
+            i
+        };
+        let p = skip_blanks(self.buf, pos);
+        let (name_start, name_end, after) = if self.byte(p) == Some(b'"') {
+            let mut q = p + 1;
+            loop {
+                match self.byte(q) {
+                    _ if q >= end => return None,
+                    Some(b'\\') => return None,
+                    Some(b'"') => break,
+                    _ => q += 1,
+                }
+            }
+            (p + 1, q, q + 1)
+        } else {
+            let e = token_end(p);
+            (p, e, e)
+        };
+        let ts = skip_blanks(self.buf, after);
+        let te = token_end(ts);
+        (name_end > name_start && te > ts && ts < end).then_some((name_start, name_end, ts, te))
     }
 
     /// Parse one sample line starting at `pos` (first non-blank byte).
@@ -649,7 +681,12 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             Some(b'#') => p = self.skip_exemplar(p),
             Some(_) => {
                 let tend = self.cur.next_from(p);
-                let ts = parse_int_fast(&self.buf[p..tend])
+                let raw_ts = &self.buf[p..tend];
+                let raw_ts = match raw_ts {
+                    [b'+', rest @ ..] if rest.first().is_some_and(u8::is_ascii_digit) => rest,
+                    other => other,
+                };
+                let ts = parse_int_fast(raw_ts)
                     .ok_or_else(|| self.err(p, PromErrorKind::InvalidTimestamp))?;
                 self.builder.append_i64_by_idx(self.ts_idx, ts);
                 p = skip_blanks(self.buf, tend);
@@ -889,6 +926,31 @@ mod tests {
             assert!(r.contains(&("__type__".into(), "histogram".into())));
         }
         assert!(!rows[4].iter().any(|(k, _)| k == "__type__"));
+    }
+
+    #[test]
+    fn plus_signed_timestamp_is_accepted() {
+        let rows = scan("up 1 +1395066363000\n").expect("should succeed");
+        assert_eq!(
+            rows[0][2],
+            ("__timestamp_ms__".into(), "1395066363000".into())
+        );
+        assert_eq!(
+            scan("up 1 +-5\n").expect_err("bad").kind,
+            PromErrorKind::InvalidTimestamp
+        );
+        assert_eq!(
+            scan("up 1 +\n").expect_err("bad").kind,
+            PromErrorKind::InvalidTimestamp
+        );
+    }
+
+    #[test]
+    fn quoted_type_name_matches_quoted_samples() {
+        let rows = scan("# TYPE \"my.metric\" gauge\n{\"my.metric\"} 1\n# TYPE \"a b\" counter\n{\"a b_total\"} 2\n")
+            .expect("should succeed");
+        assert!(rows[0].contains(&("__type__".into(), "gauge".into())));
+        assert!(rows[1].contains(&("__type__".into(), "counter".into())));
     }
 
     #[test]
