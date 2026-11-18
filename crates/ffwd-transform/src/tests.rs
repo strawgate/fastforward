@@ -1795,7 +1795,9 @@ fn utf8_values(batch: &RecordBatch, col: &str) -> Vec<String> {
         .as_any()
         .downcast_ref::<StringArray>()
         .expect("Utf8 array");
-    (0..array.len()).map(|i| array.value(i).to_string()).collect()
+    (0..array.len())
+        .map(|i| array.value(i).to_string())
+        .collect()
 }
 
 /// Enrichment table whose snapshot the test can change between batches.
@@ -1826,7 +1828,10 @@ fn cached_plan_reads_each_new_batch() {
 
     let first = transform.execute_blocking(make_test_batch()).unwrap();
     assert_eq!(utf8_values(&first, "msg"), ["disk full", "oom killed"]);
-    assert!(transform.plan.is_some(), "plan is cached after the first batch");
+    assert!(
+        transform.plan.is_some(),
+        "plan is cached after the first batch"
+    );
 
     let schema = make_test_batch().schema();
     let second = RecordBatch::try_new(

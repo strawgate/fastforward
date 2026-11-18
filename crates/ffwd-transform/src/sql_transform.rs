@@ -154,11 +154,10 @@ impl SqlTransform {
                 .replace(batch)
                 .map_err(|e| TransformError::Sql(format!("Failed to create MemTable: {e}")))?,
             _ => {
-                let table = Arc::new(
-                    SwapTable::try_new(batch).map_err(|e| {
+                let table =
+                    Arc::new(SwapTable::try_new(batch).map_err(|e| {
                         TransformError::Sql(format!("Failed to create MemTable: {e}"))
-                    })?,
-                );
+                    })?);
                 let _ = ctx.deregister_table("logs");
                 ctx.register_table("logs", Arc::clone(&table) as Arc<dyn TableProvider>)
                     .map_err(|e| TransformError::Sql(format!("Failed to register table: {e}")))?;
