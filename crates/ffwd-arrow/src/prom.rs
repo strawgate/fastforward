@@ -140,7 +140,8 @@ pub enum PromToArrowError {
     },
     /// A sample repeats a label name (`m{a="1",a="2"}`).
     DuplicateLabel,
-    /// Sparse label columns would need more null padding than the limit,
+    /// Sparse columns (labels, plus the synthetic `__timestamp_ms__` and
+    /// `__type__` columns) would need more null padding than the limit,
     /// i.e. the dense output would be far larger than the body.
     TooManyPaddedCells {
         /// The configured limit.
