@@ -215,7 +215,10 @@ jobs:
             total_fail_count=$((total_fail_count + fail_count))
             {
               echo "- Shard ${shard}: ${fail_count} failed seed(s), ${skipped} skipped for time budget"
-              awk -F'\t' '{ printf "  - seed `%s`: `%s`\n", $1, $2 }' "$failures_tsv"
+              # Cap detail rows so the issue body stays under GitHub's
+              # 65,536-character limit; full results are in the artifact.
+              awk -F'\t' 'NR <= 25 { printf "  - seed `%s`: `%s`\n", $1, $2 }
+                END { if (NR > 25) printf "  - ... %d more (see artifact)\n", NR - 25 }' "$failures_tsv"
             } >>"$summary_file"
             awk -F'\t' '$2 !~ / / { printf "TURMOIL_SEED=%s cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim %s -- --exact\n", $1, $2 }' \
               "$failures_tsv" >>"$repro_file"
