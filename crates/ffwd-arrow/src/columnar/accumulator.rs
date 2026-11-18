@@ -1618,36 +1618,35 @@ mod verification {
     }
 
     /// Sparse scatter: fact rows get their value, gap rows stay default.
+    ///
+    /// Checks every sparse fact pattern over 4 rows by enumeration. A
+    /// symbolic pattern made CBMC's propositional reduction run out of
+    /// memory (>14 GB) and killed the CI runner.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(17)]
     fn verify_scatter_values_sparse() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows > 0 && num_rows <= 4);
+        const NUM_ROWS: usize = 4;
+        // 1..15: at least one fact and at least one gap row.
+        for presence in 1u8..((1 << NUM_ROWS) - 1) {
+            let mut facts: Vec<(u32, i64)> = Vec::with_capacity(NUM_ROWS);
+            for row in 0..NUM_ROWS {
+                if presence & (1 << row) != 0 {
+                    facts.push((row as u32, row as i64 + 100));
+                }
+            }
 
-        let presence: u8 = kani::any();
-        let mut facts: Vec<(u32, i64)> = Vec::new();
-        for row in 0..num_rows {
-            if presence & (1 << row) != 0 {
-                facts.push((row as u32, row as i64 + 100));
+            let (values, dense) = scatter_values(&facts, NUM_ROWS, true);
+            assert!(!dense, "partial coverage must not be dense");
+            assert!(values.len() == NUM_ROWS);
+            for row in 0..NUM_ROWS {
+                if presence & (1 << row) != 0 {
+                    assert!(values[row] == row as i64 + 100);
+                } else {
+                    assert!(values[row] == 0, "gap row must be default");
+                }
             }
         }
-        kani::assume(!facts.is_empty());
-        kani::assume(facts.len() < num_rows);
-
-        let (values, dense) = scatter_values(&facts, num_rows, true);
-        assert!(!dense, "partial coverage must not be dense");
-        assert_eq!(values.len(), num_rows);
-
-        for row in 0..num_rows {
-            if presence & (1 << row) != 0 {
-                assert_eq!(values[row], row as i64 + 100);
-            } else {
-                assert_eq!(values[row], 0, "gap row must be default");
-            }
-        }
-
-        kani::cover!(facts.len() == 1, "single fact");
-        kani::cover!(num_rows == 4 && facts.len() == 2, "half-populated");
+        kani::cover!(true, "all sparse patterns checked");
     }
 
     /// Last-write-wins: when dedup=false (sparse path), later facts overwrite.
