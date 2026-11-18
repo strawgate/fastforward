@@ -282,7 +282,7 @@ pipelines:
         compression: none   # none (default) | gzip
     outputs:
       - type: otlp
-        endpoint: http://localhost:4318
+        endpoint: http://localhost:4318/v1/metrics
 ```
 
 See the [configuration reference](/configuration/reference/#prometheus_scrape-input)
