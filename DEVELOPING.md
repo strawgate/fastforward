@@ -396,9 +396,9 @@ Compressed Arrow IPC is `StreamWriter` with `IpcWriteOptions::try_with_compressi
 
 The `body` column can store the full input line and is often larger than all parsed columns combined. Line capture is disabled unless configured (raw inputs default to `line_field_name: body`).
 
-### Always use `just clippy`, never bare `cargo clippy`
+### Run clippy the way CI does: `--workspace -- -D warnings` on the pinned toolchain
 
-CI runs `cargo clippy -- -D warnings` (all warnings are errors). Bare `cargo clippy` only shows warnings, so code that looks clean locally fails in CI. The `just clippy` recipe matches CI exactly. Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
+CI runs `cargo clippy --workspace -- -D warnings` (all warnings are errors) on the Rust version pinned in `rust-toolchain.toml`. Bare `cargo clippy` only shows warnings, and `just clippy` skips the non-default members (`ffwd-transform`, `ffwd`), so code that looks clean locally can fail in CI. Use `just clippy-all` or `scripts/ci-local.sh pre-push` (which the pre-push hook runs). Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
 
 ### proptest finds bugs unit tests can't
 
