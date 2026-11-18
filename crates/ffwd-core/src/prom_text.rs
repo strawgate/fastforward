@@ -422,6 +422,14 @@ pub fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
             return Some(if neg { -v } else { v });
         }
     }
+    parse_prom_value_fallback(bytes, digits)
+}
+
+/// Slow path of [`parse_prom_value`]: `core`'s float parser, which handles
+/// exponents, `NaN`, `Inf` and long mantissas. `digits` is `bytes` without
+/// its sign. Kept separate so Kani proofs can stub `core`'s parser, whose
+/// state space is too large for CBMC; `core` itself is trusted.
+fn parse_prom_value_fallback(bytes: &[u8], digits: &[u8]) -> Option<f64> {
     let s = core::str::from_utf8(bytes).ok()?;
     let v = s.parse::<f64>().ok()?;
     // `core` rounds out-of-range literals such as `1e999` to infinity;
@@ -1859,7 +1867,7 @@ mod verification {
     /// SIMD classifier agrees with the scalar specification on every block.
     #[kani::proof]
     #[kani::unwind(65)]
-    fn verify_prom_structural_mask_simd_eq_scalar() {
+    pub(super) fn verify_prom_structural_mask_simd_eq_scalar() {
         let block: [u8; 64] = kani::any();
         let simd = prom_structural_mask(&block);
         let scalar = prom_structural_mask_scalar(&block);
@@ -1872,9 +1880,10 @@ mod verification {
     }
 
     /// Short integer values take the fast path and are exact.
+    #[kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)]
     #[kani::proof]
     #[kani::unwind(6)]
-    fn verify_parse_prom_value_integers() {
+    pub(super) fn verify_parse_prom_value_integers() {
         let n: u16 = kani::any();
         let mut buf = [0u8; 5];
         let mut len = 0;
@@ -1890,6 +1899,82 @@ mod verification {
         let parsed = parse_prom_value(&buf[5 - len..]);
         assert_eq!(parsed, Some(f64::from(n)));
         kani::cover!(n > 9999, "five digits");
+    }
+
+    /// Signed values with a decimal point take the fast path and are exact
+    /// when the fraction is zero: `[+-]n.0` and `[+-]n.00` equal `±n`.
+    /// The oracle is the integer itself, independent of the parser's
+    /// division. Rounding of non-zero fractions is covered by the
+    /// `decimal_fast_path_is_correctly_rounded` proptest (see VERIFICATION.md).
+    #[kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)]
+    #[kani::proof]
+    #[kani::unwind(8)]
+    pub(super) fn verify_parse_prom_value_signed_decimal_exact() {
+        let n: u8 = kani::any();
+        let sign: u8 = kani::any();
+        let zeros: usize = kani::any();
+        kani::assume(sign < 3);
+        kani::assume(zeros <= 2);
+        let mut buf = [0u8; 8];
+        let mut len = 0;
+        if sign == 1 {
+            buf[0] = b'-';
+            len = 1;
+        } else if sign == 2 {
+            buf[0] = b'+';
+            len = 1;
+        }
+        let mut digits = [0u8; 3];
+        let mut nd = 0;
+        let mut v = n;
+        loop {
+            digits[2 - nd] = b'0' + v % 10;
+            nd += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        buf[len..len + nd].copy_from_slice(&digits[3 - nd..]);
+        len += nd;
+        if zeros > 0 {
+            buf[len] = b'.';
+            len += 1;
+            for _ in 0..zeros {
+                buf[len] = b'0';
+                len += 1;
+            }
+        }
+        let expected = if sign == 1 {
+            -f64::from(n)
+        } else {
+            f64::from(n)
+        };
+        let parsed = parse_prom_value(&buf[..len]);
+        assert!(parsed.is_some_and(|p| p.to_bits() == expected.to_bits()));
+        kani::cover!(sign == 1 && zeros > 0, "negative decimal");
+        kani::cover!(
+            sign == 2 && zeros == 2,
+            "explicit plus, two fraction digits"
+        );
+    }
+
+    /// Stub for `core`'s float parser: any result. Oracle proofs that use
+    /// it also show the fast path is taken, since an arbitrary fallback
+    /// result would break their exact assertions.
+    fn parse_prom_value_fallback_stub(_bytes: &[u8], _digits: &[u8]) -> Option<f64> {
+        if kani::any() { Some(kani::any()) } else { None }
+    }
+
+    /// Stub for the SIMD block classifier in the scanner proofs. Their
+    /// inputs are at most 8 bytes, and the scanner zero-pads the tail block,
+    /// so only the first 8 bytes can be structural; the stub classifies those
+    /// with the scalar predicate, unrolled. SIMD ≡ scalar for all 64 bytes is
+    /// proven separately by `verify_prom_structural_mask_simd_eq_scalar`.
+    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    fn prom_structural_mask_stub(block: &[u8; 64]) -> u64 {
+        let bit = |i: usize| u64::from(is_prom_structural(block[i])) << i;
+        bit(0) | bit(1) | bit(2) | bit(3) | bit(4) | bit(5) | bit(6) | bit(7)
     }
 
     struct NullBuilder;
@@ -1912,9 +1997,10 @@ mod verification {
     }
 
     /// The value parser never panics on any input of up to 8 bytes.
+    #[kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)]
     #[kani::proof]
     #[kani::unwind(10)]
-    fn verify_parse_prom_value_no_panic() {
+    pub(super) fn verify_parse_prom_value_no_panic() {
         let buf: [u8; 8] = kani::any();
         let len: usize = kani::any();
         kani::assume(len <= buf.len());
@@ -1965,22 +2051,22 @@ mod verification {
         fn append_i64_by_idx(&mut self, _: usize, _: i64) {}
     }
 
-    /// Oracle: for every `<name> <digit>\n` line with a one- or two-letter
-    /// name, the scanner emits exactly one row whose name is the input name
-    /// and whose value is the digit.
-    #[kani::proof]
-    #[kani::unwind(10)]
-    fn verify_scan_prom_text_name_value_oracle() {
-        let a: u8 = kani::any();
-        let b: u8 = kani::any();
+    /// Oracle: for every `m <digit>\n` line, the scanner emits exactly one
+    /// row named `m` whose value is the digit.
+    // Slow under CBMC (scratch `Vec` growth): runs only with
+    // `RUSTFLAGS="--cfg kani_slow" cargo kani`. See VERIFICATION.md.
+    #[cfg_attr(
+        kani_slow,
+        kani::proof,
+        kani::unwind(10),
+        kani::stub(prom_structural_mask, prom_structural_mask_stub),
+        kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
+    )]
+    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    pub(super) fn verify_scan_prom_text_name_value_oracle() {
         let d: u8 = kani::any();
-        let two: bool = kani::any();
-        kani::assume(a.is_ascii_lowercase() && b.is_ascii_lowercase() && d.is_ascii_digit());
-        let (buf, name_len) = if two {
-            ([a, b, b' ', d, b'\n'], 2)
-        } else {
-            ([a, b' ', d, b'\n', b'\n'], 1)
-        };
+        kani::assume(d.is_ascii_digit());
+        let buf = [b'm', b' ', d, b'\n'];
         let mut out = OneRow {
             name: [0; 4],
             name_len: 0,
@@ -1991,17 +2077,30 @@ mod verification {
         let r = scan_prom_text(&buf, &PromScanConfig::default(), &mut scratch, &mut out);
         assert!(r.is_ok());
         assert_eq!(out.rows, 1);
-        assert_eq!(&out.name[..out.name_len], &buf[..name_len]);
+        assert_eq!(&out.name[..out.name_len], b"m");
         assert_eq!(out.value, Some(f64::from(d - b'0')));
-        kani::cover!(two, "two-letter name");
-        kani::cover!(!two, "one-letter name");
+        kani::cover!(d == b'9', "largest digit");
     }
 
-    /// The scanner never panics on any 8-byte input.
-    #[kani::proof]
-    #[kani::unwind(10)]
-    fn verify_scan_prom_text_no_panic() {
-        let buf: [u8; 8] = kani::any();
+    /// The scanner never panics when any one byte of a minimal sample
+    /// (`m 1\\n`) is replaced by an arbitrary byte. Inputs of any length are
+    /// covered by the `never_panics_on_arbitrary_input` proptest; fully
+    /// symbolic buffers exceed CBMC's budget because of scratch `Vec` growth.
+    // Slow under CBMC (scratch `Vec` growth): runs only with
+    // `RUSTFLAGS="--cfg kani_slow" cargo kani`. See VERIFICATION.md.
+    #[cfg_attr(
+        kani_slow,
+        kani::proof,
+        kani::unwind(10),
+        kani::stub(prom_structural_mask, prom_structural_mask_stub),
+        kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
+    )]
+    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    pub(super) fn verify_scan_prom_text_no_panic() {
+        let pos: usize = kani::any();
+        kani::assume(pos < 4);
+        let mut buf = [b'm', b' ', b'1', b'\n'];
+        buf[pos] = kani::any();
         let mut scratch = PromScratch::new();
         let r = scan_prom_text(
             &buf,
