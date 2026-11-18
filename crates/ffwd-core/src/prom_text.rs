@@ -1925,18 +1925,18 @@ mod verification {
             len = 1;
         }
         let mut digits = [0u8; 3];
-        let mut nd = 0;
+        let mut n_digits = 0;
         let mut v = n;
         loop {
-            digits[2 - nd] = b'0' + v % 10;
-            nd += 1;
+            digits[2 - n_digits] = b'0' + v % 10;
+            n_digits += 1;
             v /= 10;
             if v == 0 {
                 break;
             }
         }
-        buf[len..len + nd].copy_from_slice(&digits[3 - nd..]);
-        len += nd;
+        buf[len..len + n_digits].copy_from_slice(&digits[3 - n_digits..]);
+        len += n_digits;
         if zeros > 0 {
             buf[len] = b'.';
             len += 1;
