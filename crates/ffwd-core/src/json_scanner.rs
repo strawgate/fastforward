@@ -2795,6 +2795,7 @@ mod verification {
     /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
     #[cfg(feature = "kani-slow")]
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(16)]
     fn verify_decode_json_escapes_no_panic() {
         let input: [u8; 8] = kani::any();

@@ -255,6 +255,7 @@ mod verification {
     /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
     #[cfg(feature = "kani-slow")]
     #[kani::proof_for_contract(json_escape_oracle)]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(22)]
     fn verify_json_escape_oracle_contract() {
         let src: [u8; 16] = kani::any();
@@ -266,6 +267,7 @@ mod verification {
     /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
     #[cfg(feature = "kani-slow")]
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(22)]
     fn verify_json_escape_oracle_no_panic() {
         let src: [u8; 16] = kani::any();

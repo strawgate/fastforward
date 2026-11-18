@@ -917,6 +917,7 @@ mod verification {
     /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
     #[cfg(feature = "kani-slow")]
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(64)]
     fn verify_process_cri_split_line_matches_unsplit() {
         let first = b"2024-01-15T10:30:00Z stdout F h";
@@ -1138,6 +1139,7 @@ mod verification {
     /// Gated behind `kani-slow`: unwind 52 through JSON escaping takes >30s.
     #[cfg(feature = "kani-slow")]
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(52)]
     fn verify_write_json_line_parametric() {
         let msg: [u8; 8] = kani::any();
