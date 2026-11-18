@@ -8,8 +8,8 @@
 //!
 //! - `job` → resource `service.name`, `instance` → `service.instance.id`.
 //! - `__type__` is matched case-insensitively.
-//! - `__type__ = counter` → monotonic cumulative `Sum`. An OpenMetrics
-//!   `foo_created` sample next to `foo_total` is a start time and is dropped.
+//! - `__type__ = counter` → monotonic cumulative `Sum`. (OpenMetrics
+//!   `_created` start-time samples are skipped by the scanner.)
 //! - `gauge`, `unknown`/untyped, `info`, `stateset`, `gaugehistogram` and
 //!   samples without a type → `Gauge`.
 //! - `histogram` → cumulative `Histogram`, rebuilt from the `_bucket`
@@ -156,8 +156,6 @@ enum TypeTag {
     Histogram,
     Summary,
     Other,
-    /// No `__type__` on the row.
-    Unset,
 }
 
 impl TypeTag {
@@ -196,8 +194,6 @@ struct Group {
 struct Family<'a> {
     name: &'a str,
     kind: Kind,
-    /// An untyped `*_created` family: possibly an OpenMetrics start time.
-    is_untyped_created: bool,
     points: Vec<usize>,
     groups: Vec<Group>,
     group_index: HashMap<u64, Vec<usize>>,
@@ -207,7 +203,7 @@ struct Resource<'a> {
     job: Option<&'a str>,
     instance: Option<&'a str>,
     families: Vec<Family<'a>>,
-    family_index: HashMap<(&'a str, Kind, bool), usize>,
+    family_index: HashMap<(&'a str, Kind), usize>,
 }
 
 struct Columns<'a> {
@@ -220,9 +216,17 @@ struct Columns<'a> {
     labels: Vec<(&'a str, StrCol<'a>)>,
     le: Option<usize>,
     quantile: Option<usize>,
+    /// Time for rows without a usable timestamp.
+    default_ns: u64,
 }
 
 impl Columns<'_> {
+    /// The time a row is encoded with. Points are grouped by this, so rows
+    /// that encode to the same time belong to the same point.
+    fn time_key(&self, row: usize) -> u64 {
+        time_ns(self.time_ms(row), self.default_ns)
+    }
+
     /// Label `i` of `row`. An empty value counts as absent, as in
     /// Prometheus, so `{a=""}` and `{}` are the same series.
     fn label(&self, i: usize, row: usize) -> Option<&str> {
@@ -245,7 +249,7 @@ impl Columns<'_> {
         self.ty
             .as_ref()
             .and_then(|c| c.get(row))
-            .map_or(TypeTag::Unset, TypeTag::parse)
+            .map_or(TypeTag::Other, TypeTag::parse)
     }
 
     /// The label folded into points of `kind` (`le` or `quantile`), if any.
@@ -302,12 +306,12 @@ pub(crate) fn encode_metrics_batch(
         };
         owned.push((name.to_string(), arr));
     }
-    let cols = resolve_columns(&owned)?;
+    let mut cols = resolve_columns(&owned)?;
+    cols.default_ns = default_time_ns;
     let mut resources = group_rows(&cols, batch.num_rows());
     let mut points = 0usize;
     let mut scratch = Scratch::default();
     for res in &mut resources {
-        drop_openmetrics_created(res);
         for fam in &mut res.families {
             let kind = fam.kind;
             fam.groups.retain_mut(|g| finalize_group(g, kind));
@@ -376,6 +380,7 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
         labels,
         le,
         quantile,
+        default_ns: 0,
     })
 }
 
@@ -410,7 +415,7 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
                 (name, Kind::Gauge, Role::Point)
             }
         }
-        TypeTag::Other | TypeTag::Unset => (name, Kind::Gauge, Role::Point),
+        TypeTag::Other => (name, Kind::Gauge, Role::Point),
     }
 }
 
@@ -433,15 +438,13 @@ fn series_hash(cols: &Columns<'_>, row: usize, skip: Option<usize>) -> u64 {
             h = h.wrapping_mul(PRIME);
         }
     }
-    if let Some(t) = cols.time_ms(row) {
-        h ^= t as u64;
-        h = h.wrapping_mul(PRIME);
-    }
+    h ^= cols.time_key(row);
+    h = h.wrapping_mul(PRIME);
     h
 }
 
 fn same_series(cols: &Columns<'_>, a: usize, b: usize, skip: Option<usize>) -> bool {
-    cols.time_ms(a) == cols.time_ms(b)
+    cols.time_key(a) == cols.time_key(b)
         && (0..cols.labels.len()).all(|i| Some(i) == skip || cols.label(i, a) == cols.label(i, b))
 }
 
@@ -458,9 +461,7 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         let has_quantile = cols
             .quantile
             .is_some_and(|i| cols.labels[i].1.get(row).is_some());
-        let tag = cols.type_tag(row);
-        let (family_name, kind, role) = classify(name, tag, has_quantile);
-        let is_untyped_created = matches!(tag, TypeTag::Unset) && name.ends_with("_created");
+        let (family_name, kind, role) = classify(name, cols.type_tag(row), has_quantile);
         if matches!(role, Role::Skip) {
             continue;
         }
@@ -478,12 +479,11 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         let res = &mut resources[ri];
         let fi = *res
             .family_index
-            .entry((family_name, kind, is_untyped_created))
+            .entry((family_name, kind))
             .or_insert_with(|| {
                 res.families.push(Family {
                     name: family_name,
                     kind,
-                    is_untyped_created,
                     points: Vec::new(),
                     groups: Vec::new(),
                     group_index: HashMap::new(),
@@ -535,31 +535,6 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         }
     }
     resources
-}
-
-/// OpenMetrics exposes a counter `foo` as `foo_total` plus `foo_created`.
-/// The `_created` sample is a start time, not a second counter, so drop it
-/// when its `_total` sibling is present. The scanner leaves that sample
-/// untyped, which tells it apart from an independently declared
-/// `# TYPE foo_created counter`, which is kept.
-fn drop_openmetrics_created(res: &mut Resource<'_>) {
-    let created: Vec<usize> = res
-        .families
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            f.is_untyped_created
-                && f.name.strip_suffix("_created").is_some_and(|base| {
-                    res.families.iter().any(|t| {
-                        t.kind == Kind::Counter && t.name.strip_suffix("_total") == Some(base)
-                    })
-                })
-        })
-        .map(|(i, _)| i)
-        .collect();
-    for i in created.into_iter().rev() {
-        res.families.remove(i);
-    }
 }
 
 /// Sort a reassembled group and check it is complete. Returns false for a
@@ -1290,33 +1265,26 @@ mod tests {
     }
 
     #[test]
-    fn openmetrics_created_sample_is_dropped_next_to_total() {
-        let c = Some("counter");
-        // As scanned from OpenMetrics: `jobs_created` belongs to family
-        // `jobs` and is left untyped.
-        let b = batch(&[
-            ("jobs_total", 3.0, None, c, &[]),
-            ("jobs_created", 1.7e9, None, None, &[]),
-            ("widgets_created", 4.0, None, c, &[]),
-        ]);
-        let req = decode(&b);
-        assert_eq!(
-            metric_names(&req),
-            vec!["jobs_total".to_string(), "widgets_created".to_string()]
-        );
-    }
-
-    #[test]
-    fn independently_declared_created_counter_is_kept() {
+    fn created_series_next_to_a_total_is_kept() {
+        // OpenMetrics `_created` samples never reach the encoder (the
+        // scanner skips them), so any `*_created` here is a real series,
+        // typed or not.
         let c = Some("counter");
         let b = batch(&[
             ("jobs_total", 10.0, None, c, &[]),
             ("jobs_created", 5.0, None, c, &[]),
+            ("foo_total", 3.0, None, c, &[]),
+            ("foo_created", 4.0, None, None, &[]),
         ]);
         let req = decode(&b);
         assert_eq!(
             metric_names(&req),
-            vec!["jobs_total".to_string(), "jobs_created".to_string()]
+            vec![
+                "jobs_total".to_string(),
+                "jobs_created".to_string(),
+                "foo_total".to_string(),
+                "foo_created".to_string()
+            ]
         );
     }
 
@@ -1429,6 +1397,26 @@ mod tests {
         let p = &hist.data_points[0];
         assert_eq!((p.count, p.sum), (1, Some(2.0)));
         assert!(p.attributes.is_empty(), "empty label is not exported");
+    }
+
+    #[test]
+    fn rows_encoding_to_the_same_time_group_together() {
+        // With a default time of 0, no timestamp and an explicit 0 ms both
+        // encode as 0 ns, so they are one point.
+        let s = Some("summary");
+        let b = batch(&[
+            ("rpc", 0.1, None, s, &[("quantile", "0.5")]),
+            ("rpc_count", 4.0, Some(0), s, &[]),
+        ]);
+        let mut out = Vec::new();
+        encode_metrics_batch(&b, &[], 0, &mut out).expect("encode");
+        let req = ExportMetricsServiceRequest::decode(out.as_slice()).expect("valid protobuf");
+        let Some(Data::Summary(sum)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected summary")
+        };
+        assert_eq!(sum.data_points.len(), 1);
+        assert_eq!(sum.data_points[0].quantile_values.len(), 1);
     }
 
     #[test]

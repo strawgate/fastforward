@@ -85,13 +85,9 @@ impl FamilyKind {
     }
 
     /// Sample-name suffixes that belong to a family of this type.
-    ///
-    /// A counter's `_created` sample is left out on purpose: it is a start
-    /// time, not a counter value, and leaving it untyped tells it apart from
-    /// an independently declared `# TYPE foo_created counter`.
     fn suffixes(self) -> &'static [&'static [u8]] {
         match self {
-            Self::Counter => &[b"_total"],
+            Self::Counter => &[b"_total", b"_created"],
             Self::Histogram => &[b"_bucket", b"_sum", b"_count", b"_created"],
             Self::Summary => &[b"_sum", b"_count", b"_created"],
             Self::GaugeHistogram => &[b"_bucket", b"_gcount", b"_gsum"],
@@ -828,10 +824,41 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         Ok((ts, te, kind))
     }
 
+    /// True when the sample at `pos` is the `<family>_created` sample of an
+    /// OpenMetrics counter, histogram or summary. That sample is the
+    /// series' start time, not a measurement, so it is not emitted as a row.
+    /// Prometheus text has no such sample, so there `foo_created` is always
+    /// an ordinary series.
+    #[inline]
+    fn is_openmetrics_created(&self, pos: usize) -> bool {
+        if !self.openmetrics {
+            return false;
+        }
+        let Some((_, _, kind)) = self.family else {
+            return false;
+        };
+        if !matches!(
+            kind,
+            FamilyKind::Counter | FamilyKind::Histogram | FamilyKind::Summary
+        ) {
+            return false;
+        }
+        let rest = self
+            .buf
+            .get(pos..)
+            .and_then(|r| r.strip_prefix(self.scratch.family_name.as_slice()))
+            .and_then(|r| r.strip_prefix(b"_created".as_slice()));
+        matches!(rest.and_then(|r| r.first()), Some(b'{' | b' ' | b'\t'))
+    }
+
     /// Parse one sample line starting at `pos` (first non-blank byte).
     /// The row is closed on error too, so the caller can discard the batch.
     #[inline(always)]
     fn sample(&mut self, pos: usize) -> Result<usize, PromParseError> {
+        if self.is_openmetrics_created(pos) {
+            let end = crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len());
+            return Ok(end + 1);
+        }
         self.builder.begin_row();
         let r = self.sample_row(pos);
         if let Ok(next) = r {
@@ -1507,14 +1534,26 @@ mod tests {
     }
 
     #[test]
-    fn counter_created_sample_is_untyped_but_declared_created_family_is_typed() {
+    fn openmetrics_created_samples_are_not_emitted() {
         let rows = scan_om(
             "# TYPE jobs counter\njobs_total 3\njobs_created 1.7e9\n\
+             # TYPE lat histogram\nlat_bucket{le=\"+Inf\"} 1\nlat_count 1\nlat_created{a=\"b\"} 1.7e9\n\
              # TYPE w_created counter\nw_created 4\n# EOF\n",
         )
         .expect("should parse");
-        let types: Vec<_> = rows.iter().map(|r| type_of(r)).collect();
-        assert_eq!(types, vec![Some("counter"), None, Some("counter")]);
+        let names: Vec<_> = rows.iter().map(|r| r[r.len() - 3].1.clone()).collect();
+        assert_eq!(rows.len(), 4, "{names:?}");
+        assert!(rows.iter().all(|r| {
+            !r.iter()
+                .any(|(k, v)| k == "__name__" && (v == "jobs_created" || v == "lat_created"))
+        }));
+    }
+
+    #[test]
+    fn created_series_is_kept_in_prometheus_text() {
+        let rows =
+            scan("# TYPE foo_total counter\nfoo_total 3\nfoo_created 4\n").expect("should parse");
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
