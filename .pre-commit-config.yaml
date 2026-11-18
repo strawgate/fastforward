@@ -1,3 +1,11 @@
+# Optional: the pre-commit framework (https://pre-commit.com) wrapper around
+# the repo's own hook script. `scripts/install-hooks.sh` installs the same
+# checks without needing pre-commit or just. Both call scripts/ci-local.sh,
+# which mirrors the CI Lint job.
+#
+#   pre-commit install --hook-type pre-commit --hook-type pre-push
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -9,18 +17,18 @@ repos:
 
 -   repo: local
     hooks:
-    -   id: cargo-fmt
-        name: cargo fmt
-        description: Check if all rust files are formatted.
-        entry: cargo fmt --all -- --check
+    -   id: ffwd-pre-commit
+        name: ffwd fast checks (fmt, TOML, typos, guardrails)
+        entry: scripts/ci-local.sh pre-commit
         language: system
-        types: [rust]
         pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
 
-    -   id: cargo-clippy
-        name: cargo clippy
-        description: Run clippy on all packages.
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+    -   id: ffwd-pre-push
+        name: ffwd CI Lint parity (clippy, rustdoc, deny, machete)
+        entry: scripts/ci-local.sh pre-push
         language: system
-        types: [rust]
         pass_filenames: false
+        always_run: true
+        stages: [pre-push]
