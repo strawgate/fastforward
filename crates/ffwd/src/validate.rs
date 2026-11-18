@@ -197,11 +197,17 @@ fn validate_transform_probe_read_only(
 
     let mut fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty()
     {
-        vec![
+        let mut base = vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("level", DataType::Utf8, true),
             Field::new("msg", DataType::Utf8, true),
-        ]
+        ];
+        base.extend(
+            typed
+                .iter()
+                .map(|(name, ty)| Field::new(*name, ty.clone(), true)),
+        );
+        base
     } else {
         scan_config
             .wanted_fields
@@ -891,6 +897,14 @@ mod tests {
         let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
         validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
             .expect("arithmetic on __value__ should validate");
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [\"http://127.0.0.1:9100/metrics\"]",
+            "SELECT *, __value__ + 1 AS next FROM logs WHERE __value__ > 0",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
+            .expect("SELECT * with arithmetic on __value__ should validate");
     }
 
     #[test]

@@ -543,7 +543,8 @@ given. Mapping: `job` and `instance` become the resource attributes
 `service.name` and `service.instance.id`; counters become monotonic cumulative
 sums; histograms and summaries are rebuilt from their `_bucket`/`quantile`,
 `_sum` and `_count` samples (inconsistent ones are dropped); gaugehistograms
-are dropped; gauges, untyped and other samples become gauges;
+are dropped; info metrics become non-monotonic sums; gauges, untyped and
+other samples become gauges;
 other labels become data point attributes and `__`-prefixed columns are not
 exported. A SQL transform can turn logs into metrics by producing `__name__`
 and `__value__` columns.

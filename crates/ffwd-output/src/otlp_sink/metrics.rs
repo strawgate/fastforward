@@ -13,8 +13,9 @@
 //!   not exported.
 //! - `__type__ = gaugehistogram` samples are dropped, as the OpenTelemetry
 //!   Prometheus compatibility spec requires.
-//! - `gauge`, `unknown`/untyped, `info`, `stateset` and samples without a
-//!   type → `Gauge`.
+//! - `info` → non-monotonic cumulative `Sum` (value 1, labels as attributes).
+//! - `gauge`, `unknown`/untyped, `stateset` and samples without a type →
+//!   `Gauge`.
 //! - `histogram` → cumulative `Histogram`, rebuilt from the `_bucket`
 //!   (`le`), `_sum` and `_count` samples of each series.
 //! - `summary` → `Summary`, rebuilt from the `quantile`, `_sum` and `_count`
@@ -149,6 +150,8 @@ impl<'a> StrCol<'a> {
 enum Kind {
     Gauge,
     Counter,
+    /// Info metric: a non-monotonic cumulative sum (compatibility spec).
+    Info,
     Histogram,
     Summary,
 }
@@ -162,6 +165,7 @@ enum TypeTag {
     /// An OpenMetrics `_created` (start-time) sample.
     Created,
     GaugeHistogram,
+    Info,
     Other,
 }
 
@@ -177,6 +181,8 @@ impl TypeTag {
             Self::Created
         } else if ty.eq_ignore_ascii_case("gaugehistogram") {
             Self::GaugeHistogram
+        } else if ty.eq_ignore_ascii_case("info") {
+            Self::Info
         } else {
             Self::Other
         }
@@ -268,7 +274,7 @@ impl Columns<'_> {
         match kind {
             Kind::Histogram => self.le,
             Kind::Summary => self.quantile,
-            Kind::Gauge | Kind::Counter => None,
+            Kind::Gauge | Kind::Counter | Kind::Info => None,
         }
     }
 }
@@ -428,6 +434,7 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
         TypeTag::Created => (name, Kind::Gauge, Role::Skip),
         // No faithful OTLP form; the compatibility spec says to drop it.
         TypeTag::GaugeHistogram => (name, Kind::Gauge, Role::Skip),
+        TypeTag::Info => (name, Kind::Info, Role::Point),
         TypeTag::Other => (name, Kind::Gauge, Role::Point),
     }
 }
@@ -596,7 +603,7 @@ fn finalize_group(g: &mut Group, kind: Kind) -> bool {
                 && g.entries.iter().all(|&(q, _)| (0.0..=1.0).contains(&q))
                 && g.entries.windows(2).all(|w| w[0].0 < w[1].0)
         }
-        Kind::Gauge | Kind::Counter => true,
+        Kind::Gauge | Kind::Counter | Kind::Info => true,
     }
 }
 
@@ -655,7 +662,7 @@ fn encode_resource_metrics(
         let metric = begin(out);
         encode_str(out, METRIC_NAME, fam.name.as_bytes());
         match fam.kind {
-            Kind::Gauge | Kind::Counter => {
+            Kind::Gauge | Kind::Counter | Kind::Info => {
                 let data = begin(out);
                 for &row in &fam.points {
                     let dp = begin(out);
@@ -668,6 +675,10 @@ fn encode_resource_metrics(
                 if fam.kind == Kind::Counter {
                     encode_varint_field(out, AGGREGATION_TEMPORALITY, TEMPORALITY_CUMULATIVE);
                     encode_varint_field(out, SUM_IS_MONOTONIC, 1);
+                    end(out, METRIC_SUM, data);
+                } else if fam.kind == Kind::Info {
+                    // `is_monotonic` defaults to false.
+                    encode_varint_field(out, AGGREGATION_TEMPORALITY, TEMPORALITY_CUMULATIVE);
                     end(out, METRIC_SUM, data);
                 } else {
                     end(out, METRIC_GAUGE, data);
@@ -1323,6 +1334,19 @@ mod tests {
         let mut names = metric_names(&req);
         names.sort();
         assert_eq!(names, vec!["bar", "bar_created", "foo", "foo_created"]);
+    }
+
+    #[test]
+    fn info_metrics_are_non_monotonic_sums() {
+        let b = batch(&[("build_info", 1.0, None, Some("info"), &[("version", "1.2")])]);
+        let req = decode(&b);
+        let m = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        let Some(Data::Sum(s)) = &m.data else {
+            panic!("expected sum")
+        };
+        assert!(!s.is_monotonic);
+        assert_eq!(s.aggregation_temporality, 2);
+        assert_eq!(attr(&s.data_points[0].attributes, "version"), "1.2");
     }
 
     #[test]

@@ -971,10 +971,19 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
-                let mut req = [0u8; 4096];
-                let n = stream.read(&mut req).unwrap_or(0);
-                let is_metrics = req[..n].starts_with(b"GET /metrics ");
-                let request = String::from_utf8_lossy(&req[..n]).to_ascii_lowercase();
+                // Read the whole request head (bounded, with a timeout): one
+                // read may return before the headers we check arrive.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut req = Vec::with_capacity(1024);
+                let mut chunk = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") && req.len() < 16 * 1024 {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let is_metrics = req.starts_with(b"GET /metrics ");
+                let request = String::from_utf8_lossy(&req).to_ascii_lowercase();
                 let is_authorized =
                     required.is_none_or(|h| request.contains(&h.to_ascii_lowercase()));
                 let head = match (&location, is_metrics) {
