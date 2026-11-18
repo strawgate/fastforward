@@ -85,9 +85,13 @@ impl FamilyKind {
     }
 
     /// Sample-name suffixes that belong to a family of this type.
+    ///
+    /// A counter's `_created` sample is left out on purpose: it is a start
+    /// time, not a counter value, and leaving it untyped tells it apart from
+    /// an independently declared `# TYPE foo_created counter`.
     fn suffixes(self) -> &'static [&'static [u8]] {
         match self {
-            Self::Counter => &[b"_total", b"_created"],
+            Self::Counter => &[b"_total"],
             Self::Histogram => &[b"_bucket", b"_sum", b"_count", b"_created"],
             Self::Summary => &[b"_sum", b"_count", b"_created"],
             Self::GaugeHistogram => &[b"_bucket", b"_gcount", b"_gsum"],
@@ -1500,6 +1504,17 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn counter_created_sample_is_untyped_but_declared_created_family_is_typed() {
+        let rows = scan_om(
+            "# TYPE jobs counter\njobs_total 3\njobs_created 1.7e9\n\
+             # TYPE w_created counter\nw_created 4\n# EOF\n",
+        )
+        .expect("should parse");
+        let types: Vec<_> = rows.iter().map(|r| type_of(r)).collect();
+        assert_eq!(types, vec![Some("counter"), None, Some("counter")]);
     }
 
     #[test]

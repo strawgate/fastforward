@@ -156,6 +156,8 @@ enum TypeTag {
     Histogram,
     Summary,
     Other,
+    /// No `__type__` on the row.
+    Unset,
 }
 
 impl TypeTag {
@@ -194,6 +196,8 @@ struct Group {
 struct Family<'a> {
     name: &'a str,
     kind: Kind,
+    /// An untyped `*_created` family: possibly an OpenMetrics start time.
+    is_untyped_created: bool,
     points: Vec<usize>,
     groups: Vec<Group>,
     group_index: HashMap<u64, Vec<usize>>,
@@ -203,7 +207,7 @@ struct Resource<'a> {
     job: Option<&'a str>,
     instance: Option<&'a str>,
     families: Vec<Family<'a>>,
-    family_index: HashMap<(&'a str, Kind), usize>,
+    family_index: HashMap<(&'a str, Kind, bool), usize>,
 }
 
 struct Columns<'a> {
@@ -219,15 +223,20 @@ struct Columns<'a> {
 }
 
 impl Columns<'_> {
+    /// The row's timestamp, or `None` when it has none or it can't be
+    /// encoded (see [`time_ns`]). Grouping uses this effective value, so a
+    /// missing and an unusable timestamp land in the same point.
     fn time_ms(&self, row: usize) -> Option<i64> {
-        self.ts.and_then(|t| t.is_valid(row).then(|| t.value(row)))
+        self.ts
+            .and_then(|t| t.is_valid(row).then(|| t.value(row)))
+            .filter(|&ms| ms_to_ns(ms).is_some())
     }
 
     fn type_tag(&self, row: usize) -> TypeTag {
         self.ty
             .as_ref()
             .and_then(|c| c.get(row))
-            .map_or(TypeTag::Other, TypeTag::parse)
+            .map_or(TypeTag::Unset, TypeTag::parse)
     }
 
     /// The label folded into points of `kind` (`le` or `quantile`), if any.
@@ -392,7 +401,7 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
                 (name, Kind::Gauge, Role::Point)
             }
         }
-        TypeTag::Other => (name, Kind::Gauge, Role::Point),
+        TypeTag::Other | TypeTag::Unset => (name, Kind::Gauge, Role::Point),
     }
 }
 
@@ -444,7 +453,9 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         let has_quantile = cols
             .quantile
             .is_some_and(|i| cols.labels[i].1.get(row).is_some());
-        let (family_name, kind, role) = classify(name, cols.type_tag(row), has_quantile);
+        let tag = cols.type_tag(row);
+        let (family_name, kind, role) = classify(name, tag, has_quantile);
+        let is_untyped_created = matches!(tag, TypeTag::Unset) && name.ends_with("_created");
         if matches!(role, Role::Skip) {
             continue;
         }
@@ -462,11 +473,12 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         let res = &mut resources[ri];
         let fi = *res
             .family_index
-            .entry((family_name, kind))
+            .entry((family_name, kind, is_untyped_created))
             .or_insert_with(|| {
                 res.families.push(Family {
                     name: family_name,
                     kind,
+                    is_untyped_created,
                     points: Vec::new(),
                     groups: Vec::new(),
                     group_index: HashMap::new(),
@@ -522,14 +534,16 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
 
 /// OpenMetrics exposes a counter `foo` as `foo_total` plus `foo_created`.
 /// The `_created` sample is a start time, not a second counter, so drop it
-/// when its `_total` sibling is present.
+/// when its `_total` sibling is present. The scanner leaves that sample
+/// untyped, which tells it apart from an independently declared
+/// `# TYPE foo_created counter`, which is kept.
 fn drop_openmetrics_created(res: &mut Resource<'_>) {
     let created: Vec<usize> = res
         .families
         .iter()
         .enumerate()
         .filter(|(_, f)| {
-            f.kind == Kind::Counter
+            f.is_untyped_created
                 && f.name.strip_suffix("_created").is_some_and(|base| {
                     res.families.iter().any(|t| {
                         t.kind == Kind::Counter && t.name.strip_suffix("_total") == Some(base)
@@ -546,17 +560,18 @@ fn drop_openmetrics_created(res: &mut Resource<'_>) {
 /// Sort a reassembled group and check it is complete. Returns false for a
 /// group that can't be encoded faithfully, which is then dropped:
 /// - a histogram without a count (neither `_count` nor a `+Inf` bucket),
-///   with decreasing cumulative bucket counts, or whose `+Inf` bucket
-///   disagrees with `_count`;
-/// - a summary without `_count`.
+///   with a negative or non-finite count, with decreasing cumulative bucket
+///   counts, or whose `+Inf` bucket disagrees with `_count`;
+/// - a summary without a usable `_count`.
 fn finalize_group(g: &mut Group, kind: Kind) -> bool {
     g.entries.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let is_count = |c: f64| c.is_finite() && c >= 0.0;
+    if g.count.is_some_and(|c| !is_count(c)) {
+        return false;
+    }
     match kind {
         Kind::Histogram => {
-            if g.entries
-                .iter()
-                .any(|(le, c)| le.is_nan() || !c.is_finite())
-            {
+            if g.entries.iter().any(|&(le, c)| le.is_nan() || !is_count(c)) {
                 return false;
             }
             if g.entries.windows(2).any(|w| w[1].1 < w[0].1) {
@@ -593,10 +608,11 @@ struct Scratch {
 /// Nanoseconds for a millisecond timestamp, or `default_ns` when the row has
 /// none or it doesn't fit (negative or past year 2554).
 fn time_ns(time_ms: Option<i64>, default_ns: u64) -> u64 {
-    time_ms
-        .and_then(|ms| u64::try_from(ms).ok())
-        .and_then(|ms| ms.checked_mul(1_000_000))
-        .unwrap_or(default_ns)
+    time_ms.and_then(ms_to_ns).unwrap_or(default_ns)
+}
+
+fn ms_to_ns(ms: i64) -> Option<u64> {
+    u64::try_from(ms).ok()?.checked_mul(1_000_000)
 }
 
 fn encode_resource_metrics(
@@ -709,10 +725,13 @@ fn encode_histogram_point(
 ) {
     scratch.bounds.clear();
     scratch.counts.clear();
-    let mut prev = 0.0f64;
+    // Round the cumulative counts, then take differences, so the buckets
+    // always add up to the encoded total.
+    let mut prev = 0u64;
     let mut has_inf = false;
     for &(le, cum) in &g.entries {
-        scratch.counts.push(float_count(cum - prev));
+        let cum = float_count(cum);
+        scratch.counts.push(cum.saturating_sub(prev));
         prev = cum;
         if le == f64::INFINITY {
             has_inf = true;
@@ -720,15 +739,15 @@ fn encode_histogram_point(
             scratch.bounds.push(le);
         }
     }
-    let count = g.count.unwrap_or(prev);
+    let count = g.count.map_or(prev, float_count);
     if !has_inf {
         // Close the open-ended bucket from the total count.
-        scratch.counts.push(float_count(count - prev));
+        scratch.counts.push(count.saturating_sub(prev));
     }
 
     let dp = begin(out);
     encode_fixed64(out, HDP_TIME, time_ns(g.time_ms, default_ns));
-    encode_fixed64(out, HDP_COUNT, float_count(count));
+    encode_fixed64(out, HDP_COUNT, count);
     if let Some(sum) = g.sum {
         encode_fixed64(out, HDP_SUM, sum.to_bits());
     }
@@ -1233,6 +1252,12 @@ mod tests {
             ("c_count", 4.0, None, h, &[]),
             // Summary without _count.
             ("d", 0.1, None, s, &[("quantile", "0.5")]),
+            // NaN _count and no +Inf bucket.
+            ("e_bucket", 3.0, None, h, &[("le", "1")]),
+            ("e_count", f64::NAN, None, h, &[]),
+            // Negative summary _count.
+            ("f", 0.1, None, s, &[("quantile", "0.5")]),
+            ("f_count", -1.0, None, s, &[]),
             // Complete histogram: count taken from the +Inf bucket.
             ("ok_bucket", 2.0, None, h, &[("le", "+Inf")]),
         ]);
@@ -1262,15 +1287,31 @@ mod tests {
     #[test]
     fn openmetrics_created_sample_is_dropped_next_to_total() {
         let c = Some("counter");
+        // As scanned from OpenMetrics: `jobs_created` belongs to family
+        // `jobs` and is left untyped.
         let b = batch(&[
             ("jobs_total", 3.0, None, c, &[]),
-            ("jobs_created", 1.7e9, None, c, &[]),
+            ("jobs_created", 1.7e9, None, None, &[]),
             ("widgets_created", 4.0, None, c, &[]),
         ]);
         let req = decode(&b);
         assert_eq!(
             metric_names(&req),
             vec!["jobs_total".to_string(), "widgets_created".to_string()]
+        );
+    }
+
+    #[test]
+    fn independently_declared_created_counter_is_kept() {
+        let c = Some("counter");
+        let b = batch(&[
+            ("jobs_total", 10.0, None, c, &[]),
+            ("jobs_created", 5.0, None, c, &[]),
+        ]);
+        let req = decode(&b);
+        assert_eq!(
+            metric_names(&req),
+            vec!["jobs_total".to_string(), "jobs_created".to_string()]
         );
     }
 
@@ -1346,5 +1387,41 @@ mod tests {
             panic!("expected gauge")
         };
         assert_eq!(g.data_points[0].time_unix_nano, 99);
+    }
+
+    #[test]
+    fn histogram_bucket_counts_add_up_to_the_total() {
+        let h = Some("histogram");
+        let b = batch(&[
+            ("lat_bucket", 0.6, None, h, &[("le", "1")]),
+            ("lat_bucket", 1.2, None, h, &[("le", "2")]),
+            ("lat_count", 1.2, None, h, &[]),
+        ]);
+        let req = decode(&b);
+        let Some(Data::Histogram(hist)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected histogram")
+        };
+        let p = &hist.data_points[0];
+        assert_eq!(p.bucket_counts.iter().sum::<u64>(), p.count);
+        assert_eq!(p.count, 1);
+    }
+
+    #[test]
+    fn missing_and_unusable_timestamps_group_together() {
+        let s = Some("summary");
+        let b = batch(&[
+            ("rpc", 0.1, None, s, &[("quantile", "0.5")]),
+            ("rpc_count", 4.0, Some(-1), s, &[]),
+        ]);
+        let req = decode(&b);
+        let Some(Data::Summary(sum)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected summary")
+        };
+        assert_eq!(sum.data_points.len(), 1);
+        let p = &sum.data_points[0];
+        assert_eq!((p.count, p.quantile_values.len()), (4, 1));
+        assert_eq!(p.time_unix_nano, 99);
     }
 }

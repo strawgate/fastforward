@@ -904,6 +904,10 @@ mod tests {
         let url = serve(b"broken{\n".to_vec(), "");
         let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
         settings.interval = Duration::from_millis(20);
+        assert!(
+            matches!(scrape_direct(&settings), Err(ScrapeError::Parse(_))),
+            "a malformed body is a parse error, not a transport error"
+        );
         let stats = Arc::new(ComponentStats::new());
         let input =
             PrometheusScrapeInput::new("prom", settings, Arc::clone(&stats)).expect("input");
