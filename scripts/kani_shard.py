@@ -6,10 +6,13 @@ lists the crate's harnesses with `cargo kani list`, sorts them, takes every
 Nth one (round-robin, so the slow harnesses of one module spread across
 shards), and verifies only those with `cargo kani --exact --harness ...`.
 
-New harnesses are picked up automatically; no hand-maintained lists.
+New harnesses are picked up automatically. The one hand-maintained list is
+scripts/kani_nightly_only.txt: harnesses too big for a PR runner. PR and
+push CI skip them; the nightly workflow runs only them with --nightly-only.
 
 Usage:
     scripts/kani_shard.py --crate ffwd-core --shard 1 --of 4 [--features kani-slow]
+    scripts/kani_shard.py --crate ffwd-output --shard 1 --of 1 --nightly-only
 """
 
 from __future__ import annotations
@@ -27,6 +30,28 @@ REPO = Path(__file__).resolve().parent.parent
 # Unstable features every proof in the workspace may use. Must match for
 # listing and verification, or compilation of contract proofs fails.
 UNSTABLE = ["-Z", "function-contracts", "-Z", "mem-predicates", "-Z", "stubbing"]
+
+NIGHTLY_ONLY = REPO / "scripts" / "kani_nightly_only.txt"
+
+
+def load_nightly_only(path: Path = NIGHTLY_ONLY) -> dict[str, set[str]]:
+    """Map crate name to the harnesses that run only in the nightly workflow.
+
+    Each non-comment line is `<crate> <harness path>`; text after `#` is a
+    comment (use it for the reason).
+    """
+    result: dict[str, set[str]] = {}
+    if not path.exists():
+        return result
+    for lineno, raw in enumerate(path.read_text().splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise SystemExit(f"{path}:{lineno}: expected '<crate> <harness>', got {raw!r}")
+        result.setdefault(parts[0], set()).add(parts[1])
+    return result
 
 
 def cap_address_space(limit_gb: float) -> None:
@@ -84,6 +109,11 @@ def main() -> int:
         default=0,
         help="address-space cap per process (0 = none); CI uses 6 with --jobs 2",
     )
+    parser.add_argument(
+        "--nightly-only",
+        action="store_true",
+        help="run only the crate's harnesses listed in scripts/kani_nightly_only.txt",
+    )
     args = parser.parse_args()
 
     if not 1 <= args.shard <= args.of:
@@ -93,6 +123,16 @@ def main() -> int:
     features = ["--features", args.features] if args.features else []
     target = ["--lib"] if args.lib else []
     harnesses = list_harnesses(crate_dir, [*features, *target])
+    nightly = load_nightly_only().get(args.crate, set())
+    missing = sorted(nightly - set(harnesses))
+    if missing:
+        # A renamed or deleted harness would otherwise drop out silently.
+        print(f"error: {NIGHTLY_ONLY.name} names unknown harnesses: {missing}", file=sys.stderr)
+        return 2
+    if args.nightly_only:
+        harnesses = [h for h in harnesses if h in nightly]
+    else:
+        harnesses = [h for h in harnesses if h not in nightly]
     mine = harnesses[args.shard - 1 :: args.of]
     print(
         f"{args.crate}: shard {args.shard}/{args.of} runs "

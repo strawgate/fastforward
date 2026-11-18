@@ -51,6 +51,39 @@ jobs:
             -p ffwd-core
             --features kani-slow
 
+  # Harnesses listed in scripts/kani_nightly_only.txt: too big for the
+  # per-harness budget PR CI gives (6 GB, 15 min), so PRs skip them.
+  kani-nightly-only:
+    name: Kani proofs (nightly-only list, ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      RUSTC_WRAPPER: ""
+      # Keep in step with the kani-version pin in ci.yml.
+      KANI_VERSION: '0.67.0'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Verify nightly-only harnesses
+        run: |
+          status=0
+          for crate in $(grep -v '^\s*#' scripts/kani_nightly_only.txt | awk 'NF {print $1}' | sort -u); do
+            lib=""
+            if [ "$crate" = "ffwd-arrow" ]; then lib="--lib"; fi
+            python3 scripts/kani_shard.py --crate "$crate" \
+              --shard ${{ matrix.shard }} --of 4 \
+              --jobs 2 --memory-limit-gb 7 --harness-timeout 30m \
+              --nightly-only $lib || status=1
+          done
+          exit $status
+
   tla-pipeline-nightly-thorough:
     name: TLA+ PipelineMachine (nightly thorough)
     runs-on: ubuntu-latest

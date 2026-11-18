@@ -224,6 +224,14 @@ CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
   with `cargo kani list`, takes every Nth one, and verifies them with
   `--jobs 2` (more CBMC processes run the 16 GB runners out of memory). Shard
   counts per crate live in the `SHARDS` table in `scripts/kani_plan.py`.
+- Each harness gets at most 6 GB of address space and 15 minutes. A harness
+  that needs more fails on its own ("CBMC failed with status 6") instead of
+  getting the runner killed and hiding the rest of the shard.
+- Harnesses listed in `scripts/kani_nightly_only.txt` do not fit that budget
+  yet. PR and push CI skip them and the nightly workflow runs them. The
+  script fails if a listed harness no longer exists. Shrink a harness (fewer
+  symbolic bytes, enumerated cases, `Vec::with_capacity`) and remove it from
+  the list rather than growing the list.
 - The `kani` job does not wait on `Lint`, so a lint failure does not hide
   proof results.
 - Harnesses that exceed the per-harness CI budget are gated behind the

@@ -54,6 +54,7 @@ GLOBAL_INPUTS = {
     ".github/workflows/ci.yml",
     "scripts/kani_plan.py",
     "scripts/kani_shard.py",
+    "scripts/kani_nightly_only.txt",
     "dev-docs/verification/kani-boundary-contract.toml",
     "scripts/verify_kani_boundary_contract.py",
     "scripts/verify_verification_trigger_contract.py",
