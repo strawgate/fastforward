@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 /// quotes, never add them).
 #[inline]
 #[cfg_attr(kani, kani::ensures(|result: &u64| *result & !quote_bits == 0))]
+#[cfg_attr(kani, kani::modifies(prev_odd_backslash))]
 #[verified(kani = "verify_compute_real_quotes_vs_oracle")]
 pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
@@ -711,6 +712,11 @@ mod verification {
 
     /// Oracle proof: prefix_xor matches naive bit-by-bit running XOR
     /// for ALL u64 inputs. Exhaustive — no gap.
+    ///
+    /// Gated behind `kani-slow`: 65-unwind loop over symbolic u64 takes >30s.
+    /// `verify_prefix_xor_vs_oracle` is gated the same way, so neither
+    /// exhaustive comparison runs in default PR CI; both run nightly.
+    #[cfg(feature = "kani-slow")]
     #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(65)] // proof loop: while i < 64
@@ -743,6 +749,9 @@ mod verification {
     /// Most critical proof in the codebase — if escape detection is
     /// wrong, the scanner silently misparses every JSON string with
     /// backslashes.
+    ///
+    /// Gated behind `kani-slow`: three symbolic u64 + 65-unwind takes >60s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(65)]
     #[kani::solver(kissat)]
@@ -793,9 +802,12 @@ mod verification {
     /// This formally links the production function to the canonical oracle in ffwd-kani,
     /// enabling downstream consumers of `#[verified(kani = "verify_compute_real_quotes_vs_oracle")]`
     /// to inherit the proof without re-verification.
-    #[kani::proof]
-    #[kani::unwind(65)]
-    #[kani::solver(kissat)]
+    ///
+    /// Gated behind `kani-slow`: three symbolic u64 + 65-unwind takes >60s.
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(65))]
+    #[cfg_attr(feature = "kani-slow", kani::solver(kissat))]
     pub(super) fn verify_compute_real_quotes_vs_oracle() {
         let quote_bits: u64 = kani::any();
         let bs_bits: u64 = kani::any();
@@ -818,9 +830,12 @@ mod verification {
     /// for ALL u64 inputs.
     ///
     /// This formally links the production function to the canonical oracle in ffwd-kani.
-    #[kani::proof]
-    #[kani::unwind(65)]
-    #[kani::solver(kissat)]
+    ///
+    /// Gated behind `kani-slow`: symbolic u64 + 65-unwind takes >30s.
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(65))]
+    #[cfg_attr(feature = "kani-slow", kani::solver(kissat))]
     pub(super) fn verify_prefix_xor_vs_oracle() {
         let input: u64 = kani::any();
         let result_prod = prefix_xor(input);
@@ -835,6 +850,9 @@ mod verification {
     /// 64-byte block and any needle. Checks one arbitrary position per
     /// run — the function is a simple loop so correctness at one
     /// arbitrary position implies correctness at all.
+    ///
+    /// Gated behind `kani-slow`: [u8; 64] symbolic + 65-unwind takes >60s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(65)]
     #[kani::solver(cadical)]
@@ -852,6 +870,9 @@ mod verification {
     /// Consistency: find_structural_chars_scalar matches find_char_mask
     /// for the quote character. Only checks one of 10 characters — all
     /// use identical match-arm logic.
+    ///
+    /// Gated behind `kani-slow`: [u8; 64] symbolic + 65-unwind takes >60s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(65)]
     #[kani::solver(cadical)]
@@ -872,6 +893,8 @@ mod verification {
 
     /// Verify compute_real_quotes contract: result is submask of quote_bits.
     #[kani::proof_for_contract(compute_real_quotes)]
+    #[kani::unwind(65)] // backslash loop clears at least one bit per iteration
+    #[kani::solver(kissat)]
     fn verify_compute_real_quotes_contract() {
         let quote_bits: u64 = kani::any();
         let bs_bits: u64 = kani::any();

@@ -24,6 +24,67 @@ jobs:
         env:
           PROPTEST_CASES: "100000"
 
+  # Expensive Kani proofs gated behind `kani-slow` in ffwd-core/ffwd-kani.
+  # Kept off push-to-main CI so one slow harness cannot hold main red; see
+  # the Kani section in ci.yml.
+  kani-slow:
+    name: Kani proofs (core, kani-slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Kani verification (ffwd-core + ffwd-kani, kani-slow)
+        uses: model-checking/kani-github-action@v1
+        with:
+          # Keep in step with the kani-version pin in ci.yml.
+          kani-version: '0.67.0'
+          args: >-
+            --solver kissat
+            --jobs 2
+            --output-format terse
+            -Z function-contracts
+            -Z mem-predicates
+            -Z stubbing
+            -p ffwd-kani
+            -p ffwd-core
+            --features kani-slow
+
+  # Harnesses listed in scripts/kani_nightly_only.txt: too big for the
+  # per-harness budget PR CI gives (6 GB, 15 min), so PRs skip them.
+  kani-nightly-only:
+    name: Kani proofs (nightly-only list, ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      RUSTC_WRAPPER: ""
+      # Keep in step with the kani-version pin in ci.yml.
+      KANI_VERSION: '0.67.0'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Verify nightly-only harnesses
+        run: |
+          status=0
+          while read -r crate; do
+            extra=()
+            if [ "$crate" = "ffwd-arrow" ]; then extra=(--lib); fi
+            # </dev/null: cargo must not read the crate list from stdin.
+            python3 scripts/kani_shard.py --crate "$crate" \
+              --shard "${{ matrix.shard }}" --of 4 \
+              --jobs 2 --memory-limit-gb 7 --harness-timeout 30m \
+              --nightly-only "${extra[@]}" </dev/null || status=1
+          done < <(awk '!/^[[:space:]]*#/ && NF {print $1}' scripts/kani_nightly_only.txt | sort -u)
+          exit $status
+
   tla-pipeline-nightly-thorough:
     name: TLA+ PipelineMachine (nightly thorough)
     runs-on: ubuntu-latest

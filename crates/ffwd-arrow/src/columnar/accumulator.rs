@@ -1594,60 +1594,57 @@ mod verification {
     // ── scatter_values — dense/sparse placement ────────────────────────────
 
     /// Dense scatter: values[i] == facts[i].1 for all i.
+    ///
+    /// Row count is concrete and facts live in a fixed array; only the
+    /// values are symbolic. A symbolic row count with a growing `Vec` of
+    /// facts ran CBMC out of memory in CI.
     #[kani::proof]
     #[kani::unwind(6)]
     fn verify_scatter_values_dense() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows > 0 && num_rows <= 4);
+        const NUM_ROWS: usize = 4;
+        let vals: [i64; NUM_ROWS] = kani::any();
+        let facts = [(0u32, vals[0]), (1, vals[1]), (2, vals[2]), (3, vals[3])];
 
-        let mut facts: Vec<(u32, i64)> = Vec::new();
-        for row in 0..num_rows {
-            let val: i64 = kani::any();
-            facts.push((row as u32, val));
-        }
-
-        let (values, dense) = scatter_values(&facts, num_rows, true);
+        let (values, dense) = scatter_values(&facts, NUM_ROWS, true);
         assert!(dense, "full-coverage + dedup must be dense");
-        assert_eq!(values.len(), num_rows);
-        for (i, &(_, v)) in facts.iter().enumerate() {
-            assert_eq!(values[i], v, "dense value must match fact");
+        assert!(values.len() == NUM_ROWS);
+        for row in 0..NUM_ROWS {
+            assert!(values[row] == vals[row], "dense value must match fact");
         }
 
-        kani::cover!(num_rows == 1, "single row dense");
-        kani::cover!(num_rows == 4, "max rows dense");
+        kani::cover!(vals[0] == i64::MIN, "extreme value");
     }
 
     /// Sparse scatter: fact rows get their value, gap rows stay default.
+    ///
+    /// Checks every sparse fact pattern over 4 rows by enumeration. A
+    /// symbolic pattern made CBMC's propositional reduction run out of
+    /// memory (>14 GB) and killed the CI runner.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(17)]
     fn verify_scatter_values_sparse() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows > 0 && num_rows <= 4);
+        const NUM_ROWS: usize = 4;
+        // 1..15: at least one fact and at least one gap row.
+        for presence in 1u8..((1 << NUM_ROWS) - 1) {
+            let mut facts: Vec<(u32, i64)> = Vec::with_capacity(NUM_ROWS);
+            for row in 0..NUM_ROWS {
+                if presence & (1 << row) != 0 {
+                    facts.push((row as u32, row as i64 + 100));
+                }
+            }
 
-        let presence: u8 = kani::any();
-        let mut facts: Vec<(u32, i64)> = Vec::new();
-        for row in 0..num_rows {
-            if presence & (1 << row) != 0 {
-                facts.push((row as u32, row as i64 + 100));
+            let (values, dense) = scatter_values(&facts, NUM_ROWS, true);
+            assert!(!dense, "partial coverage must not be dense");
+            assert!(values.len() == NUM_ROWS);
+            for row in 0..NUM_ROWS {
+                if presence & (1 << row) != 0 {
+                    assert!(values[row] == row as i64 + 100);
+                } else {
+                    assert!(values[row] == 0, "gap row must be default");
+                }
             }
         }
-        kani::assume(!facts.is_empty());
-        kani::assume(facts.len() < num_rows);
-
-        let (values, dense) = scatter_values(&facts, num_rows, true);
-        assert!(!dense, "partial coverage must not be dense");
-        assert_eq!(values.len(), num_rows);
-
-        for row in 0..num_rows {
-            if presence & (1 << row) != 0 {
-                assert_eq!(values[row], row as i64 + 100);
-            } else {
-                assert_eq!(values[row], 0, "gap row must be default");
-            }
-        }
-
-        kani::cover!(facts.len() == 1, "single fact");
-        kani::cover!(num_rows == 4 && facts.len() == 2, "half-populated");
+        kani::cover!(true, "all sparse patterns checked");
     }
 
     /// Last-write-wins: when dedup=false (sparse path), later facts overwrite.
@@ -1669,33 +1666,36 @@ mod verification {
     // ── validity_bitmap_bits — bit-packed correctness ──────────────────────
 
     /// Every fact row has its bit set (valid), every gap row has bit clear (null).
+    ///
+    /// Facts live in a fixed array and the row count is concrete; only the
+    /// presence pattern is symbolic. A symbolic row count plus a growing
+    /// `Vec` of facts ran CBMC out of memory (>10 GB) in CI.
     #[kani::proof]
     #[kani::unwind(10)]
     fn verify_validity_bitmap_bits_correctness() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows > 0 && num_rows <= 8);
-
+        const NUM_ROWS: usize = 8;
         let presence: u8 = kani::any();
-        let mut facts: Vec<(u32, i64)> = Vec::new();
-        for row in 0..num_rows {
+        kani::assume(presence != 0);
+
+        let mut storage = [(0u32, 0i64); NUM_ROWS];
+        let mut len = 0;
+        for row in 0..NUM_ROWS {
             if presence & (1 << row) != 0 {
-                facts.push((row as u32, 0));
+                storage[len] = (row as u32, 0);
+                len += 1;
             }
         }
-        kani::assume(!facts.is_empty());
+        let facts = &storage[..len];
 
-        let bits = validity_bitmap_bits(&facts, num_rows);
-        assert_eq!(bits.len(), num_rows.div_ceil(8));
+        let bits = validity_bitmap_bits(facts, NUM_ROWS);
+        assert!(bits.len() == 1, "8 rows fit in one byte");
+        assert!(
+            bits[0] == presence,
+            "bit must match fact presence at every row"
+        );
 
-        for row in 0..num_rows {
-            let bit_set = bits[row >> 3] & (1 << (row & 7)) != 0;
-            let has_fact = presence & (1 << row) != 0;
-            assert_eq!(bit_set, has_fact, "bit must match fact presence at row");
-        }
-
-        kani::cover!(num_rows == 1, "single row");
-        kani::cover!(num_rows == 8, "full byte boundary");
         kani::cover!(presence == 0xFF, "all rows present");
+        kani::cover!(presence == 0x80, "only the last row of the byte");
     }
 
     /// Out-of-bounds row indices are silently ignored.

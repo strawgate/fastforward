@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import unittest
@@ -212,6 +213,24 @@ KANI_JOB_NAMES = [
 ]
 
 
+def extract_kani_plan_crates(source: str | None = None) -> set[str]:
+    """Crates the SHARDS table of scripts/kani_plan.py gives at least one shard."""
+    if source is None:
+        source = (ROOT / "scripts" / "kani_plan.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "SHARDS" for t in targets) and node.value is not None:
+            shards = ast.literal_eval(node.value)
+            return {crate for crate, count in shards.items() if isinstance(count, int) and count > 0}
+    raise ValueError("scripts/kani_plan.py missing SHARDS table")
+
+
 def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
     """Extract -p crate names from a single Kani job block."""
     crates: set[str] = set()
@@ -254,6 +273,16 @@ def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
             cmd = stripped.removeprefix("run:").strip()
             if "cargo kani" in cmd or "cargo-kani" in cmd:
                 crates |= set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", cmd))
+
+    # Also collect crates from a sharded matrix job whose run step calls
+    # scripts/kani_shard.py. Its matrix comes from scripts/kani_plan.py
+    # (`fromJSON(...kani_matrix)`), whose SHARDS table names the crates, or
+    # from literal include entries (`- { crate: ffwd-core, shard: 1, of: 6 }`).
+    if any("scripts/kani_shard.py" in line for line in kani_block):
+        for line in kani_block:
+            crates |= set(re.findall(r"\bcrate:\s*([A-Za-z0-9_-]+)", line))
+        if any(re.search(r"\binclude:.*kani_matrix", line) for line in kani_block):
+            crates |= extract_kani_plan_crates()
 
     return crates
 
@@ -344,8 +373,40 @@ def pattern_base_exists(pattern: str) -> bool:
     return (ROOT / base).exists()
 
 
-def validate() -> list[str]:
+def load_kani_plan():
+    """Import scripts/kani_plan.py, which plans the CI Kani shards."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("kani_plan", ROOT / "scripts" / "kani_plan.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load scripts/kani_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Paths whose change alone must run every Kani shard, and one that must run none.
+KANI_PLAN_ALL_SHARD_PATHS = (
+    "dev-docs/verification/kani-boundary-contract.toml",
+    "scripts/verify_kani_boundary_contract.py",
+)
+KANI_PLAN_NO_SHARD_PATH = "README.md"
+
+
+def validate_kani_plan() -> list[str]:
     errors: list[str] = []
+    kani_plan = load_kani_plan()
+    every_crate = {crate for crate, count in kani_plan.SHARDS.items() if count > 0}
+    for path in KANI_PLAN_ALL_SHARD_PATHS:
+        if kani_plan.affected_kani_crates([path]) != every_crate:
+            errors.append(f"kani_plan.py does not run every shard for: {path}")
+    if kani_plan.affected_kani_crates([KANI_PLAN_NO_SHARD_PATH]):
+        errors.append(f"kani_plan.py runs shards for unrelated path: {KANI_PLAN_NO_SHARD_PATH}")
+    return errors
+
+
+def validate() -> list[str]:
+    errors: list[str] = validate_kani_plan()
     ci_text = CI_WORKFLOW.read_text(encoding="utf-8")
     just_text = JUSTFILE.read_text(encoding="utf-8")
 
@@ -536,6 +597,71 @@ jobs:
             extract_kani_args_crates(ci_text),
             {"ffwd-core", "ffwd-arrow", "ffwd-io", "ffwd-output"},
         )
+
+    def test_extract_kani_args_crates_sharded_matrix(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    strategy:
+      matrix:
+        include:
+          - { crate: ffwd-core, shard: 1, of: 2 }
+          - { crate: ffwd-core, shard: 2, of: 2 }
+          - { crate: ffwd-arrow, shard: 1, of: 1, lib: true }
+    steps:
+      - run: >-
+          python3 scripts/kani_shard.py
+          --crate ${{ matrix.crate }}
+  miri:
+    steps:
+      - run: echo hi
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), {"ffwd-core", "ffwd-arrow"})
+
+    def test_extract_kani_args_crates_dynamic_matrix_uses_plan(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    if: needs.changes.outputs.kani_matrix != '[]'
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.kani_matrix) }}
+    steps:
+      - run: python3 scripts/kani_shard.py --crate ${{ matrix.crate }}
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), extract_kani_plan_crates())
+
+    def test_extract_kani_args_crates_literal_include_ignores_plan(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    if: needs.changes.outputs.kani_matrix != '[]'
+    strategy:
+      matrix:
+        include:
+          - { crate: ffwd-core, shard: 1, of: 1 }
+    steps:
+      - run: python3 scripts/kani_shard.py --crate ${{ matrix.crate }}
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), {"ffwd-core"})
+
+    def test_extract_kani_plan_crates_skips_zero_shards(self) -> None:
+        source = 'SHARDS: dict[str, int] = {"ffwd-core": 0, "ffwd-arrow": 2}\n'
+        self.assertEqual(extract_kani_plan_crates(source), {"ffwd-arrow"})
+
+    def test_extract_kani_plan_crates_plain_assignment(self) -> None:
+        self.assertEqual(extract_kani_plan_crates('SHARDS = {"ffwd-core": 1}\n'), {"ffwd-core"})
+
+    def test_kani_plan_selects_crates_from_changed_paths(self) -> None:
+        kani_plan = load_kani_plan()
+        plan = kani_plan.affected_kani_crates
+        self.assertEqual(plan(["README.md"]), set())
+        self.assertEqual(
+            plan(["dev-docs/verification/kani-boundary-contract.toml"]), set(kani_plan.SHARDS)
+        )
+        # Nested workspace member, reached through ffwd-io's dependencies.
+        nested = "crates/ffwd-ebpf-proto/sensor-ebpf/sensor-ebpf-common/src/lib.rs"
+        self.assertIn("ffwd-io", plan([nested]))
 
     def test_extract_kani_args_crates_uses_kani_action_step(self) -> None:
         ci_text = """
