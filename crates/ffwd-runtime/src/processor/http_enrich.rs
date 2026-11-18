@@ -115,7 +115,7 @@ impl HttpEnrichConfig {
             prefix: prefix.into(),
             timeout: Duration::from_millis(500),
             max_entries: 50_000,
-            ttl: Duration::from_secs(300),
+            ttl: Duration::from_mins(5),
             max_concurrency: 8,
             max_body_bytes: 1_048_576, // 1 MiB
         }

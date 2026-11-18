@@ -26,6 +26,15 @@ Before SQL execution, conflict columns are normalized to flat `Utf8` columns
 via `COALESCE(CAST(int AS Utf8), CAST(float AS Utf8), str)`.
 Use `int(status)` or `float(status)` for numeric operations on these columns.
 
+Comparing a string column with a number (for example `status >= 400`) casts
+the column to the number's type, so `'50' >= 400` is false. The cast is strict:
+any value that cannot be cast to that type makes the transform fail and the
+whole batch is dropped. That includes text such as `'N/A'` or `'-'`, and also
+`'99.5'` when compared with an integer literal. When a field may hold
+non-numeric text, compare `int(status) >= 400` instead, which turns unparsable
+values into `NULL` so those rows simply don't match. Use `float(...)` when
+fractional values should take part in the comparison.
+
 ## Custom UDFs
 
 FastForward registers the following custom scalar functions in addition to

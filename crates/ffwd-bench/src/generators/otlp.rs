@@ -414,6 +414,7 @@ pub fn make_record_attrs(profile: OtlpFixtureProfile, row: usize) -> Vec<KeyValu
         };
         attrs.push(KeyValue {
             key: format!("attr_{idx}"),
+            key_strindex: 0,
             value: Some(value),
         });
     }
@@ -428,12 +429,14 @@ pub fn complex_body_any_value(row: usize) -> AnyValue {
                 kv_string("event.kind", "benchmark"),
                 KeyValue {
                     key: "event.row".to_string(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::IntValue(row as i64)),
                     }),
                 },
                 KeyValue {
                     key: "nested".to_string(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(Value::ArrayValue(ArrayValue {
                             values: vec![
@@ -502,6 +505,7 @@ pub fn make_message(row: usize, target_len: usize) -> String {
 pub fn kv_string(key: &str, value: &str) -> KeyValue {
     KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::StringValue(value.to_string())),
         }),
@@ -511,6 +515,7 @@ pub fn kv_string(key: &str, value: &str) -> KeyValue {
 pub fn kv_i64(key: &str, value: i64) -> KeyValue {
     KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::IntValue(value)),
         }),
@@ -520,6 +525,7 @@ pub fn kv_i64(key: &str, value: i64) -> KeyValue {
 pub fn kv_f64(key: &str, value: f64) -> KeyValue {
     KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::DoubleValue(value)),
         }),
@@ -529,6 +535,7 @@ pub fn kv_f64(key: &str, value: f64) -> KeyValue {
 pub fn kv_bool(key: &str, value: bool) -> KeyValue {
     KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::BoolValue(value)),
         }),

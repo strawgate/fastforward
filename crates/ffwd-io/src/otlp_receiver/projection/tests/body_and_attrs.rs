@@ -303,6 +303,7 @@ fn any_string(value: &str) -> AnyValue {
 fn kv_string(key: &str, value: &str) -> KeyValue {
     KeyValue {
         key: key.into(),
+        key_strindex: 0,
         value: Some(any_string(value)),
     }
 }
@@ -310,6 +311,7 @@ fn kv_string(key: &str, value: &str) -> KeyValue {
 fn kv_bool(key: &str, value: bool) -> KeyValue {
     KeyValue {
         key: key.into(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::BoolValue(value)),
         }),
@@ -319,6 +321,7 @@ fn kv_bool(key: &str, value: bool) -> KeyValue {
 fn kv_i64(key: &str, value: i64) -> KeyValue {
     KeyValue {
         key: key.into(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::IntValue(value)),
         }),
@@ -328,6 +331,7 @@ fn kv_i64(key: &str, value: i64) -> KeyValue {
 fn kv_f64(key: &str, value: f64) -> KeyValue {
     KeyValue {
         key: key.into(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::DoubleValue(value)),
         }),
@@ -337,6 +341,7 @@ fn kv_f64(key: &str, value: f64) -> KeyValue {
 fn kv_bytes(key: &str, value: &[u8]) -> KeyValue {
     KeyValue {
         key: key.into(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(Value::BytesValue(value.to_vec())),
         }),

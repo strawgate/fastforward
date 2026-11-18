@@ -5,7 +5,7 @@
 
 ## Prerequisites
 
-- **Rust via `rustup`** — the toolchain is pinned in `rust-toolchain.toml` (currently 1.100.0) and rustup installs it automatically. MSRV is 1.89, but clippy results only match CI on the pinned version.
+- **Rust via `rustup`** — the toolchain is pinned in `rust-toolchain.toml` (currently 1.100.0) and rustup installs it automatically. MSRV is 1.94, but clippy results only match CI on the pinned version.
 - **[just](https://github.com/casey/just)** task runner (`cargo install just`)
 - **[taplo](https://taplo.tamasfe.dev/)** for TOML formatting (`cargo install taplo-cli`)
 - **[cargo-nextest](https://nexte.st/)** for test execution (`cargo install cargo-nextest`)

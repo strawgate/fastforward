@@ -54,7 +54,7 @@ axum = "0.8"
 backon = { version = "1", features = ["tokio-sleep"] }
 glob = "0.3"
 globset = "0.4"
-opentelemetry-proto = { version = "0.31", features = [
+opentelemetry-proto = { version = "0.33", features = [
     "logs",
     "gen-tonic-messages",
 ] }

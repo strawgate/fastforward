@@ -228,6 +228,7 @@ fn nested_kvlist_request() -> ExportLogsServiceRequest {
                 log_records: vec![LogRecord {
                     attributes: vec![KeyValue {
                         key: "complex".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::KvlistValue(KeyValueList {
                                 values: vec![kv_string("nested", "value")],

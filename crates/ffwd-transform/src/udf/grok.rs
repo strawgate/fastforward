@@ -22,7 +22,6 @@
 //! SPACE, DATA, GREEDYDATA, QUOTEDSTRING, UUID, MAC, URIPATH, URIPATHPARAM,
 //! URI, TIMESTAMP_ISO8601, DATE, TIME, LOGLEVEL, HOSTNAME, EMAILADDRESS.
 
-use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -215,10 +214,6 @@ impl GrokUdf {
 }
 
 impl ScalarUDFImpl for GrokUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "grok"
     }

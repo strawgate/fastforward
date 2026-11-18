@@ -31,7 +31,7 @@ fn pem_error_kind(e: &rustls::pki_types::pem::Error) -> io::ErrorKind {
 const READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Default disconnect timeout for idle clients (no data received).
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Maximum frame/line payload length accepted from TCP senders.
 ///
