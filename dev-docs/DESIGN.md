@@ -358,8 +358,8 @@ The pipeline topology compiler transforms a parsed configuration into a typed, v
 with the same SIMD-detect / scalar-consume split as the JSON scanner, behind a
 `PromBuilder: ScanBuilder` boundary. `ffwd_arrow::prom::PromBatchBuilder` is a
 dedicated builder rather than `StreamingBuilder`: every label value becomes a
-`Utf8View` into the response buffer (no copies), which measured about 5x faster
-than going through the generic builder. One row per sample, one column per label
+`Utf8View` into the response buffer (no copies). Text to `RecordBatch` measured
+770-970 MB/s, against 115-170 MB/s for Go's `textparse` plus labels. One row per sample, one column per label
 name, plus `__name__`, `__value__` (Float64), `__timestamp_ms__`, `__type__` and an
 order-independent `__series_id__` hash. Rows stay queryable by SQL like any other
 input.
