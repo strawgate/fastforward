@@ -206,7 +206,9 @@ provides bare-name access for suffixed columns.
 to the numeric type with a strict `CAST`, so numeric strings compare numerically and a
 non-numeric value fails the transform (the batch is dropped).
 
-**Why:** match upstream semantics; leniency can be added later without breaking anyone.
+**Why:** match upstream semantics. Leniency can be added later as an opt-in without
+breaking anyone; making it the default would turn today's failed batches into output,
+which callers could observe.
 Users opt in per expression with `int()` / `float()`, which return NULL on bad input.  
 **Considered:** an analyzer rule that rewrites the implicit cast to `TRY_CAST` for
 comparisons, `BETWEEN` and `IN` (prototyped in PR #2921). Deferred; revisit if

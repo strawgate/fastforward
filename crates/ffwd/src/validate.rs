@@ -192,9 +192,11 @@ fn validate_transform_probe_read_only(
             .collect()
     };
 
-    // Null probe values survive any cast DataFusion inserts (e.g. `status >= 400`
-    // casts `status` to Int64) and cannot trigger value errors such as division
-    // by zero, so the probe only fails on genuine planning errors.
+    // The probe executes the query, so it can fail on value errors as well as
+    // planning errors. Null values keep value errors to a minimum: they pass
+    // through the casts DataFusion inserts (e.g. `status >= 400` casts `status`
+    // to Int64) and through arithmetic such as division without erroring. A query
+    // that turns NULL into an uncastable literal can still fail here.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
         .map(|_| Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef)
