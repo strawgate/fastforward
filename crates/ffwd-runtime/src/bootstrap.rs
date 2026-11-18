@@ -946,10 +946,14 @@ struct ShutdownTotals {
 
 /// Lines a pipeline delivered, from its output-sink stats.
 ///
-/// Sinks count lines only after the destination accepts them, so this
-/// excludes batches that were retried, held for replay, or abandoned at
-/// shutdown. With several outputs, the best-delivering output is used, which
-/// matches `lines_out` on the diagnostics status endpoint.
+/// Sinks count lines when their send reports success, the same point at
+/// which the batch is acked and its checkpoint advances. This excludes
+/// batches that were retried, held for replay, or abandoned at shutdown.
+/// Pipelined file outputs report success once the writer thread has queued
+/// the buffer, before the write itself (TODO(#2746): await the writer), so
+/// for them this counts queued lines. With several outputs, the
+/// best-delivering output is used, which matches `lines_out` on the
+/// diagnostics status endpoint.
 fn pipeline_delivered_lines(metrics: &ffwd_diagnostics::diagnostics::PipelineMetrics) -> u64 {
     metrics
         .outputs
