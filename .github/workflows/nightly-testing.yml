@@ -135,13 +135,13 @@ jobs:
           cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim linearizability::porcupine_checker_accepts_runtime_history -- --exact
 
   turmoil-seed-sweep:
-    name: Turmoil seed sweep (1000 seeds, shard ${{ matrix.shard_index }}/4)
+    name: Turmoil seed sweep (1000 seeds, shard ${{ matrix.shard_index }}/8)
     strategy:
       fail-fast: false
       matrix:
-        shard_index: [0, 1, 2, 3]
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-rust
@@ -152,63 +152,21 @@ jobs:
       - name: Build turmoil tests once
         run: cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run
       - name: Run turmoil tests with shard-assigned seeds
+        env:
+          # Stop starting new seeds well before the job timeout so results
+          # are always uploaded instead of the shard being cancelled.
+          TURMOIL_SWEEP_BUDGET_SECS: "3000"
         run: |
-          TOTAL_SEEDS=1000
-          SHARD_COUNT=4
-          SHARD_INDEX=${{ matrix.shard_index }}
-          FAIL_DIR=/tmp/turmoil-failures
-          FAIL_SEEDS_FILE=/tmp/turmoil_failed_seeds.txt
-          mkdir -p "$FAIL_DIR"
-          rm -f "$FAIL_SEEDS_FILE"
-
-          # Find the compiled test binary (filter for test targets only)
-          BIN=$(cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run --message-format=json 2>/dev/null \
-            | jq -r 'select(.executable != null and (.target.kind // [] | index("test"))) | .executable' \
-            | head -1)
-          if [ -z "$BIN" ]; then
-            echo "ERROR: could not find turmoil test binary"
-            exit 1
-          fi
-          echo "Test binary: $BIN"
-          echo "Shard ${SHARD_INDEX}/${SHARD_COUNT}: seeds where ((seed-1) % ${SHARD_COUNT}) == ${SHARD_INDEX}"
-
-          FAILED=0
-          RUN=0
-          for SEED in $(seq 1 "$TOTAL_SEEDS"); do
-            if [ $(( (SEED - 1) % SHARD_COUNT )) -ne "$SHARD_INDEX" ]; then
-              continue
-            fi
-            RUN=$((RUN + 1))
-            # Use if/else to avoid set -e killing the script on test failure
-            result=0
-            if ! TURMOIL_SEED=$SEED "$BIN" --test-threads=1 > /tmp/test_out.txt 2>&1; then
-              result=1
-            fi
-            tail -1 /tmp/test_out.txt | grep -q "ok" || result=1
-            if [ $result -ne 0 ]; then
-              echo "FAILED on shard $SHARD_INDEX seed $SEED"
-              # Show last 10 lines for debugging
-              tail -10 /tmp/test_out.txt
-              cp /tmp/test_out.txt "$FAIL_DIR/seed-${SEED}.log"
-              echo "$SEED" >> "$FAIL_SEEDS_FILE"
-              FAILED=$((FAILED + 1))
-            fi
-            # Progress report every 25 seeds in this shard
-            if [ $((RUN % 25)) -eq 0 ]; then
-              echo "=== Shard $SHARD_INDEX progress: $RUN runs, $FAILED failures ==="
-            fi
-          done
-          echo "=== Shard $SHARD_INDEX results: $FAILED failures out of $RUN runs ==="
-          if [ $FAILED -gt 0 ]; then exit 1; fi
-      - name: Upload turmoil failure logs
-        if: failure()
+          scripts/turmoil-seed-sweep.sh "${{ matrix.shard_index }}" 8 1000 \
+            "turmoil-sweep/shard-${{ matrix.shard_index }}"
+      - name: Upload turmoil sweep results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: turmoil-failures-shard-${{ matrix.shard_index }}-${{ github.run_id }}
-          path: |
-            /tmp/turmoil-failures/
-            /tmp/turmoil_failed_seeds.txt
-          retention-days: 7
+          name: turmoil-sweep-shard-${{ matrix.shard_index }}-${{ github.run_id }}
+          path: turmoil-sweep/
+          if-no-files-found: ignore
+          retention-days: 30
   turmoil-seed-sweep-report:
     permissions:
       contents: read
@@ -219,57 +177,59 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Download turmoil shard failure artifacts
+      - name: Download turmoil shard results
         uses: actions/download-artifact@v8
         with:
-          pattern: turmoil-failures-shard-*-${{ github.run_id }}
+          pattern: turmoil-sweep-shard-*-${{ github.run_id }}
           path: /tmp/turmoil-artifacts
-          merge-multiple: false
+          # Every shard writes into its own shard-<N>/ directory, so merging
+          # keeps a stable layout whether one or many artifacts match.
+          merge-multiple: true
       - name: Create or update aggregated issue on turmoil seed sweep failure
         run: |
           set -euo pipefail
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           summary_file="$(mktemp)"
+          repro_file="$(mktemp)"
           failed_shards=0
           total_fail_count=0
 
-          while IFS= read -r artifact_dir; do
-            failed_shards=$((failed_shards + 1))
-            artifact_name="$(basename "$artifact_dir")"
-            shard="$(printf '%s\n' "$artifact_name" | sed -E 's/^turmoil-failures-shard-([0-9]+)-.*/\1/')"
-            fail_seeds_file="$(find "$artifact_dir" -type f -name 'turmoil_failed_seeds.txt' | head -n 1)"
-
-            if [ -n "$fail_seeds_file" ] && [ -f "$fail_seeds_file" ]; then
-              fail_count=$(wc -l < "$fail_seeds_file" | tr -d ' ')
-              fail_seeds=$(paste -sd, "$fail_seeds_file")
-            else
-              fail_count=0
-              fail_seeds="(none captured)"
+          # Locate shard result directories by their marker file rather than
+          # by artifact directory names.
+          while IFS= read -r shard_file; do
+            shard_dir="$(dirname "$shard_file")"
+            shard="$(cat "$shard_file")"
+            failures_tsv="$shard_dir/failures.tsv"
+            fail_count=0
+            if [ -s "$shard_dir/failed_seeds.txt" ]; then
+              fail_count=$(wc -l < "$shard_dir/failed_seeds.txt" | tr -d ' ')
             fi
-
+            skipped=0
+            if [ -s "$shard_dir/skipped_seeds.txt" ]; then
+              skipped=$(wc -l < "$shard_dir/skipped_seeds.txt" | tr -d ' ')
+            fi
+            if [ "$fail_count" -eq 0 ]; then
+              continue
+            fi
+            failed_shards=$((failed_shards + 1))
             total_fail_count=$((total_fail_count + fail_count))
             {
-              echo "- Shard: ${shard}/4"
-              echo "  - Failed seeds (${fail_count}): ${fail_seeds}"
-              echo "  - Artifact: ${artifact_name}"
+              echo "- Shard ${shard}: ${fail_count} failed seed(s), ${skipped} skipped for time budget"
+              awk -F'\t' '{ printf "  - seed `%s`: `%s`\n", $1, $2 }' "$failures_tsv"
             } >>"$summary_file"
-          done < <(find /tmp/turmoil-artifacts -mindepth 1 -maxdepth 1 -type d | sort)
+            awk -F'\t' '$2 !~ / / { printf "TURMOIL_SEED=%s cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim %s -- --exact\n", $1, $2 }' \
+              "$failures_tsv" >>"$repro_file"
+          done < <(find /tmp/turmoil-artifacts -type f -name shard.txt | sort)
 
-          if [ "$failed_shards" -eq 0 ]; then
-            echo "- No shard artifacts captured." >>"$summary_file"
-          fi
-
-          # Skip filing an issue when there are no genuine seed failures.
-          # If shards failed due to infra/compile errors, total_fail_count and
-          # failed_shards will both be zero.
-          if [ "$total_fail_count" -eq 0 ] && [ "$failed_shards" -eq 0 ]; then
-            echo "No seed failures to report (shards may have failed for infra/compile reasons — check the run URL for details)."
+          # Shards that failed for infra/compile reasons produce no failed
+          # seeds; do not file an issue for those.
+          if [ "$total_fail_count" -eq 0 ]; then
+            echo "No seed failures to report (shards may have failed for infra/compile reasons; see ${run_url})."
             exit 0
           fi
 
           # Dedup against a stable title so persistent regressions append
-          # comments instead of opening a new issue every night.  Matches the
-          # pattern used by tla-pipeline-nightly-thorough-report above.
+          # comments instead of opening a new issue every night.
           issue_title="Nightly turmoil seed sweep failing"
           date_iso="$(date -u +%Y-%m-%d)"
           existing="$(gh issue list \
@@ -281,31 +241,39 @@ jobs:
             | head -n1)"
 
           body_file="$(mktemp)"
+          {
+            if [ -n "$existing" ]; then
+              echo "Recurrence on ${date_iso}: ${run_url}"
+            else
+              echo "Nightly turmoil seed sweep failed."
+              echo
+              echo "- First observed: ${date_iso}"
+              echo "- First run: ${run_url}"
+            fi
+            echo
+            echo "- Failed shards: ${failed_shards}"
+            echo "- Total failed seeds: ${total_fail_count}"
+            echo
+            cat "$summary_file"
+            echo
+            echo "Reproduce locally:"
+            echo
+            echo '```sh'
+            sort -u "$repro_file" | head -n 20
+            echo '```'
+            echo
+            echo "Full logs: artifacts \`turmoil-sweep-shard-*-${{ github.run_id }}\` on the run page."
+            if [ -z "$existing" ]; then
+              echo
+              echo "Please investigate and convert any reproductions into deterministic"
+              echo "tests. Subsequent failures while this issue stays open will be"
+              echo "appended as comments rather than spawning new issues."
+            fi
+          } >"$body_file"
+
           if [ -n "$existing" ]; then
-            cat >"$body_file" <<EOF
-          Recurrence on ${date_iso}: ${run_url}
-
-          - Failed shards: ${failed_shards}
-          - Total failed seeds: ${total_fail_count}
-
-          $(cat "$summary_file")
-          EOF
             gh issue comment "$existing" --body-file "$body_file"
           else
-            cat >"$body_file" <<EOF
-          Nightly turmoil seed sweep failed.
-
-          - First observed: ${date_iso}
-          - First run: ${run_url}
-          - Failed shards: ${failed_shards}
-          - Total failed seeds: ${total_fail_count}
-
-          $(cat "$summary_file")
-
-          Please investigate and convert any reproductions into deterministic
-          tests.  Subsequent failures while this issue stays open will be
-          appended as comments rather than spawning new issues.
-          EOF
             gh issue create \
               --title "$issue_title" \
               --body-file "$body_file" \
