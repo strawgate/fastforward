@@ -257,6 +257,17 @@ AbortBackoff ==
     /\ outcome' = "Cancelled"
     /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
+\* AbortRetrySend: the retry window closes while a retry (not a batch's
+\* first attempt) is mid-send. Maps to the stop_retrying.cancelled() arm
+\* guarded by is_retry in process_item's send select!.
+AbortRetrySend ==
+    /\ state = "Sending"
+    /\ retryCount > 0
+    /\ stopRetrying
+    /\ state'   = "Terminal"
+    /\ outcome' = "Cancelled"
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
+
 \* Any response to an in-progress send. Under stop_retrying one of these is
 \* always enabled while Sending, whatever the sink state.
 SendCompletes ==
@@ -279,6 +290,7 @@ Next ==
     \/ StopRetrying
     \/ GiveUpTransient
     \/ AbortBackoff
+    \/ AbortRetrySend
     \/ SinkRecover
     \/ SinkFail
     \/ SinkPermanentFail

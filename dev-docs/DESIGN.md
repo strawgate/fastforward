@@ -169,8 +169,8 @@ soon as the pipeline's shutdown token is cancelled), workers keep retrying with 
 backoff for a bounded window: `shutdown_retry_grace_ms`, default 10s, capped by the pool
 drain timeout. When the window closes, a worker in backoff gives up at once and later
 transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
-advanced). The window bounds retries and backoff; a send already in flight when it closes
-still runs until it completes or the drain timeout cancels the worker. Without a bound, a down
+advanced). The window bounds retries, including a retry that is mid-send when it closes; a batch's
+first attempt still runs until it completes or the drain timeout cancels the worker. Without a bound, a down
 output held every shutdown open for the full pool drain timeout (60s), which is longer than the Kubernetes default termination grace period (30s).
 A 10s default leaves room inside that period while still riding out a short collector
 restart. `0` gives up on the first failure after shutdown begins.
