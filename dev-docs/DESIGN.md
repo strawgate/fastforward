@@ -351,3 +351,34 @@ The pipeline topology compiler transforms a parsed configuration into a typed, v
 - Translating the compiled topology into runtime Tokio tasks.
 - Cross-pipeline routing.
 - Advanced processor chain registry.
+
+### Prometheus scrape: metric rows in Arrow, OTLP metrics as an output mode (#2924)
+
+**Parser and batch shape.** `ffwd_core::prom_text` scans the text exposition
+with the same SIMD-detect / scalar-consume split as the JSON scanner, behind a
+`PromBuilder: ScanBuilder` boundary. `ffwd_arrow::prom::PromBatchBuilder` is a
+dedicated builder rather than `StreamingBuilder`: every label value becomes a
+`Utf8View` into the response buffer (no copies), which measured about 5x faster
+than going through the generic builder. One row per sample, one column per label
+name, plus `__name__`, `__value__` (Float64), `__timestamp_ms__`, `__type__` and an
+order-independent `__series_id__` hash. Rows stay queryable by SQL like any other
+input.
+
+**Strict parsing.** A malformed line rejects the whole scrape, as Prometheus does,
+so a partial scrape is never mistaken for a complete one. `max_label_columns`
+(default 1000) and a padded-cell budget bound memory for hostile expositions.
+
+**Compression.** `compression: none` is the default; gunzip costs about as much as
+parse plus Arrow, and exporters are usually local. `gzip` is opt-in.
+
+**OTLP metrics.** Exported through `signal: auto | logs | metrics` on the existing
+`otlp` output rather than a processor or a new output type. `auto` sends batches
+with a string `__name__` and numeric `__value__` to the metrics endpoint, so SQL
+that produces those columns is log-to-metric for free. Histograms and summaries
+are rebuilt from their component samples; incomplete or inconsistent ones are
+dropped rather than guessed. OpenMetrics `<family>_created` samples (start
+times) are skipped by the scanner until start-time tracking exists.
+
+**Alternative considered:** a separate metrics data model in the pipeline. Rejected
+because it would fork every transform and sink; metric rows reuse the log
+pipeline unchanged.
