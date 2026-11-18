@@ -18,7 +18,7 @@ impl InputSource for TcpInput {
                             );
                             if self
                                 .last_max_clients_warning
-                                .is_none_or(|t| t.elapsed() > Duration::from_secs(60))
+                                .is_none_or(|t| t.elapsed() > Duration::from_mins(1))
                             {
                                 tracing::warn!(
                                     "TCP input '{}' reached max_clients limit ({}), dropping incoming connections",
@@ -50,7 +50,7 @@ impl InputSource for TcpInput {
                     let sock_ref = SockRef::from(&stream);
                     let _ = sock_ref.set_keepalive(true);
                     let keepalive = socket2::TcpKeepalive::new()
-                        .with_time(Duration::from_secs(60))
+                        .with_time(Duration::from_mins(1))
                         .with_interval(Duration::from_secs(10));
                     let _ = sock_ref.set_tcp_keepalive(&keepalive);
 

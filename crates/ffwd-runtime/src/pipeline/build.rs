@@ -35,7 +35,7 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default minimum interval between checkpoint flushes.
 pub(crate) const DEFAULT_CHECKPOINT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// Default maximum time to wait for worker-pool drain before cancellation.
-pub(crate) const DEFAULT_POOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_POOL_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
 
 fn input_type_exposes_public_source_paths(type_config: &InputTypeConfig) -> bool {
     // Keep this list tied to InputSource::source_paths() implementations.

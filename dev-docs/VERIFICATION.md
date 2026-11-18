@@ -297,6 +297,10 @@ explosion to N independent proofs over slices of the call graph.
 with value generation. Use `assume()` only when constraints span multiple variables or
 depend on computed state.
 
+**Keep `tracing` out of proof paths.** Kani 0.68 ICEs on the `catch_unwind` intrinsic
+that `tracing` macros reach. Put logging in proof-reachable code behind
+`#[cfg(not(kani))]` (see `ReloadCoordinator::step` in `ffwd-runtime/src/reload.rs`).
+
 ---
 
 ## Advanced Patterns

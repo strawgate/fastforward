@@ -7,7 +7,8 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
-use datafusion::datasource::MemTable;
+use datafusion::datasource::TableProvider;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::ScalarUDF;
 use datafusion::prelude::*;
 
@@ -15,17 +16,20 @@ use ffwd_core::scan_config::ScanConfig;
 use ffwd_types::field_names;
 
 use crate::cast_udf::{FloatCastUdf, IntCastUdf};
+use crate::swap_table::SwapTable;
 use crate::{QueryAnalyzer, TransformError, enrichment, udf};
 use ffwd_arrow::conflict_schema;
 
 /// Manages a DataFusion context, compiles and caches plans, executes SQL
 /// transforms against Arrow RecordBatches.
 ///
-/// The SessionContext and UDFs are created once and reused across batches.
-/// The `logs` MemTable and enrichment tables are swapped per batch
-/// (deregister + register). This eliminates the per-batch cost of
-/// SessionContext construction, built-in function registration, and
-/// UDF compilation.
+/// The SessionContext, UDFs, and the SQL's logical plan are created once and
+/// reused across batches. The `logs` and enrichment table providers stay
+/// registered and only swap the data they serve, so the cached plan stays
+/// valid. This eliminates the per-batch cost of SessionContext construction,
+/// UDF registration, SQL parsing, and logical planning. A schema change or an
+/// enrichment table appearing or disappearing replaces a provider and
+/// triggers a replan.
 pub struct SqlTransform {
     user_sql: String,
     analyzer: QueryAnalyzer,
@@ -37,6 +41,14 @@ pub struct SqlTransform {
     geo_database: Option<Arc<dyn enrichment::GeoDatabase>>,
     /// Cached DataFusion session — created once, table swapped per batch.
     pub(crate) ctx: Option<SessionContext>,
+    /// Provider registered as `logs`; its data is swapped per batch.
+    logs_table: Option<Arc<SwapTable>>,
+    /// Providers registered for `enrichment_tables`, by index. `None` while
+    /// a table has no snapshot.
+    enrichment_slots: Vec<Option<Arc<SwapTable>>>,
+    /// Logical plan for `user_sql`, reused while the registered providers
+    /// stay the same. Cleared whenever a provider is replaced.
+    pub(crate) plan: Option<LogicalPlan>,
 }
 
 impl SqlTransform {
@@ -51,6 +63,9 @@ impl SqlTransform {
             enrichment_tables: Vec::new(),
             geo_database: None,
             ctx: None,
+            logs_table: None,
+            enrichment_slots: Vec::new(),
+            plan: None,
         })
     }
 
@@ -91,12 +106,13 @@ impl SqlTransform {
 
     /// Execute the SQL transform on a RecordBatch.
     ///
-    /// Reuses a cached DataFusion SessionContext across batches. The `logs`
-    /// MemTable is swapped per batch (deregister + register). UDFs and
-    /// built-in functions persist across batches.
+    /// Reuses the cached SessionContext and logical plan across batches.
+    /// The `logs` provider serves this batch; enrichment providers serve the
+    /// tables' current snapshots. The plan is optimized per batch, so
+    /// volatile functions such as `now()` are evaluated each time.
     ///
-    /// Schema changes (new fields in later batches) are handled automatically
-    /// since the MemTable is recreated with the batch's schema each call.
+    /// Schema changes (new fields in later batches) are handled automatically:
+    /// a new schema registers a new provider and the SQL is planned again.
     pub async fn execute(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError> {
         // Normalize first so schema fingerprinting is based on the actual
         // table shape presented to DataFusion.
@@ -116,6 +132,13 @@ impl SqlTransform {
         self.schema_hash = new_hash;
 
         // Ensure the SessionContext exists (created once, reused across batches).
+        // A new context has no tables registered, so the cached plan and table
+        // handles from the old one are dropped with it.
+        if self.ctx.is_none() {
+            self.logs_table = None;
+            self.enrichment_slots.clear();
+            self.plan = None;
+        }
         self.ensure_context();
         let ctx = self.ctx.as_ref().ok_or_else(|| {
             TransformError::Sql(
@@ -123,52 +146,89 @@ impl SqlTransform {
             )
         })?;
 
-        // Swap the `logs` table: build new table first, then deregister + register.
-        // Building the MemTable before deregistering ensures that on error we
-        // don't leave the context without a `logs` table.
-        //
-        let schema = batch.schema();
-        let table = MemTable::try_new(schema, vec![vec![batch]])
-            .map_err(|e| TransformError::Sql(format!("Failed to create MemTable: {e}")))?;
-        let _ = ctx.deregister_table("logs");
-        ctx.register_table("logs", Arc::new(table))
-            .map_err(|e| TransformError::Sql(format!("Failed to register table: {e}")))?;
+        // Point `logs` at this batch. The table provider stays the same object
+        // while the schema is unchanged, so the cached plan stays valid; a new
+        // schema registers a new provider and forces a replan.
+        match &self.logs_table {
+            Some(table) if table.accepts(&batch) => table
+                .replace(batch)
+                .map_err(|e| TransformError::Sql(format!("Failed to create MemTable: {e}")))?,
+            _ => {
+                let table =
+                    Arc::new(SwapTable::try_new(batch).map_err(|e| {
+                        TransformError::Sql(format!("Failed to create MemTable: {e}"))
+                    })?);
+                let _ = ctx.deregister_table("logs");
+                ctx.register_table("logs", Arc::clone(&table) as Arc<dyn TableProvider>)
+                    .map_err(|e| TransformError::Sql(format!("Failed to register table: {e}")))?;
+                self.logs_table = Some(table);
+                self.plan = None;
+            }
+        }
 
-        // Swap enrichment tables whose snapshots have changed.
+        // Refresh enrichment tables from their current snapshots, the same way.
         // If snapshot() returns None (table not loaded yet), deregister the
         // stale table — queries referencing it will fail with a clear error
         // rather than silently returning stale data.
-        for et in &self.enrichment_tables {
-            let _ = ctx.deregister_table(et.name());
-            if let Some(snapshot) = et.snapshot() {
-                let et_table =
-                    MemTable::try_new(snapshot.schema(), vec![vec![snapshot]]).map_err(|e| {
-                        TransformError::Enrichment(format!(
-                            "Failed to create enrichment table '{}': {e}",
-                            et.name()
-                        ))
-                    })?;
-                ctx.register_table(et.name(), Arc::new(et_table))
-                    .map_err(|e| {
-                        TransformError::Enrichment(format!(
-                            "Failed to register enrichment table '{}': {e}",
-                            et.name()
-                        ))
-                    })?;
-            } else {
+        self.enrichment_slots
+            .resize_with(self.enrichment_tables.len(), || None);
+        for (et, slot) in self
+            .enrichment_tables
+            .iter()
+            .zip(self.enrichment_slots.iter_mut())
+        {
+            let Some(snapshot) = et.snapshot() else {
+                if slot.take().is_some() {
+                    let _ = ctx.deregister_table(et.name());
+                    self.plan = None;
+                }
                 tracing::warn!(
                     table = et.name(),
                     "enrichment table not yet loaded, skipping"
                 );
+                continue;
+            };
+            let enrichment_err = |e| {
+                TransformError::Enrichment(format!(
+                    "Failed to create enrichment table '{}': {e}",
+                    et.name()
+                ))
+            };
+            match slot {
+                Some(table) if table.accepts(&snapshot) => {
+                    table.replace(snapshot).map_err(enrichment_err)?;
+                }
+                _ => {
+                    let table = Arc::new(SwapTable::try_new(snapshot).map_err(enrichment_err)?);
+                    let _ = ctx.deregister_table(et.name());
+                    ctx.register_table(et.name(), Arc::clone(&table) as Arc<dyn TableProvider>)
+                        .map_err(|e| {
+                            TransformError::Enrichment(format!(
+                                "Failed to register enrichment table '{}': {e}",
+                                et.name()
+                            ))
+                        })?;
+                    *slot = Some(table);
+                    self.plan = None;
+                }
             }
         }
 
-        // Execute the SQL.
-        let sql = &self.user_sql;
-        let df = ctx
-            .sql(sql)
-            .await
-            .map_err(|e| TransformError::Sql(format!("SQL execution error: {e}")))?;
+        // Plan the SQL once and reuse the logical plan while the tables keep
+        // their providers. The cached plan is not yet optimized: `collect()`
+        // optimizes it per batch, so functions like `now()` are evaluated
+        // fresh each time.
+        let df = match &self.plan {
+            Some(plan) => DataFrame::new(ctx.state(), plan.clone()),
+            None => {
+                let df = ctx
+                    .sql(&self.user_sql)
+                    .await
+                    .map_err(|e| TransformError::Sql(format!("SQL execution error: {e}")))?;
+                self.plan = Some(df.logical_plan().clone());
+                df
+            }
+        };
 
         // Capture the output schema before collecting so we can build an empty
         // batch when the WHERE clause filters out every row — without

@@ -239,9 +239,12 @@ appended or replaced from the CRI sidecar; rows without CRI values preserve any
 existing payload columns and otherwise materialize as nulls. This stage is the
 only place CRI metadata becomes columns.
 
-**SqlTransform** (`ffwd-transform/src/lib.rs`) runs user SQL via
-DataFusion. Each batch is registered as a `"logs"` MemTable, the SQL
-executes, and the result is collected.
+**SqlTransform** (`ffwd-transform/src/sql_transform.rs`) runs user SQL via
+DataFusion. The SQL is parsed and planned once; each batch is then served
+through a long-lived `"logs"` table provider (`swap_table.rs`), the cached
+logical plan is optimized and executed, and the result is collected. A schema
+change, or an enrichment table appearing or disappearing, triggers a replan.
+Optimizing per batch keeps `now()` and other volatile functions fresh.
 
 **QueryAnalyzer** parses the SQL at startup and extracts referenced
 columns. This produces a `ScanConfig` for field pushdown — the

@@ -58,7 +58,7 @@ libloading = "0.9"
 lz4_flex = "0.13"
 memchr = "2"
 notify = "8"
-opentelemetry-proto = { version = "0.31", features = [
+opentelemetry-proto = { version = "0.33", features = [
     "logs",
     "gen-tonic-messages",
 ] }

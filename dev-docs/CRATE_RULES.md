@@ -91,7 +91,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 |------|-------------|
 | DataFusion is the SQL engine | Architecture decision |
 | Enrichment tables implement Arrow's RecordBatchReader | Convention |
-| Deps: core + arrow + datafusion | Cargo.toml |
+| Deps: core + arrow + datafusion (+ async-trait for `TableProvider` impls) | Cargo.toml |
 
 ## ffwd-output
 

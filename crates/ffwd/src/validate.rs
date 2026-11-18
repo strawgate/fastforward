@@ -222,12 +222,17 @@ fn validate_transform_probe_read_only(
             .collect()
     };
 
+    // The probe executes the query, so it can fail on value errors as well as
+    // planning errors. Null values keep value errors to a minimum: they pass
+    // through the casts DataFusion inserts (e.g. `status >= 400` casts `status`
+    // to Int64) and through arithmetic such as division without erroring. A query
+    // that turns NULL into an uncastable literal can still fail here.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
         .map(|field| match field.data_type() {
-            DataType::Float64 => Arc::new(Float64Array::from(vec![Some(1.0)])) as ArrayRef,
-            DataType::Int64 => Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
-            _ => Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef,
+            DataType::Float64 => Arc::new(Float64Array::from(vec![None::<f64>])) as ArrayRef,
+            DataType::Int64 => Arc::new(Int64Array::from(vec![None::<i64>])) as ArrayRef,
+            _ => Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
         })
         .collect();
 
@@ -1256,5 +1261,33 @@ pipelines:
                 failures
             );
         }
+    }
+
+    #[test]
+    fn transform_probe_accepts_numeric_comparison_and_division() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/logs.json
+        format: json
+    transform: SELECT 100 / int(duration_ms) AS rate FROM logs WHERE status >= 400
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
     }
 }

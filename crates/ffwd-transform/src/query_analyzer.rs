@@ -292,7 +292,8 @@ fn walk_set_expr(
                             except_fields,
                         );
                     }
-                    SelectItem::ExprWithAlias { expr, .. } => {
+                    SelectItem::ExprWithAlias { expr, .. }
+                    | SelectItem::ExprWithAliases { expr, .. } => {
                         collect_column_refs_with_wildcards(
                             expr,
                             referenced_columns,
@@ -1120,7 +1121,12 @@ fn extract_join_constraint(op: &sqlast::JoinOperator) -> Option<&sqlast::JoinCon
         | J::RightAnti(c)
         | J::AsOf { constraint: c, .. } => Some(c),
         J::StraightJoin(c) => Some(c),
-        J::CrossJoin(_) | J::CrossApply | J::OuterApply => None,
+        J::CrossJoin(_)
+        | J::CrossApply
+        | J::OuterApply
+        | J::ArrayJoin
+        | J::LeftArrayJoin
+        | J::InnerArrayJoin => None,
     }
 }
 
@@ -1583,7 +1589,7 @@ fn collect_logs_source_metadata_from_select(
             SelectItem::UnnamedExpr(expr) => {
                 collect_logs_source_metadata_from_expr(expr, &scope, usage);
             }
-            SelectItem::ExprWithAlias { expr, .. } => {
+            SelectItem::ExprWithAlias { expr, .. } | SelectItem::ExprWithAliases { expr, .. } => {
                 collect_logs_source_metadata_from_expr(expr, &scope, usage);
             }
         }

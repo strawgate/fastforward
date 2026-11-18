@@ -10,6 +10,7 @@ pub mod udf;
 mod cast_udf;
 mod query_analyzer;
 mod sql_transform;
+mod swap_table;
 
 pub use error::TransformError;
 pub use query_analyzer::QueryAnalyzer;

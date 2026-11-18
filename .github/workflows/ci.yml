@@ -436,10 +436,12 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.kani_matrix) }}
     env:
-      # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-      # unreleased). Unpin once a release after 0.68.0 ships. Keep in step
-      # with nightly-testing.yml.
-      KANI_VERSION: '0.67.0'
+      # 0.68.0 is the first Kani whose toolchain can build Rust 1.94 crates
+      # (DataFusion 55). It ICEs on std's catch_unwind intrinsic (fixed on
+      # Kani main, unreleased), which `tracing` macros reach, so keep tracing
+      # calls in proven code behind #[cfg(not(kani))] until a newer Kani ships.
+      # Keep in step with nightly-testing.yml.
+      KANI_VERSION: '0.68.0'
     steps:
       - uses: actions/checkout@v6
 
@@ -461,7 +463,9 @@ jobs:
       - name: Install Kani
         run: |
           if ! cargo kani --version 2>/dev/null | grep -q "$KANI_VERSION"; then
-            cargo install --locked kani-verifier --version "$KANI_VERSION"
+            # --force: rust-cache may restore another version's cargo-kani
+            # into ~/.cargo/bin, and a plain install refuses to overwrite it.
+            cargo install --locked --force kani-verifier --version "$KANI_VERSION"
           fi
           cargo kani setup
 

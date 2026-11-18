@@ -10,7 +10,6 @@
 //! SELECT regexp_extract(message_str, 'duration=(\d+)ms', 1) AS duration FROM logs
 //! ```
 
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{Array, AsArray, StringBuilder};
@@ -147,10 +146,6 @@ impl RegexpExtractUdf {
 }
 
 impl ScalarUDFImpl for RegexpExtractUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "regexp_extract"
     }
