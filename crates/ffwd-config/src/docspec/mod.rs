@@ -782,6 +782,11 @@ pub const INPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
         support: SupportLevel::Stable,
         description: "Receive Arrow IPC stream batches via HTTP `POST /v1/arrow`.",
     },
+    ComponentTypeDoc {
+        type_tag: "prometheus_scrape",
+        support: SupportLevel::Beta,
+        description: "Scrape Prometheus text-format `/metrics` endpoints into one row per sample (Arrow-native).",
+    },
 ];
 
 /// Output component inventory used for generated support tables.

@@ -14,7 +14,6 @@ otlp-research = []
 s3 = [
     "dep:async-compression",
     "dep:futures-util",
-    "dep:reqwest",
     "dep:hmac",
     "dep:sha2",
     "dep:hex",
@@ -68,7 +67,7 @@ quick-xml = { version = "0.39", features = ["serialize"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "stream",
-], optional = true }
+] }
 rustls = { workspace = true, features = ["std"] }
 ryu = "1"
 serde = { workspace = true }
@@ -81,7 +80,7 @@ sonic-rs = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 tiny_http = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }

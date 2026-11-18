@@ -64,6 +64,9 @@ pub enum InputType {
     HostMetrics,
     /// AWS S3 (and S3-compatible) object storage input.
     S3,
+    /// Prometheus text-format scrape input.
+    #[serde(rename = "prometheus_scrape")]
+    PrometheusScrape,
 }
 
 impl fmt::Display for InputType {
@@ -84,6 +87,7 @@ impl fmt::Display for InputType {
             InputType::Journald => f.write_str("journald"),
             InputType::HostMetrics => f.write_str("host_metrics"),
             InputType::S3 => f.write_str("s3"),
+            InputType::PrometheusScrape => f.write_str("prometheus_scrape"),
         }
     }
 }

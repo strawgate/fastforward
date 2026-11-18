@@ -1,6 +1,6 @@
 # Use-case configuration examples
 
-This folder contains 20 starter configurations for common collection targets (Redis, PostgreSQL, Kubernetes, syslog, etc.).
+This folder contains 21 starter configurations for common collection targets (Redis, PostgreSQL, Kubernetes, syslog, Prometheus exporters, etc.).
 
 ## How to use
 
@@ -35,11 +35,12 @@ ff effective-config --config ffwd.yaml
 12. `otlp-in-to-elasticsearch.yaml`
 13. `otlp-in-to-loki.yaml`
 14. `postgresql-to-otlp.yaml`
-15. `rabbitmq-to-otlp.yaml`
-16. `redis-to-otlp.yaml`
-17. `security-audit-to-file.yaml`
-18. `syslog-tcp-to-elasticsearch.yaml`
-19. `syslog-udp-to-otlp.yaml`
-20. `system-journal-export-to-otlp.yaml`
+15. `prometheus-scrape-to-otlp-metrics.yaml`
+16. `rabbitmq-to-otlp.yaml`
+17. `redis-to-otlp.yaml`
+18. `security-audit-to-file.yaml`
+19. `syslog-tcp-to-elasticsearch.yaml`
+20. `syslog-udp-to-otlp.yaml`
+21. `system-journal-export-to-otlp.yaml`
 
 The CLI wizard (`ff wizard`) uses the same template ideas so examples and generated configs stay aligned.

@@ -702,6 +702,52 @@ pub(super) fn build_input_state(
                 });
             }
         }
+        InputTypeConfig::PrometheusScrape(p) => {
+            use ffwd_config::PrometheusScrapeCompressionConfig;
+            use ffwd_io::prometheus_scrape::{PrometheusScrapeInput, PrometheusScrapeSettings};
+
+            if cfg.format.is_some() {
+                return Err(format!(
+                    "input '{name}': prometheus_scrape does not support 'format'"
+                ));
+            }
+            let job = p.job.clone().unwrap_or_else(|| name.to_string());
+            let mut settings = PrometheusScrapeSettings::new(p.targets.clone(), job);
+            if let Some(interval) = p.scrape_interval_ms {
+                settings.interval = std::time::Duration::from_millis(interval.get());
+            }
+            if let Some(timeout) = p.scrape_timeout_ms {
+                settings.timeout = std::time::Duration::from_millis(timeout.get());
+            }
+            settings.timeout = settings.timeout.min(settings.interval);
+            settings.gzip = matches!(p.compression, Some(PrometheusScrapeCompressionConfig::Gzip));
+            settings.honor_timestamps = p.honor_timestamps.unwrap_or(true);
+            settings.series_id = p.series_id.unwrap_or(true);
+            if let Some(max) = p.max_body_bytes {
+                settings.max_body_bytes = max;
+            }
+            if let Some(max) = p.max_label_columns {
+                settings.max_label_columns = max;
+            }
+            if let Some(headers) = &p.headers {
+                let mut headers: Vec<(String, String)> = headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                headers.sort();
+                settings.headers = headers;
+            }
+            let source = PrometheusScrapeInput::new(name, settings, Arc::clone(&stats))
+                .map_err(|e| format!("input '{name}': failed to start prometheus_scrape: {e}"))?;
+            return Ok(IngestState {
+                source: Box::new(source),
+                buf: BytesMut::with_capacity(64 * 1024),
+                row_origins: Vec::new(),
+                source_paths: HashMap::new(),
+                cri_metadata: ffwd_io::input::CriMetadata::default(),
+                stats,
+            });
+        }
         InputTypeConfig::MacosLog(s) => {
             let config = s.macos_log.as_ref();
             let level = config.and_then(|c| c.level.as_deref());

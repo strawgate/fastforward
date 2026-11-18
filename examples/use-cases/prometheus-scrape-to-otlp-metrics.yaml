@@ -1,0 +1,21 @@
+# FastForward example
+# Use case: scrape Prometheus exporters and send OTLP metrics
+# Replace targets/endpoints with values for your environment.
+
+pipelines:
+  metrics:
+    inputs:
+      - type: prometheus_scrape
+        job: node
+        targets:
+          - http://localhost:9100/metrics
+        scrape_interval_ms: 15000
+        # compression: gzip   # only for remote or bandwidth-limited targets
+    outputs:
+      # Metric-shaped batches go to /v1/metrics automatically (signal: auto).
+      - type: otlp
+        endpoint: https://otel-collector:4318/v1/logs
+
+# Optional: diagnostics
+# server:
+#   diagnostics: 127.0.0.1:9191

@@ -891,6 +891,10 @@ fn input_label(i: &ffwd_config::InputConfig) -> String {
         InputTypeConfig::Journald(_) => "journald".to_string(),
         InputTypeConfig::S3(s) => format!("s3    {}", s.s3.bucket),
         InputTypeConfig::MacosLog(_) => "macos log stream".to_string(),
+        InputTypeConfig::PrometheusScrape(p) => match p.targets.as_slice() {
+            [one] => format!("prometheus_scrape  {one}"),
+            many => format!("prometheus_scrape  {} targets", many.len()),
+        },
     }
 }
 

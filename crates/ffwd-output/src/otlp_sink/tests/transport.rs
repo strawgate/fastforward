@@ -36,7 +36,7 @@ async fn send_payload_returns_rejected_on_4xx() {
     .unwrap();
 
     sink.encoder_buf.push(1); // Non-empty so it sends
-    let result = sink.send_payload(1).await.unwrap();
+    let result = sink.send_payload(1, false).await.unwrap();
     match result {
         crate::sink::SendResult::Rejected(_) => {} // Expected
         _ => panic!("Expected Rejected on 400 response, got: {:?}", result),
@@ -67,7 +67,7 @@ async fn send_payload_returns_io_error_on_5xx_without_retry_after() {
     .unwrap();
 
     sink.encoder_buf.push(1);
-    let result = sink.send_payload(1).await.unwrap();
+    let result = sink.send_payload(1, false).await.unwrap();
     assert!(
         matches!(result, crate::sink::SendResult::IoError(_)),
         "Expected IoError on 500 without Retry-After, got: {result:?}",
@@ -98,7 +98,7 @@ async fn send_payload_5xx_honours_retry_after_header() {
     .unwrap();
 
     sink.encoder_buf.push(1);
-    let result = sink.send_payload(1).await.unwrap();
+    let result = sink.send_payload(1, false).await.unwrap();
     match result {
         crate::sink::SendResult::RetryAfter(d) => {
             assert_eq!(d.as_secs(), 42, "should honour Retry-After header value");
@@ -122,7 +122,7 @@ async fn grpc_oversized_payload_is_rejected_before_send() {
 
     sink.encoder_buf = vec![0u8; DEFAULT_GRPC_MAX_MESSAGE_BYTES + 1];
     let err = sink
-        .send_payload(1)
+        .send_payload(1, false)
         .await
         .expect_err("oversized gRPC payload must return InvalidInput");
 

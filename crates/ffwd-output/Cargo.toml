@@ -52,6 +52,7 @@ memchr = "2"
 mockito = "1.7.2"
 opentelemetry-proto = { version = "0.31", features = [
     "logs",
+    "metrics",
     "gen-tonic-messages",
 ] }
 proptest = "1"

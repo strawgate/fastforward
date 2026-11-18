@@ -47,9 +47,10 @@ pub use types::{
     HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
     K8sPathConfig, LokiOutputConfig, NullOutputConfig, OpampConfig, OtlpOutputConfig,
-    OtlpProtobufDecodeModeConfig, OtlpProtocol, OtlpTypeConfig, OutputConfigV2, OutputType,
-    PipelineConfig, S3CompressionConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
-    ServerConfig, SourceMetadataStyle, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
+    OtlpProtobufDecodeModeConfig, OtlpProtocol, OtlpSignal, OtlpTypeConfig, OutputConfigV2,
+    OutputType, PipelineConfig, PrometheusScrapeCompressionConfig, PrometheusScrapeTypeConfig,
+    S3CompressionConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig, ServerConfig,
+    SourceMetadataStyle, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
     TcpOutputConfig, TcpTypeConfig, UdpOutputConfig, UdpTypeConfig,
 };
 pub use validate::{sanitize_identifier, validate_host_port};

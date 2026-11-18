@@ -400,6 +400,65 @@ Behavior:
   with missing/other content-type headers; use canonical content types for
   predictable interoperability.
 
+### `prometheus_scrape` input
+
+Scrape Prometheus text-format (0.0.4 and OpenMetrics text) endpoints on an
+interval. Each successful scrape becomes one Arrow batch with one row per
+sample. This input is Arrow-native and does not support `format`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `targets` | array[string] | Yes | `http://` or `https://` URLs, e.g. `http://localhost:9100/metrics`. |
+| `job` | string | No | Value of the `job` column. Defaults to the input name. |
+| `scrape_interval_ms` | integer | No | Scrape cadence per target. Defaults to `15000`. |
+| `scrape_timeout_ms` | integer | No | Timeout for one scrape, connect through end of body. Defaults to `10000` and is capped at the interval. |
+| `compression` | enum | No | `none` (default) asks for an uncompressed body; `gzip` asks for gzip. Decompressing gzip costs about as much CPU as parsing, so use it only for remote or bandwidth-limited targets. |
+| `honor_timestamps` | boolean | No | Keep timestamps written in the exposition. Defaults to `true`. When `false`, every sample gets the scrape time. |
+| `headers` | map[string,string] | No | Extra request headers, e.g. `Authorization`. |
+| `max_body_bytes` | integer | No | Largest accepted response body. Defaults to `67108864` (64 MiB). |
+| `max_label_columns` | integer | No | Largest number of distinct label columns one scrape may produce. Defaults to `1000`. A scrape over the limit is rejected. |
+| `series_id` | boolean | No | Add the `__series_id__` column. Defaults to `true`. |
+
+Columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `__name__` | Utf8View | Metric name of the sample. |
+| `__value__` | Float64 | Sample value (`NaN` and `±Inf` included). |
+| `__timestamp_ms__` | Int64 | Exposition timestamp, or the scrape time when the sample has none. |
+| `__type__` | Utf8View | Type from the family's `# TYPE` line (`counter`, `gauge`, `histogram`, ...). Null when there is none. |
+| `__series_id__` | UInt64 | Stable hash of the name and all labels, independent of label order. |
+| `job`, `instance` | Utf8View | Target labels. `instance` is the target's `host:port`. |
+| one column per label | Utf8View | Null on rows whose sample lacks that label. |
+
+Behavior:
+- A malformed exposition rejects the whole scrape, as Prometheus does. The
+  failure is logged (at most once a minute per target), counted as an input
+  error, and the input reports `degraded` health until the target scrapes
+  cleanly again.
+- Exposition labels named `job` or `instance` are renamed to `exported_job` /
+  `exported_instance`, as with Prometheus `honor_labels: false`.
+- Labels whose names collide with the columns above (for example a label named
+  `__value__`) are kept under a `label:` prefix.
+- Each target starts at a stable offset within the interval, so many targets
+  do not fire at once.
+- Sent through an `otlp` output, these batches become OTLP metrics (see
+  `signal` on the `otlp` output).
+
+```yaml
+pipelines:
+  metrics:
+    inputs:
+      - type: prometheus_scrape
+        job: node
+        targets:
+          - http://localhost:9100/metrics
+        scrape_interval_ms: 15000
+    outputs:
+      - type: otlp
+        endpoint: http://otel-collector:4318/v1/metrics
+```
+
 ---
 
 ## Input types
@@ -422,6 +481,7 @@ Behavior:
 | `journald` | Beta | Read structured journal entries from systemd journald. |
 | `host_metrics` | Implemented | Host metrics input — process snapshots, CPU, memory, network stats via sysinfo (Arrow-native). |
 | `arrow_ipc` | Implemented | Receive Arrow IPC stream batches via HTTP `POST /v1/arrow`. |
+| `prometheus_scrape` | Beta | Scrape Prometheus text-format `/metrics` endpoints into one row per sample (Arrow-native). |
 {/* END GENERATED: input-types */}
 
 ---
@@ -472,6 +532,17 @@ Send log records as OTLP protobuf to an OpenTelemetry collector.
 | `request_timeout_ms` | integer | No | — | Export request timeout in milliseconds. |
 | `batch_size` | integer | No | — | Maximum rows per OTLP request. |
 | `batch_timeout_ms` | integer | No | — | Maximum time to buffer rows before exporting. |
+| `signal` | enum | No | `auto` | `auto`, `logs`, or `metrics`. `auto` sends metric-shaped batches (a string `__name__` and a numeric `__value__` column, as `prometheus_scrape` produces) as OTLP metrics and everything else as logs. `metrics` rejects batches without those columns. |
+
+Metrics are sent to the endpoint with `/v1/logs` replaced by `/v1/metrics`
+(HTTP) or to `MetricsService/Export` (gRPC); any other HTTP URL is used as
+given. Mapping: `job` and `instance` become the resource attributes
+`service.name` and `service.instance.id`; counters become monotonic cumulative
+sums; histograms and summaries are rebuilt from their `_bucket`/`quantile`,
+`_sum` and `_count` samples; gauges, untyped and other samples become gauges;
+other labels become data point attributes and `__`-prefixed columns are not
+exported. A SQL transform can turn logs into metrics by producing `__name__`
+and `__value__` columns.
 
 :::note
 Per-output retry and batch controls (`retry_attempts`, `batch_size`, etc.) are

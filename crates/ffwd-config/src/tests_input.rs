@@ -35,6 +35,10 @@ mod tests {
             ("windows_ebpf_sensor", ""),
             ("journald", ""),
             ("host_metrics", ""),
+            (
+                "prometheus_scrape",
+                "targets: [\"http://localhost:9100/metrics\"]",
+            ),
         ] {
             let input = if extra.is_empty() {
                 format!("type: {itype}")
@@ -754,5 +758,69 @@ pipelines:
       - type: "null"
 "#;
         Config::load_str(yaml).expect("arrow_ipc input should validate when listen is provided");
+    }
+
+    #[test]
+    fn prometheus_scrape_parses_all_fields() {
+        let yaml = single_pipeline_yaml(
+            "type: prometheus_scrape\njob: node\ntargets:\n  - http://a:9100/metrics\n  - https://b/metrics\nscrape_interval_ms: 30000\nscrape_timeout_ms: 5000\ncompression: gzip\nhonor_timestamps: false\nheaders:\n  Authorization: Bearer x\nmax_body_bytes: 1024\nmax_label_columns: 10\nseries_id: false",
+            "type: stdout",
+        );
+        let cfg = Config::load_str(yaml).expect("valid prometheus_scrape config");
+        let InputTypeConfig::PrometheusScrape(p) = &cfg.pipelines["default"].inputs[0].type_config
+        else {
+            panic!("expected prometheus_scrape input");
+        };
+        assert_eq!(p.targets.len(), 2);
+        assert_eq!(p.job.as_deref(), Some("node"));
+        assert_eq!(p.compression, Some(PrometheusScrapeCompressionConfig::Gzip));
+        assert_eq!(p.honor_timestamps, Some(false));
+        assert_eq!(p.series_id, Some(false));
+    }
+
+    #[test]
+    fn prometheus_scrape_rejects_invalid_settings() {
+        for (extra, needle) in [
+            ("targets: []", "at least one"),
+            ("targets: [\"localhost:9100\"]", "http:// or https://"),
+            (
+                "targets: [\"http://a/m\", \"http://a/m\"]",
+                "more than once",
+            ),
+            (
+                "targets: [\"http://a/m\"]\nscrape_interval_ms: 1000\nscrape_timeout_ms: 2000",
+                "must not exceed",
+            ),
+            ("targets: [\"http://a/m\"]\nformat: json", "format"),
+            (
+                "targets: [\"http://a/m\"]\ncompression: zstd",
+                "unknown variant",
+            ),
+            ("targets: [\"http://a/m\"]\nbogus: 1", "unknown field"),
+        ] {
+            let yaml =
+                single_pipeline_yaml(&format!("type: prometheus_scrape\n{extra}"), "type: stdout");
+            let err = Config::load_str(yaml).expect_err(extra).to_string();
+            assert!(err.contains(needle), "{extra:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn otlp_output_signal_parses() {
+        for (value, expected) in [
+            ("auto", OtlpSignal::Auto),
+            ("logs", OtlpSignal::Logs),
+            ("metrics", OtlpSignal::Metrics),
+        ] {
+            let yaml = single_pipeline_yaml(
+                "type: stdin",
+                &format!("type: otlp\nendpoint: http://c:4318/v1/logs\nsignal: {value}"),
+            );
+            let cfg = Config::load_str(yaml).expect("valid signal");
+            let OutputConfigV2::Otlp(o) = &cfg.pipelines["default"].outputs[0] else {
+                panic!("expected otlp output");
+            };
+            assert_eq!(o.signal, Some(expected));
+        }
     }
 }

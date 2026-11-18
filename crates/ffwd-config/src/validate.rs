@@ -818,6 +818,9 @@ fn validate_pipeline_input(
                 )));
             }
         }
+        InputTypeConfig::PrometheusScrape(p) => {
+            validate_prometheus_scrape(pipeline_name, input_label, input, p)?;
+        }
     }
 
     if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
@@ -834,6 +837,69 @@ fn validate_pipeline_input(
         )));
     }
 
+    Ok(())
+}
+
+fn validate_prometheus_scrape(
+    pipeline_name: &str,
+    input_label: &str,
+    input: &InputConfig,
+    p: &crate::types::PrometheusScrapeTypeConfig,
+) -> Result<(), ConfigError> {
+    let err = |msg: String| {
+        Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': {msg}"
+        )))
+    };
+    if p.targets.is_empty() {
+        return err("prometheus_scrape requires at least one entry in 'targets'".to_string());
+    }
+    for target in &p.targets {
+        let t = target.trim();
+        let rest = t
+            .strip_prefix("http://")
+            .or_else(|| t.strip_prefix("https://"));
+        match rest {
+            Some(r) if !r.is_empty() && !r.starts_with('/') => {}
+            _ => {
+                return err(format!(
+                    "target '{target}' must be an http:// or https:// URL with a host"
+                ));
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    for target in &p.targets {
+        if !seen.insert(target.trim()) {
+            return err(format!("target '{target}' is listed more than once"));
+        }
+    }
+    if let Some(job) = &p.job
+        && job.trim().is_empty()
+    {
+        return err("'job' must not be blank".to_string());
+    }
+    if let (Some(interval), Some(timeout)) = (p.scrape_interval_ms, p.scrape_timeout_ms)
+        && timeout.get() > interval.get()
+    {
+        return err(format!(
+            "scrape_timeout_ms ({}) must not exceed scrape_interval_ms ({})",
+            timeout.get(),
+            interval.get()
+        ));
+    }
+    if p.max_body_bytes == Some(0) {
+        return err("'max_body_bytes' must be at least 1".to_string());
+    }
+    if p.max_label_columns == Some(0) {
+        return err("'max_label_columns' must be at least 1".to_string());
+    }
+    if input.format.is_some() {
+        return err(
+            "prometheus_scrape does not support 'format' (it always parses the Prometheus text format)"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 

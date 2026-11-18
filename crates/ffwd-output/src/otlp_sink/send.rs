@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
-use ffwd_config::OtlpProtocol;
+use ffwd_config::{OtlpProtocol, OtlpSignal};
 use flate2::Compression as GzipLevel;
 use flate2::write::GzEncoder;
 
@@ -24,6 +24,7 @@ impl OtlpSink {
     pub(super) async fn send_payload(
         &mut self,
         batch_rows: u64,
+        as_metrics: bool,
     ) -> io::Result<super::super::sink::SendResult> {
         if self.encoder_buf.is_empty() {
             return Ok(super::super::sink::SendResult::Ok);
@@ -101,7 +102,12 @@ impl OtlpSink {
             payload
         };
 
-        let mut req = self.client.post(&self.endpoint);
+        let endpoint = if as_metrics {
+            &self.metrics_endpoint
+        } else {
+            &self.endpoint
+        };
+        let mut req = self.client.post(endpoint);
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -260,14 +266,29 @@ impl super::super::sink::Sink for OtlpSink {
         let grpc_cap = self.grpc_buf.capacity();
 
         Box::pin(async move {
-            self.encode_batch(batch, metadata);
+            let as_metrics = match self.signal {
+                OtlpSignal::Logs => false,
+                OtlpSignal::Metrics => true,
+                _ => super::metrics::is_metric_batch(batch),
+            };
+            if as_metrics {
+                if let Err(e) = super::metrics::encode_metrics_batch(
+                    batch,
+                    metadata.observed_time_ns,
+                    &mut self.encoder_buf,
+                ) {
+                    return super::super::sink::SendResult::Rejected(format!("OTLP metrics: {e}"));
+                }
+            } else {
+                self.encode_batch(batch, metadata);
+            }
             let rows = batch.num_rows() as u64;
 
             let encoder_cap_post = self.encoder_buf.capacity().max(encoder_cap);
             let compress_cap_post = self.compress_buf.capacity().max(compress_cap);
             let grpc_cap_post = self.grpc_buf.capacity().max(grpc_cap);
 
-            let result = match self.send_payload(rows).await {
+            let result = match self.send_payload(rows, as_metrics).await {
                 Ok(r) => r,
                 Err(e) => super::super::sink::SendResult::from_io_error(e),
             };
