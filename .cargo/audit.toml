@@ -1,0 +1,10 @@
+# cargo-audit configuration (used by the rustsec/audit-check CI step).
+# Mirrors the advisory ignores in deny.toml: no fix is reachable by a
+# lockfile update, approved by the maintainer, removal tracked in #2918.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0543", # chrono unmaintained; required by arrow/datafusion
+    "RUSTSEC-2026-0258", # h2 0.3 via otel-opamp-rs OpAMP client; no 0.3 fix
+    "RUSTSEC-2026-0194", # quick-xml 0.26 via pprof flamegraph, ffwd-bench only
+    "RUSTSEC-2026-0195", # quick-xml 0.26 via pprof flamegraph, ffwd-bench only
+]

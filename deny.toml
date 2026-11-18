@@ -4,6 +4,19 @@
 [advisories]
 # Only error on unmaintained crates in our workspace, not transitive deps.
 unmaintained = "workspace"
+# Advisories with no fix reachable by a lockfile update, approved by the
+# maintainer. Tracked in #2918; remove each entry once its exit path lands.
+ignore = [
+    # chrono is unmaintained (all versions); required by arrow/datafusion.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; required by arrow/datafusion (#2918)" },
+    # h2 0.3 has no patched release; only via otel-opamp-rs 0.0.14 (latest)
+    # -> reqwest 0.11 -> hyper 0.14 for the OpAMP client.
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 via otel-opamp-rs OpAMP client; no 0.3 fix (#2918)" },
+    # quick-xml 0.26 via pprof 0.15 (latest) flamegraph -> inferno 0.11;
+    # ffwd-bench profiling only.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.26 via pprof flamegraph, ffwd-bench only (#2918)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.26 via pprof flamegraph, ffwd-bench only (#2918)" },
+]
 
 [licenses]
 allow = [

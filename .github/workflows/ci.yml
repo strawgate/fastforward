@@ -421,6 +421,9 @@ jobs:
       - name: Run Kani verification (ffwd-core + ffwd-kani)
         uses: model-checking/kani-github-action@v1
         with:
+          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
+          # unreleased). Unpin once a release after 0.68.0 ships.
+          kani-version: '0.67.0'
           args: >-
             --solver kissat
             --jobs 2
@@ -454,6 +457,9 @@ jobs:
         # cannot skip, so verify only the library target.
         uses: model-checking/kani-github-action@v1
         with:
+          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
+          # unreleased). Unpin once a release after 0.68.0 ships.
+          kani-version: '0.67.0'
           args: >-
             --solver kissat
             --jobs 2
@@ -486,6 +492,9 @@ jobs:
       - name: Run Kani verification (ffwd-runtime + ffwd-types)
         uses: model-checking/kani-github-action@v1
         with:
+          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
+          # unreleased). Unpin once a release after 0.68.0 ships.
+          kani-version: '0.67.0'
           args: >-
             --solver kissat
             --jobs 2
@@ -519,6 +528,9 @@ jobs:
       - name: Run Kani verification (ffwd-io + ffwd-output + ffwd-diagnostics + ffwd)
         uses: model-checking/kani-github-action@v1
         with:
+          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
+          # unreleased). Unpin once a release after 0.68.0 ships.
+          kani-version: '0.67.0'
           args: >-
             --solver kissat
             --jobs 2
