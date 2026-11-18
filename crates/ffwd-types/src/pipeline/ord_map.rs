@@ -287,6 +287,7 @@ mod tests {
     use alloc::collections::BTreeMap;
     use alloc::vec::Vec;
     use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
 
     type Model = ArrayMap<u8, u16, KANI_MAP_CAPACITY>;
 
@@ -310,6 +311,12 @@ mod tests {
     }
 
     proptest! {
+        // No failure file: under Miri, proptest's persistence calls getcwd,
+        // which isolation forbids.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         /// Every operation returns the same result as on a BTreeMap, and the
         /// two maps hold the same entries in the same order afterwards.
         #[test]
