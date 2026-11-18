@@ -299,6 +299,16 @@ pub(super) async fn process_item(
     let mut retries_count = 0;
 
     loop {
+        // The retry window can close between the backoff sleep finishing and
+        // this retry starting. A new batch still gets its first attempt, but
+        // a retry after the window closed must not start.
+        if retries_count > 0 && stop_retrying.is_cancelled() {
+            tracing::info!(
+                worker_id,
+                "worker_pool: shutdown retry window closed; batch held for replay"
+            );
+            return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
+        }
         // Hard per-batch timeout: prevents one slow/broken batch from
         // tying up the worker indefinitely.
         let send_start = std::time::Instant::now();

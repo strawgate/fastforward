@@ -1,5 +1,14 @@
 // ---------------------------------------------------------------------------
 // Shutdown retry grace window
+//
+// Why not typestate? The window has three states (not opened, open, closed),
+// but it is shared: the pool, every worker and the pipeline's shutdown link
+// task hold clones, and any of them may open it concurrently from different
+// tasks. Each holder keeps a single binding for its whole life, so the state
+// cannot move between types. The transitions are one-way (an atomic swap for
+// "opened", a CancellationToken for "closed"), so neither can be undone, and
+// the protocol is modeled in tla/DeliveryRetry.tla (BeginShutdown,
+// StopRetrying, StopOnlyAfterShutdown).
 // ---------------------------------------------------------------------------
 
 /// Default time workers keep retrying failed sends after shutdown begins.
@@ -65,7 +74,7 @@ impl ShutdownRetryGrace {
     /// are not retried at all. Otherwise a timer task closes it after the
     /// configured grace. Must be called from within a Tokio runtime.
     pub fn begin(&self) {
-        self.begin_capped(Duration::MAX);
+        self.open(None);
     }
 
     /// Like [`Self::begin`], but the window is no longer than `cap`.
@@ -73,6 +82,10 @@ impl ShutdownRetryGrace {
     /// The pool drain passes its own timeout here so the retry window always
     /// closes before the drain gives up and cancels workers.
     pub fn begin_capped(&self, cap: Duration) {
+        self.open(Some(cap));
+    }
+
+    fn open(&self, cap: Option<Duration>) {
         if self
             .inner
             .is_started
@@ -80,7 +93,8 @@ impl ShutdownRetryGrace {
         {
             return;
         }
-        let grace = self.grace().min(cap);
+        let configured = self.grace();
+        let grace = cap.map_or(configured, |cap| configured.min(cap));
         if grace.is_zero() {
             self.inner.stop.cancel();
             return;

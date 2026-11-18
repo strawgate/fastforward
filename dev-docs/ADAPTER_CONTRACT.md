@@ -306,9 +306,12 @@ The file path is:
   capped by the pool drain timeout), so a brief output blip still delivers.
   When the window closes, a worker in backoff gives up at once and later
   transient failures are not retried: the batch resolves as `PoolClosed` (held,
-  checkpoint not advanced). A down output therefore holds shutdown open for at
-  most the window, not the pool drain timeout; the undelivered data is replayed
-  on restart for checkpointed inputs.
+  checkpoint not advanced). The window bounds retries and backoff, not a send
+  already in flight when it closes: that send runs until it completes, hits
+  the per-batch send timeout, or the pool drain timeout cancels the worker.
+  For an output that refuses connections or returns errors, shutdown therefore
+  takes about the window rather than the drain timeout; the undelivered data is
+  replayed on restart for checkpointed inputs.
 
 ## Diagnostics And Control-Plane Contract
 
