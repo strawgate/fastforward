@@ -1003,6 +1003,15 @@ mod kani_proofs {
         let has_pending: bool = kani::any();
         let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
         let event_tag: u8 = kani::any();
+        // Start from a state that satisfies the invariant: has_pending is
+        // only set on entering Building (and can survive into ShuttingDown).
+        kani::assume(
+            !has_pending
+                || matches!(
+                    arb_state(state_tag),
+                    State::Building | State::ShuttingDown { .. }
+                ),
+        );
 
         let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
         let event = arb_event(event_tag);
