@@ -463,7 +463,9 @@ jobs:
       - name: Install Kani
         run: |
           if ! cargo kani --version 2>/dev/null | grep -q "$KANI_VERSION"; then
-            cargo install --locked kani-verifier --version "$KANI_VERSION"
+            # --force: rust-cache may restore another version's cargo-kani
+            # into ~/.cargo/bin, and a plain install refuses to overwrite it.
+            cargo install --locked --force kani-verifier --version "$KANI_VERSION"
           fi
           cargo kani setup
 
