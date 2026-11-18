@@ -207,6 +207,9 @@ pub enum PromErrorKind {
     InvalidUtf8,
     /// An OpenMetrics exemplar (`# {labels} value [timestamp]`) is malformed.
     InvalidExemplar,
+    /// An OpenMetrics exposition ended without its `# EOF` line, so it may
+    /// be truncated.
+    MissingEof,
 }
 
 /// A scan failure with its 1-based line number and byte offset.
@@ -725,8 +728,11 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
     /// comments, and `# EOF` in Prometheus text, are ignored.
     fn comment(&mut self, pos: usize) -> Result<Option<usize>, PromParseError> {
         let end = crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len());
-        let line = &self.buf[pos..end];
-        // Tokenize: "#", keyword, rest.
+        // Tokenize what follows the `#`. Like Prometheus' parser, blanks
+        // between `#` and the keyword are optional (`#TYPE` is a TYPE line).
+        let after_hash = (pos + 1).min(end);
+        let is_spaced = self.byte(after_hash).is_some_and(is_blank);
+        let line = &self.buf[after_hash..end];
         let mut toks = line
             .split(|&b| is_blank(b))
             .filter(|t| !t.is_empty())
@@ -734,10 +740,6 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                 let start = t.as_ptr() as usize - self.buf.as_ptr() as usize;
                 (start, start + t.len())
             });
-        let hash = toks.next();
-        if hash.map(|(s, e)| &self.buf[s..e]) != Some(b"#") {
-            return Ok(Some(end + 1));
-        }
         let keyword = toks.next();
         match keyword.map(|(s, e)| &self.buf[s..e]) {
             Some(b"TYPE") => {
@@ -745,9 +747,11 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                 self.family = Some(self.parse_type_line(after_kw, end)?);
             }
             // Only a bare `# EOF` in OpenMetrics ends the exposition;
-            // `# EOF pending`, or any `# EOF` in Prometheus text, is an
-            // ordinary comment.
-            Some(b"EOF") if self.openmetrics && toks.next().is_none() => return Ok(None),
+            // `# EOF pending`, `#EOF`, or any `# EOF` in Prometheus text, is
+            // an ordinary comment.
+            Some(b"EOF") if self.openmetrics && is_spaced && toks.next().is_none() => {
+                return Ok(None);
+            }
             _ => {}
         }
         Ok(Some(end + 1))
@@ -1089,6 +1093,7 @@ pub fn scan_prom_text<B: PromBuilder>(
     };
     let mut stats = PromScanStats::default();
     let mut pos = 0usize;
+    let mut saw_eof = false;
     while pos < buf.len() {
         w.line += 1;
         pos = skip_blanks(buf, pos);
@@ -1097,13 +1102,21 @@ pub fn scan_prom_text<B: PromBuilder>(
             Some(b'\n') => pos += 1,
             Some(b'#') => match w.comment(pos)? {
                 Some(next) => pos = next,
-                None => break,
+                None => {
+                    saw_eof = true;
+                    break;
+                }
             },
             Some(_) => {
                 pos = w.sample(pos)?;
                 stats.samples += 1;
             }
         }
+    }
+    // OpenMetrics requires the `# EOF` line; without it the body may have
+    // been cut short.
+    if config.openmetrics && !saw_eof {
+        return Err(w.err(buf.len(), PromErrorKind::MissingEof));
     }
     stats.lines = w.line;
     Ok(stats)
@@ -1462,10 +1475,27 @@ mod tests {
 
     #[test]
     fn eof_with_trailing_tokens_is_an_ordinary_comment() {
-        let rows = scan_om("up 1\n# EOF pending\nother 2\n").expect("should parse");
+        let rows = scan_om("up 1\n# EOF pending\nother 2\n# EOF\n").expect("should parse");
         assert_eq!(rows.len(), 2);
         let rows = scan_om("up 1\n#  EOF  \nother 2\n").expect("should parse");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn openmetrics_without_eof_is_rejected() {
+        let err = scan_om("up 1\n").expect_err("no EOF");
+        assert_eq!(err.kind, PromErrorKind::MissingEof);
+        let err = scan_om("up 1\n#EOF\n").expect_err("#EOF is not the EOF line");
+        assert_eq!(err.kind, PromErrorKind::MissingEof);
+        assert_eq!(scan("up 1\n").expect("text needs no EOF").len(), 1);
+    }
+
+    #[test]
+    fn type_directive_needs_no_space_after_hash() {
+        let rows = scan("#TYPE requests counter\nrequests 1\n#\tTYPE g gauge\ng 2\n")
+            .expect("should parse");
+        let types: Vec<_> = rows.iter().map(|r| type_of(r)).collect();
+        assert_eq!(types, vec![Some("counter"), Some("gauge")]);
     }
 
     #[test]
@@ -1627,11 +1657,14 @@ mod tests {
             openmetrics: true,
             ..PromScanConfig::default()
         };
-        let rec = scan_with(b"a 1 1520879607.789\nb 2 1520879607\nc 3 1.5e3\n", config)
-            .expect("should parse");
+        let rec = scan_with(
+            b"a 1 1520879607.789\nb 2 1520879607\nc 3 1.5e3\n# EOF\n",
+            config,
+        )
+        .expect("should parse");
         let ts: Vec<_> = rec.rows.iter().map(|r| r[2].1.clone()).collect();
         assert_eq!(ts, vec!["1520879607789", "1520879607000", "1500000"]);
-        let err = scan_with(b"a 1 NaN\n", config).expect_err("nan timestamp");
+        let err = scan_with(b"a 1 NaN\n# EOF\n", config).expect_err("nan timestamp");
         assert_eq!(err.kind, PromErrorKind::InvalidTimestamp);
         // Text format stays integer milliseconds.
         let err = scan("a 1 1.5\n").expect_err("float timestamp");

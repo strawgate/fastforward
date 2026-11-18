@@ -432,7 +432,9 @@ Columns:
 | one column per label | Utf8View | Null on rows whose sample lacks that label. |
 
 Behavior:
-- A malformed exposition rejects the whole scrape, as Prometheus does. The
+- A malformed exposition rejects the whole scrape, as Prometheus does. An
+  OpenMetrics response without its final `# EOF` line counts as malformed,
+  since it may be truncated. The
   failure is logged (at most once a minute per target), counted as an input
   error, and the input reports `degraded` health until the target scrapes
   cleanly again.
