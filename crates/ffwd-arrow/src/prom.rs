@@ -225,14 +225,13 @@ impl PromColumns {
                         b.get(off..off + len)
                             .is_some_and(|s| std::str::from_utf8(s).is_ok())
                     }));
-                    // SAFETY: every view was produced by `make_view` from a
-                    // subslice of `original` (block 0, validated as UTF-8 as
-                    // a whole in `PromBatchBuilder::scan`) or of `decoded`
-                    // (block 1, built from that UTF-8 by replacing ASCII
-                    // escapes). Lengths and offsets are in bounds by
-                    // construction, `views.len() == num_rows`, and `nulls`
-                    // has `num_rows` bits. Same trusted-path exception as
-                    // `columnar::accumulator` (re-validation cost ~1/3).
+                    // Trusted-path exception, same as `columnar::accumulator`
+                    // (re-validation costs ~1/3 of build time). Block 0 is the
+                    // body, validated as UTF-8 as a whole in `scan`; block 1 is
+                    // built from it by replacing ASCII escapes.
+                    // SAFETY: every view comes from `make_view` over an
+                    // in-bounds subslice of block 0 or 1 (both valid UTF-8);
+                    // `views.len() == num_rows` and `nulls` has `num_rows` bits.
                     let array = unsafe {
                         StringViewArray::new_unchecked(
                             ScalarBuffer::from(views),
