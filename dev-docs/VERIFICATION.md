@@ -363,18 +363,20 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 
 ## Per-module verification status
 
+`kani-slow` proofs run nightly and on `ci:full` PRs, not in default PR CI.
+
 | Module | What it does | Verification |
 |--------|-------------|-------------|
-| `ffwd-core/structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (6 proofs) + proptest (SIMD ≡ scalar) |
-| `ffwd-core/structural_iter.rs` | Streaming structural position iterator, including space-only `next_non_space` semantics where tab/CR remain non-space | Kani exhaustive (3 proofs) |
-| `ffwd-core/framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (6 proofs) |
+| `ffwd-core/structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (8 proofs, 6 `kani-slow`) + proptest (SIMD ≡ scalar) |
+| `ffwd-core/structural_iter.rs` | Streaming structural position iterator, including space-only `next_non_space` semantics where tab/CR remain non-space | Kani exhaustive (3 proofs, 1 `kani-slow`) |
+| `ffwd-core/framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (6 proofs, 2 `kani-slow`) |
 | `ffwd-core/reassembler.rs` | CRI partial line reassembly (P/F merging) | Kani exhaustive (9 proofs) |
 | `ffwd-core/byte_search.rs` | Proven byte search (find_byte, rfind_byte) | Kani exhaustive + oracle (3 proofs) |
 | `ffwd-core/scanner.rs` | Scanner-to-builder protocol (`ScanBuilder`, `BuilderState`) | Kani bounded (4 proofs) + property-based protocol coverage |
-| `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs) + proptest oracle + compliance regressions |
-| `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (2 proofs) |
-| `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (19 proofs) |
-| `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (37 proofs incl. 3 contract verifications + 4 compositional stubs) |
+| `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs, 3 `kani-slow`) + proptest oracle + compliance regressions |
+| `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (4 proofs incl. mid-range and overflow boundary, 2 `kani-slow`) |
+| `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (17 proofs, 4 `kani-slow`) |
+| `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (50 proofs incl. contract verifications and compositional stubs, 5 `kani-slow`) |
 | `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs) + proptest + **TLA+** |
 | `ffwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `ffwd-types/pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
