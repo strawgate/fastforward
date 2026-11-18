@@ -226,7 +226,6 @@ indexing_slicing = "warn"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(kani)',
-    'cfg(kani_slow)',
     'cfg(fuzzing)',
     'cfg(feature, values("turmoil", "internal-failpoints", "otlp-research", "otlp-profile-alloc"))',
 ] }

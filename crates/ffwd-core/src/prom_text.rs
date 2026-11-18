@@ -1971,7 +1971,7 @@ mod verification {
     /// so only the first 8 bytes can be structural; the stub classifies those
     /// with the scalar predicate, unrolled. SIMD ≡ scalar for all 64 bytes is
     /// proven separately by `verify_prom_structural_mask_simd_eq_scalar`.
-    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    #[cfg_attr(not(feature = "kani-slow"), allow(dead_code))]
     fn prom_structural_mask_stub(block: &[u8; 64]) -> u64 {
         let bit = |i: usize| u64::from(is_prom_structural(block[i])) << i;
         bit(0) | bit(1) | bit(2) | bit(3) | bit(4) | bit(5) | bit(6) | bit(7)
@@ -2053,16 +2053,17 @@ mod verification {
 
     /// Oracle: for every `m <digit>\n` line, the scanner emits exactly one
     /// row named `m` whose value is the digit.
-    // Slow under CBMC (scratch `Vec` growth): runs only with
-    // `RUSTFLAGS="--cfg kani_slow" cargo kani`. See VERIFICATION.md.
+    // Gated behind `kani-slow` (nightly and `ci:full`): over 10 min under
+    // CBMC because of scratch `Vec` growth. `cfg_attr` keeps the function, so
+    // `#[verified]` on `scan_prom_text` still resolves.
     #[cfg_attr(
-        kani_slow,
+        feature = "kani-slow",
         kani::proof,
         kani::unwind(10),
         kani::stub(prom_structural_mask, prom_structural_mask_stub),
         kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
     )]
-    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    #[cfg_attr(not(feature = "kani-slow"), allow(dead_code))]
     pub(super) fn verify_scan_prom_text_name_value_oracle() {
         let d: u8 = kani::any();
         kani::assume(d.is_ascii_digit());
@@ -2086,16 +2087,17 @@ mod verification {
     /// (`m 1\\n`) is replaced by an arbitrary byte. Inputs of any length are
     /// covered by the `never_panics_on_arbitrary_input` proptest; fully
     /// symbolic buffers exceed CBMC's budget because of scratch `Vec` growth.
-    // Slow under CBMC (scratch `Vec` growth): runs only with
-    // `RUSTFLAGS="--cfg kani_slow" cargo kani`. See VERIFICATION.md.
+    // Gated behind `kani-slow` (nightly and `ci:full`): over 10 min under
+    // CBMC because of scratch `Vec` growth. `cfg_attr` keeps the function, so
+    // `#[verified]` on `scan_prom_text` still resolves.
     #[cfg_attr(
-        kani_slow,
+        feature = "kani-slow",
         kani::proof,
         kani::unwind(10),
         kani::stub(prom_structural_mask, prom_structural_mask_stub),
         kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
     )]
-    #[cfg_attr(not(kani_slow), allow(dead_code))]
+    #[cfg_attr(not(feature = "kani-slow"), allow(dead_code))]
     pub(super) fn verify_scan_prom_text_no_panic() {
         let pos: usize = kani::any();
         kani::assume(pos < 4);

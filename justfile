@@ -267,7 +267,7 @@ lint-all: fmt-check verification-guardrail otlp-codegen-check workspace-inherita
 # Quick CI — fast lint + test (default-members, no datafusion)
 ci: lint test
 
-# Compatibility alias used by pre-commit hooks.
+# Compatibility alias for `just ci`.
 check: ci
 
 # Full CI — everything including datafusion and TLA+ tail verification (run before pushing)
@@ -756,20 +756,20 @@ install-extensions:
         done
     echo "Done."
 
-# Set up git pre-commit hook (works from any worktree)
+# Install git hooks: pre-commit (fmt, TOML, typos, guardrails) and
+# pre-push (CI Lint parity). Same as `scripts/install-hooks.sh`, which
+# works without just. Bypass once with `--no-verify`.
 install-hooks:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    HOOKS_DIR=$(git rev-parse --git-common-dir)/hooks
-    mkdir -p "$HOOKS_DIR"
-    printf '#!/bin/sh\nset -e\njust fmt-check\njust clippy\njust check\n' \
-        > "$HOOKS_DIR/pre-commit"
-    chmod +x "$HOOKS_DIR/pre-commit"
-    echo "Pre-commit hook installed ($HOOKS_DIR/pre-commit)"
+    scripts/install-hooks.sh
 
-# Remove git pre-commit hook
+# Remove the git hooks installed by install-hooks
 uninstall-hooks:
-    #!/usr/bin/env bash
-    HOOKS_DIR=$(git rev-parse --git-common-dir)/hooks
-    rm -f "$HOOKS_DIR/pre-commit"
-    echo "Pre-commit hook removed"
+    scripts/install-hooks.sh --uninstall
+
+# Checks the pre-commit hook runs (seconds). Same as `scripts/ci-local.sh pre-commit`.
+pre-commit:
+    scripts/ci-local.sh pre-commit
+
+# Checks the pre-push hook runs: everything in CI's Lint job. Same as `scripts/ci-local.sh pre-push`.
+pre-push:
+    scripts/ci-local.sh pre-push

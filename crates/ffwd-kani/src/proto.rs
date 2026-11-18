@@ -363,7 +363,8 @@ mod verification {
     #[kani::unwind(12)]
     fn verify_bytes_field_total_size_oracle_contract() {
         let field_number: u32 = kani::any();
-        let data_len: usize = kani::any();
+        // Headroom for the up-to-20 varint bytes so the sum cannot overflow.
+        let data_len: usize = kani::any_where(|&l: &usize| l <= usize::MAX - 20);
         kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
         let res = bytes_field_total_size_oracle(field_number, data_len);
         kani::cover!(data_len == 0, "empty data reachable");

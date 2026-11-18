@@ -80,10 +80,14 @@ Tail one or more log files that match a glob pattern.
 | `adaptive_fast_polls_max` | integer | No | Immediate repoll budget after a read-budget hit (default: 8, set `0` to disable adaptive fast repolls). |
 
 ```yaml
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+    outputs:
+      - type: stdout
 ```
 
 ### `s3` input
@@ -115,14 +119,18 @@ object key as the source path value for each row. `fastforward` only attaches
 the internal `__source_id`, and `none` attaches no source metadata.
 
 ```yaml
-input:
-  type: s3
-  format: json
-  source_metadata: ecs
-  s3:
-    bucket: app-logs
-    region: us-east-1
-    prefix: prod/
+pipelines:
+  default:
+    inputs:
+      - type: s3
+        format: json
+        source_metadata: ecs
+        s3:
+          bucket: app-logs
+          region: us-east-1
+          prefix: prod/
+    outputs:
+      - type: stdout
 ```
 
 ### `stdin` input
@@ -131,9 +139,13 @@ Read data from standard input. This input has no input-specific fields.
 It is primarily used by `ff send` for command-line piping.
 
 ```yaml
-input:
-  type: stdin
-  format: auto
+pipelines:
+  default:
+    inputs:
+      - type: stdin
+        format: auto
+    outputs:
+      - type: stdout
 ```
 
 Supported formats: `auto`, `cri`, `json`, and `raw`.
@@ -148,11 +160,15 @@ Emit synthetic records for benchmarks, demos, and pipeline tests.
 | `generator.profile` | string | No | Generator profile: `logs` (default), `record`, `envoy`, `cri_k8s`, `wide`, `narrow`, `cloud_trail`. See [Generator profiles](/configuration/inputs/#generator-profiles). |
 
 ```yaml
-input:
-  type: generator
-  generator:
-    events_per_sec: 50000
-    batch_size: 4096
+pipelines:
+  default:
+    inputs:
+      - type: generator
+        generator:
+          events_per_sec: 50000
+          batch_size: 4096
+    outputs:
+      - type: stdout
 ```
 
 ### `udp` input
@@ -164,10 +180,14 @@ Listen for log lines on a UDP socket.
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:514`. |
 
 ```yaml
-input:
-  type: udp
-  listen: 0.0.0.0:514
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: udp
+        listen: 0.0.0.0:514
+        format: json
+    outputs:
+      - type: stdout
 ```
 
 ### `tcp` input
@@ -180,10 +200,14 @@ Accept log lines on a TCP socket.
 | `tls` | object | No | Optional server TLS options (`cert_file`, `key_file`, `client_ca_file`, `require_client_auth`). `client_ca_file` is valid only when `require_client_auth: true`. |
 
 ```yaml
-input:
-  type: tcp
-  listen: 0.0.0.0:5140
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:5140
+        format: json
+    outputs:
+      - type: stdout
 ```
 
 ### `otlp` input
@@ -196,10 +220,14 @@ Receive OTLP log records from another agent or SDK.
 | `protobuf_decode_mode` | string | No | Experimental protobuf decoder: `prost` (default), `projected_fallback`, or `projected_only`. Projected modes require a build with the `otlp-research` feature. |
 
 ```yaml
-input:
-  type: otlp
-  listen: 0.0.0.0:4318
-  protobuf_decode_mode: prost
+pipelines:
+  default:
+    inputs:
+      - type: otlp
+        listen: 0.0.0.0:4318
+        protobuf_decode_mode: prost
+    outputs:
+      - type: stdout
 ```
 
 ### `http` input
@@ -218,18 +246,22 @@ Receive newline-delimited payloads over HTTP `POST`.
 | `http.response_body` | string | No | Optional static success response body. Not allowed when `http.response_code: 204`. |
 
 ```yaml
-input:
-  type: http
-  listen: 0.0.0.0:8081
-  format: json
-  http:
-    path: /ingest
-    strict_path: true
-    method: POST
-    max_request_body_size: 10485760
-    max_drained_bytes_per_poll: 1073741824
-    response_code: 200
-    response_body: '{"ok":true}'
+pipelines:
+  default:
+    inputs:
+      - type: http
+        listen: 0.0.0.0:8081
+        format: json
+        http:
+          path: /ingest
+          strict_path: true
+          method: POST
+          max_request_body_size: 10485760
+          max_drained_bytes_per_poll: 1073741824
+          response_code: 200
+          response_body: '{"ok":true}'
+    outputs:
+      - type: stdout
 ```
 
 ### `linux_ebpf_sensor` input
@@ -246,10 +278,14 @@ Arrow-native and does not support `format`.
 | `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
-input:
-  type: linux_ebpf_sensor
-  sensor:
-    poll_interval_ms: 2000
+pipelines:
+  default:
+    inputs:
+      - type: linux_ebpf_sensor
+        sensor:
+          poll_interval_ms: 2000
+    outputs:
+      - type: stdout
 ```
 
 ### `macos_es_sensor` input
@@ -266,8 +302,12 @@ support `format`.
 | `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
-input:
-  type: macos_es_sensor
+pipelines:
+  default:
+    inputs:
+      - type: macos_es_sensor
+    outputs:
+      - type: stdout
 ```
 
 ### `windows_ebpf_sensor` input
@@ -284,8 +324,12 @@ Windows eBPF sensor input. This input is Arrow-native and does not support
 | `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
-input:
-  type: windows_ebpf_sensor
+pipelines:
+  default:
+    inputs:
+      - type: windows_ebpf_sensor
+    outputs:
+      - type: stdout
 ```
 
 ### `macos_log` input
@@ -345,6 +389,8 @@ pipelines:
             - err
             - warning
           cursor_path: /var/lib/ffwd/journald.cursor
+    outputs:
+      - type: stdout
 ```
 
 ### `host_metrics` input
@@ -373,12 +419,16 @@ the build target.
 | `sensor.filesystem_exclude_mount_points` | array[string] | No | Optional list of filesystem mount points to exclude from scraping. |
 
 ```yaml
-input:
-  type: host_metrics
-  sensor:
-    poll_interval_ms: 5000
-    collection_interval_ms: 5000
-    scrapers: ["cpu", "memory"]
+pipelines:
+  default:
+    inputs:
+      - type: host_metrics
+        sensor:
+          poll_interval_ms: 5000
+          collection_interval_ms: 5000
+          scrapers: ["cpu", "memory"]
+    outputs:
+      - type: stdout
 ```
 
 ### `arrow_ipc` input
@@ -601,9 +651,15 @@ Print records to standard output for local debugging.
 | `format` | string | No | `console` | `json` (newline-delimited JSON), `console` (coloured text), or `text` (raw text). |
 
 ```yaml
-output:
-  type: stdout
-  format: console
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: stdout
+        format: console
 ```
 
 ### `elasticsearch` output
@@ -625,14 +681,20 @@ Ship to Elasticsearch via the Bulk API.
 Bulk payloads are split before they exceed `5242880` bytes (5 MiB). That limit is internal and is not a YAML field.
 
 ```yaml
-output:
-  type: elasticsearch
-  endpoint: https://es-cluster:9200
-  index: logs
-  compression: gzip
-  request_mode: buffered
-  auth:
-    bearer_token: "${ES_TOKEN}"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: elasticsearch
+        endpoint: https://es-cluster:9200
+        index: logs
+        compression: gzip
+        request_mode: buffered
+        auth:
+          bearer_token: "${ES_TOKEN}"
 ```
 
 :::note
@@ -657,16 +719,22 @@ Push to Grafana Loki.
 | `batch` | object | No | Optional batching configuration (`max_bytes`, `max_events`, `timeout_secs`). |
 
 ```yaml
-output:
-  type: loki
-  endpoint: http://loki:3100
-  tenant_id: team-a
-  static_labels:
-    app: ffwd
-    env: prod
-  label_columns: [service, level]
-  auth:
-    bearer_token: "${LOKI_TOKEN}"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: loki
+        endpoint: http://loki:3100
+        tenant_id: team-a
+        static_labels:
+          app: ffwd
+          env: prod
+        label_columns: [service, level]
+        auth:
+          bearer_token: "${LOKI_TOKEN}"
 ```
 
 `compression` is not supported for Loki outputs.
@@ -681,10 +749,16 @@ Write records to a file.
 | `format` | string | No | `json` for NDJSON output, or `text` to write raw lines. |
 
 ```yaml
-output:
-  type: file
-  path: /var/log/ffwd/capture.ndjson
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: file
+        path: /tmp/ffwd-capture.ndjson
+        format: json
 ```
 
 ### `tcp` output
@@ -719,8 +793,14 @@ rejected. Null outputs do not accept sink-specific fields such as `endpoint`,
 `format`, `auth`, `tls`, retry, or batch controls.
 
 ```yaml
-output:
-  type: "null"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: "null"
 ```
 
 ---
@@ -1119,7 +1199,9 @@ enrichment:
     format: mmdb
     path: /data/GeoLite2-City.mmdb
     refresh_interval: 86400   # optional: reload daily; must be >= 1 when set
+```
 
+```yaml
 # CSV IP-range format (DB-IP Lite compatible)
 enrichment:
   - type: geo_database
@@ -1220,9 +1302,15 @@ such as `${VAR:fallback}` are rejected because `:` is not valid in variable
 names.
 
 ```yaml
-output:
-  type: otlp
-  endpoint: ${OTEL_COLLECTOR_ADDR}
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: otlp
+        endpoint: ${OTEL_COLLECTOR_ADDR}
 
 server:
   metrics_endpoint: ${METRICS_PUSH_URL}
@@ -1241,23 +1329,38 @@ values directly from the environment without treating the env value as YAML:
 pipelines:
   app:
     workers: ${FFWD_WORKERS}
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+    outputs:
+      - type: stdout
 ```
 
 String fields remain strings even when the expanded value looks like a YAML
 number, boolean, or null:
 
 ```yaml
-input:
-  type: file
-  path: ${LOG_PATH}
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: ${LOG_PATH}
+    outputs:
+      - type: stdout
 ```
 
 Placeholders embedded inside longer strings always remain strings:
 
 ```yaml
-output:
-  type: file
-  path: "/var/log/${SERVICE_NAME}.jsonl"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: file
+        path: "/var/log/${SERVICE_NAME}.jsonl"
 ```
 
 Environment variables can also appear in mapping keys. If expansion produces duplicate
@@ -1294,18 +1397,17 @@ pipelines:
       - name: debug
         type: stdout
         format: console
-
-enrichment:
-  - type: host_info
-  - type: process_info
-  - type: network_info
-  - type: container_info
-  - type: k8s_cluster_info
-  - type: static
-    table_name: labels
-    labels:
-      environment: ${ENVIRONMENT}
-      cluster: ${CLUSTER_NAME}
+    enrichment:
+      - type: host_info
+      - type: process_info
+      - type: network_info
+      - type: container_info
+      - type: k8s_cluster_info
+      - type: static
+        table_name: labels
+        labels:
+          environment: ${ENVIRONMENT}
+          cluster: ${CLUSTER_NAME}
 
 server:
   diagnostics: 0.0.0.0:9090

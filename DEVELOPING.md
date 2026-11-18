@@ -21,7 +21,7 @@ Then read only the section needed for your task:
 
 | Tool | Version | Install |
 |------|---------|---------|
-| [Rust](https://rustup.rs) | Latest stable (managed by `rust-toolchain.toml`) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| [Rust](https://rustup.rs) | Pinned in `rust-toolchain.toml` (rustup installs it) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | [just](https://just.systems) | 1.40+ | `cargo install just` or `brew install just` |
 | [cargo-nextest](https://nexte.st) | 0.9+ | `cargo install cargo-nextest` |
 
@@ -43,7 +43,7 @@ Install the tools listed above manually.
 
 ```bash
 git clone https://github.com/strawgate/fastforward.git && cd fastforward
-just setup     # install tools, fetch deps, set up git hooks
+just setup     # install tools, fetch deps, set up git hooks (or: scripts/install-hooks.sh)
 just doctor    # verify everything is installed
 just ci        # fast lint + test (~30s)
 ```
@@ -396,13 +396,13 @@ Compressed Arrow IPC is `StreamWriter` with `IpcWriteOptions::try_with_compressi
 
 The `body` column can store the full input line and is often larger than all parsed columns combined. Line capture is disabled unless configured (raw inputs default to `line_field_name: body`).
 
-### Always use `just clippy`, never bare `cargo clippy`
+### Run clippy the way CI does: `--workspace -- -D warnings` on the pinned toolchain
 
-CI runs `cargo clippy -- -D warnings` (all warnings are errors). Bare `cargo clippy` only shows warnings, so code that looks clean locally fails in CI. The `just clippy` recipe matches CI exactly. Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
+CI runs `cargo clippy --workspace -- -D warnings` (all warnings are errors) on the Rust version pinned in `rust-toolchain.toml`. Bare `cargo clippy` only shows warnings, and `just clippy` skips the non-default members (`ffwd-transform`, `ffwd`), so code that looks clean locally can fail in CI. Use `just clippy-all` or `scripts/ci-local.sh pre-push` (which the pre-push hook runs). Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
 
-### CI tracks stable Rust, so a new toolchain can turn main red
+### The Rust toolchain is pinned; bump it on purpose
 
-`rust-toolchain.toml` pins `channel = "stable"`, so CI picks up each new Rust release (and its new clippy lints) without any commit. Rust 1.100 added several lints and changed cargo's build-dir layout. If Lint suddenly fails on code nobody touched, check the toolchain version in the job log first.
+CI used to track `stable`, so each new Rust release (and its new clippy lints) could turn main red without any commit. Rust 1.100 did exactly that: it added several lints and changed cargo's build-dir layout. `rust-toolchain.toml` now pins an exact version, and CI's setup-rust action installs that version. To upgrade, bump the pin in its own PR and fix whatever new lints it brings in that same PR.
 
 ### Locate the `ff` binary with `CARGO_BIN_EXE_ff` in integration tests
 
@@ -415,6 +415,14 @@ CI's clippy and test steps don't pass `--all-targets`, so a struct field added t
 ### `cargo deny` only audits default features
 
 Optional dependencies behind non-default features (for example `quick-xml` under ffwd-io's `s3`) aren't in the graph `cargo deny check` inspects, so advisory ignores can hide them. Before adding an ignore, run `cargo deny --all-features check advisories` without it. cargo-audit reads `.cargo/audit.toml`, not `deny.toml`, so keep both ignore lists in sync.
+
+### A Kani proof that never finishes hides real bugs
+
+Kani proofs that ran out of memory or time in CI showed up as failures for months, so a real counterexample would have looked the same as a resource failure. When `verify_rebuild_attempts_bounded` (ffwd-runtime `reload.rs`) finally fit the budget, it failed: the harness started from a state the reload coordinator can never reach. Keep every PR-CI harness inside the 6 GB / 15 minute budget (see `dev-docs/VERIFICATION.md`), and treat `scripts/kani_nightly_only.txt` as debt to pay down, not a parking lot.
+
+### Check a varint's 10th byte before shifting it in
+
+`decode_varint` (ffwd-core `otlp.rs`) once ran its overflow check on the 9th byte instead of the 10th. It rejected valid 10-byte varints such as `u64::MAX` and accepted a 10th byte whose payload overflowed 64 bits. Only bit 0 of the 10th byte may be set; `decode_varint_accepts_ten_byte_u64_max` and `decode_varint_rejects_tenth_byte_payload_above_one` pin this down.
 
 ### proptest finds bugs unit tests can't
 

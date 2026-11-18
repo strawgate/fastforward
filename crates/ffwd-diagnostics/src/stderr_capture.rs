@@ -413,6 +413,12 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_ansi_keeps_multibyte_text() {
+        assert_eq!(strip_ansi("héllo → 世界 🚀"), "héllo → 世界 🚀");
+        assert_eq!(strip_ansi("\x1b[32m世界\x1b[0m é"), "世界 é");
+    }
+
+    #[test]
     fn test_strip_ansi_osc_bel_terminated() {
         // Regression test for issue #1682: OSC sequences must be stripped to BEL,
         // not stopped at the first alphabetic char inside the payload.

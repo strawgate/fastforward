@@ -215,10 +215,16 @@ ff run --config config.yaml
 To ship to a real collector:
 
 ```yaml
-output:
-  type: otlp
-  endpoint: https://otel-collector:4318/v1/logs
-  compression: zstd
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: logs.json
+        format: json
+    outputs:
+      - type: otlp
+        endpoint: https://otel-collector:4318/v1/logs
+        compression: zstd
 ```
 
 Works out of the box with [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/), [Grafana Alloy](https://grafana.com/oss/alloy/), or any OTLP-compatible backend.
