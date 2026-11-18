@@ -655,7 +655,12 @@ fn tcp_intermittent_failures_with_fail_rate() {
         .expect("distinct_lines lock")
         .iter()
         .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter_map(|v| v.get("num").and_then(serde_json::Value::as_u64))
+        .filter_map(|v| {
+            // A record counts only if both fields match what was generated.
+            let num = v.get("num").and_then(serde_json::Value::as_u64)?;
+            let msg = v.get("msg").and_then(serde_json::Value::as_str)?;
+            (msg == format!("line {num}")).then_some(num)
+        })
         .collect();
     let missing: Vec<u64> = (0..50).filter(|n| !delivered_nums.contains(n)).collect();
     assert!(
