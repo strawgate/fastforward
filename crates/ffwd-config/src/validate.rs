@@ -854,24 +854,21 @@ fn validate_prometheus_scrape(
     if p.targets.is_empty() {
         return err("prometheus_scrape requires at least one entry in 'targets'".to_string());
     }
-    for target in &p.targets {
-        let t = target.trim();
-        let rest = t
-            .strip_prefix("http://")
-            .or_else(|| t.strip_prefix("https://"));
-        match rest {
-            Some(r) if !r.is_empty() && !r.starts_with('/') => {}
-            _ => {
-                return err(format!(
-                    "target '{target}' must be an http:// or https:// URL with a host"
-                ));
-            }
-        }
-    }
+    // Targets are named by index: a URL may carry credentials.
     let mut seen = HashSet::new();
-    for target in &p.targets {
-        if !seen.insert(target.trim()) {
-            return err(format!("target '{target}' is listed more than once"));
+    for (i, target) in p.targets.iter().enumerate() {
+        let parsed = url::Url::parse(target.trim()).ok().filter(|u| {
+            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+        });
+        let Some(parsed) = parsed else {
+            return err(format!(
+                "targets[{i}] must be an http:// or https:// URL with a host"
+            ));
+        };
+        // Compare normalized URLs so `HTTP://Host:80/m` and `http://host/m`
+        // count as the same target.
+        if !seen.insert(parsed.to_string()) {
+            return err(format!("targets[{i}] repeats an earlier target"));
         }
     }
     if let Some(job) = &p.job

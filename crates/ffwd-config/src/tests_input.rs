@@ -771,10 +771,27 @@ pipelines:
         else {
             panic!("expected prometheus_scrape input");
         };
-        assert_eq!(p.targets.len(), 2);
+        assert_eq!(
+            p.targets,
+            vec![
+                "http://a:9100/metrics".to_string(),
+                "https://b/metrics".to_string()
+            ]
+        );
         assert_eq!(p.job.as_deref(), Some("node"));
+        assert_eq!(p.scrape_interval_ms.map(|v| v.get()), Some(30000));
+        assert_eq!(p.scrape_timeout_ms.map(|v| v.get()), Some(5000));
         assert_eq!(p.compression, Some(PrometheusScrapeCompressionConfig::Gzip));
         assert_eq!(p.honor_timestamps, Some(false));
+        assert_eq!(
+            p.headers
+                .as_ref()
+                .and_then(|h| h.get("Authorization"))
+                .map(String::as_str),
+            Some("Bearer x")
+        );
+        assert_eq!(p.max_body_bytes, Some(1024));
+        assert_eq!(p.max_label_columns, Some(10));
         assert_eq!(p.series_id, Some(false));
     }
 
@@ -784,9 +801,11 @@ pipelines:
             ("targets: []", "at least one"),
             ("targets: [\"localhost:9100\"]", "http:// or https://"),
             (
-                "targets: [\"http://a/m\", \"http://a/m\"]",
-                "more than once",
+                "targets: [\"http://a/m\", \"HTTP://A:80/m\"]",
+                "repeats an earlier target",
             ),
+            ("targets: [\"ftp://a/m\"]", "http:// or https://"),
+            ("targets: [\"http://u:secret@/m\"]", "targets[0]"),
             (
                 "targets: [\"http://a/m\"]\nscrape_interval_ms: 1000\nscrape_timeout_ms: 2000",
                 "must not exceed",
@@ -802,6 +821,7 @@ pipelines:
                 single_pipeline_yaml(&format!("type: prometheus_scrape\n{extra}"), "type: stdout");
             let err = Config::load_str(yaml).expect_err(extra).to_string();
             assert!(err.contains(needle), "{extra:?}: {err}");
+            assert!(!err.contains("secret"), "URL leaked into error: {err}");
         }
     }
 

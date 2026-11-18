@@ -135,14 +135,16 @@ pub struct OtlpOutputConfig {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OtlpSignal {
-    /// Send metric-shaped batches (ones with `__name__` and `__value__`
-    /// columns, as produced by `prometheus_scrape`) as OTLP metrics and all
-    /// other batches as OTLP logs. Default.
+    /// Send metric-shaped batches as OTLP metrics and all other batches as
+    /// OTLP logs. Default. A batch is metric-shaped when it has a string
+    /// (`Utf8`, `LargeUtf8` or `Utf8View`) `__name__` column and a numeric
+    /// `__value__` column, as `prometheus_scrape` produces.
     #[default]
     Auto,
     /// Always send OTLP logs.
     Logs,
-    /// Always send OTLP metrics; batches without `__name__`/`__value__` are rejected.
+    /// Always send OTLP metrics; batches without a string `__name__` and a
+    /// numeric `__value__` column are rejected.
     Metrics,
 }
 

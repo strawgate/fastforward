@@ -631,7 +631,9 @@ pub struct PrometheusScrapeTypeConfig {
     /// How often to scrape each target in milliseconds (default: 15000).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub scrape_interval_ms: Option<PositiveMillis>,
-    /// Per-scrape timeout in milliseconds (default: 10000, capped at the interval).
+    /// Per-scrape timeout in milliseconds. Defaults to 10000, or to the
+    /// interval when that is shorter. Setting it above `scrape_interval_ms`
+    /// is a validation error.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub scrape_timeout_ms: Option<PositiveMillis>,
     /// Response compression to request (default: `none`).

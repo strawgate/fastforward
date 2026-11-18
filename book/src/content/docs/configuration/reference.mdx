@@ -411,7 +411,7 @@ sample. This input is Arrow-native and does not support `format`.
 | `targets` | array[string] | Yes | `http://` or `https://` URLs, e.g. `http://localhost:9100/metrics`. |
 | `job` | string | No | Value of the `job` column. Defaults to the input name. |
 | `scrape_interval_ms` | integer | No | Scrape cadence per target. Defaults to `15000`. |
-| `scrape_timeout_ms` | integer | No | Timeout for one scrape, connect through end of body. Defaults to `10000` and is capped at the interval. |
+| `scrape_timeout_ms` | integer | No | Timeout for one scrape, connect through end of body. Defaults to `10000`, or to the interval when that is shorter. Setting it above `scrape_interval_ms` is a validation error. |
 | `compression` | enum | No | `none` (default) asks for an uncompressed body; `gzip` asks for gzip. Decompressing gzip costs about as much CPU as parsing, so use it only for remote or bandwidth-limited targets. |
 | `honor_timestamps` | boolean | No | Keep timestamps written in the exposition. Defaults to `true`. When `false`, every sample gets the scrape time. |
 | `headers` | map[string,string] | No | Extra request headers, e.g. `Authorization`. |
