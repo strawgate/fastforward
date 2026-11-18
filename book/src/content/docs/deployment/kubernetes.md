@@ -47,21 +47,23 @@ metadata:
   namespace: collectors
 data:
   config.yaml: |
-    input:
-      type: file
-      path: /var/log/pods/**/*.log
-      format: cri
+    pipelines:
+      default:
+        inputs:
+          - type: file
+            path: /var/log/pods/**/*.log
+            format: cri
 
-    transform: |
-      SELECT *
-      FROM logs
-      WHERE level != 'DEBUG'
+        transform: |
+          SELECT *
+          FROM logs
+          WHERE level != 'DEBUG'
 
-    output:
-      type: otlp
-      endpoint: ${OTEL_ENDPOINT}
-      protocol: grpc
-      compression: zstd
+        outputs:
+          - type: otlp
+            endpoint: ${OTEL_ENDPOINT}
+            protocol: grpc
+            compression: zstd
 
     server:
       diagnostics: 0.0.0.0:9090
@@ -167,25 +169,30 @@ Use the `k8s_path` enrichment table to attach namespace, pod, and container labe
 every log record:
 
 ```yaml
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: ecs
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+        source_metadata: ecs
 
-enrichment:
-  - type: k8s_path
-    table_name: k8s
+    enrichment:
+      - type: k8s_path
+        table_name: k8s
 
-transform: |
-  SELECT
-    l.level,
-    l.message,
-    k.namespace,
-    k.pod_name,
-    k.container_name
-  FROM logs l
-  LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
+    transform: |
+      SELECT
+        l.level,
+        l.message,
+        k.namespace,
+        k.pod_name,
+        k.container_name
+      FROM logs l
+      LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
+    outputs:
+      - type: otlp
+        endpoint: ${OTEL_ENDPOINT}
 ```
 
 ### Namespace filtering
@@ -193,17 +200,26 @@ transform: |
 To collect logs only from specific namespaces, filter in the transform:
 
 ```yaml
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: ecs
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+        source_metadata: ecs
 
-transform: |
-  SELECT l.*, k.namespace, k.pod_name, k.container_name
-  FROM logs l
-  LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
-  WHERE k.namespace IN ('production', 'staging')
+    enrichment:
+      - type: k8s_path
+        table_name: k8s
+
+    transform: |
+      SELECT l.*, k.namespace, k.pod_name, k.container_name
+      FROM logs l
+      LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
+      WHERE k.namespace IN ('production', 'staging')
+    outputs:
+      - type: otlp
+        endpoint: ${OTEL_ENDPOINT}
 ```
 
 ### Scraping the diagnostics endpoint with Prometheus
@@ -252,11 +268,17 @@ service:
 Point FastForward at the collector:
 
 ```yaml
-output:
-  type: otlp
-  endpoint: http://otel-collector:4317
-  protocol: grpc
-  compression: zstd
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: otlp
+        endpoint: http://otel-collector:4317
+        protocol: grpc
+        compression: zstd
 ```
 
 ### Grafana Alloy / Agent

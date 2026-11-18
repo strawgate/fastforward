@@ -54,7 +54,7 @@ curl -s http://localhost:9090/admin/v1/status | jq '.pipelines[0].outputs'
 ### Common causes and fixes
 
 1. Wrong file glob.
-   - Fix `input.path` and validate the directory exists inside the container/pod.
+   - Fix the input `path` and validate the directory exists inside the container/pod.
 2. Missing host mount.
    - Ensure `/var/log` is mounted read-only in Docker/Kubernetes.
 3. Permission denied on log files.
@@ -148,7 +148,7 @@ Exit code `0` on success, `1` on configuration error.
 
 ### Common causes and fixes
 
-- Missing `input.path` for `file` input.
+- Missing `path` on a `file` input.
 - Missing `endpoint` for `otlp`/`http`/`elasticsearch`/`loki` outputs.
 - Missing the required `pipelines` map or using the wrong nesting for `inputs` / `outputs`.
 - YAML scalar mistakes in SQL.
