@@ -1,6 +1,7 @@
 include!("pool/lifecycle.rs");
 include!("pool/health.rs");
 include!("pool/types.rs");
+include!("pool/retry_grace.rs");
 include!("pool/runtime.rs");
 
 #[cfg(test)]

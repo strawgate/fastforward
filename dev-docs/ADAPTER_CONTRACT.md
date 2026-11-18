@@ -301,6 +301,23 @@ The file path is:
 - The current worker/pipeline seam does not yet retain enough batch payload
   state to requeue held batches in-process, so non-advancing failures are
   replayed on restart if shutdown force-stops with unresolved tickets.
+- Once shutdown begins, output workers keep retrying failed sends with their
+  normal backoff for a bounded window (`shutdown_retry_grace_ms`, default 10s,
+  capped by the pool drain timeout), so a brief output blip still delivers.
+  When the window closes, a worker in backoff gives up at once and later
+  transient failures are not retried: the batch resolves as `PoolClosed` (held,
+  checkpoint not advanced). Stopping is cooperative, not a hard barrier: a
+  retry can start at or just after the window closes, and a retry that is
+  mid-send is abandoned the next time the worker polls it. Either way the
+  batch is held, so a send that did land is replayed (at-least-once). An
+  abandoned send can leave the sink mid-request (for example half a record on
+  a TCP stream), so that worker then holds its remaining batches without
+  sending them. A batch's first attempt is not cut short: it runs until it
+  completes, hits the per-batch send timeout, or the pool drain timeout
+  cancels the worker.
+  For an output that refuses connections or returns errors, shutdown therefore
+  takes about the window rather than the drain timeout; the undelivered data is
+  replayed on restart for checkpointed inputs.
 
 ## Diagnostics And Control-Plane Contract
 

@@ -229,6 +229,8 @@ pub struct Pipeline {
     checkpoint_flush_interval: Duration,
     /// Maximum time to wait for worker-pool graceful drain during shutdown.
     pool_drain_timeout: Duration,
+    /// Configured shutdown retry window, before capping by `pool_drain_timeout`.
+    shutdown_retry_grace: Duration,
     /// Control channel for sending shutdown and control messages to the pipeline.
     /// Used for typed shutdown coordination instead of CancellationToken.
     control_tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
@@ -249,6 +251,7 @@ impl Pipeline {
         let name = self.name.clone();
         let factory = Arc::new(OnceAsyncFactory::new(name, sink));
         self.pool = OutputWorkerPool::new(factory, 1, Duration::MAX, Arc::clone(&self.metrics));
+        self.apply_shutdown_retry_grace();
         self
     }
 
@@ -388,6 +391,26 @@ impl Pipeline {
     /// still exercising cancellation/force-stop behavior.
     pub fn set_pool_drain_timeout(&mut self, timeout: Duration) {
         self.pool_drain_timeout = timeout;
+        self.apply_shutdown_retry_grace();
+    }
+
+    /// Set how long output workers keep retrying failed sends after
+    /// shutdown begins (default 10s). The window is capped by the pool
+    /// drain timeout. Zero means failed sends are not retried once
+    /// shutdown begins.
+    pub fn set_shutdown_retry_grace(&mut self, grace: Duration) {
+        self.shutdown_retry_grace = grace;
+        self.apply_shutdown_retry_grace();
+    }
+
+    /// The shutdown retry window the pool will use, after capping.
+    pub fn effective_shutdown_retry_grace(&self) -> Duration {
+        self.shutdown_retry_grace.min(self.pool_drain_timeout)
+    }
+
+    fn apply_shutdown_retry_grace(&self) {
+        self.pool
+            .set_shutdown_retry_grace(self.effective_shutdown_retry_grace());
     }
 
     /// Create a minimal pipeline for simulation testing.
@@ -436,6 +459,7 @@ impl Pipeline {
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: build::DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
             pool_drain_timeout: Duration::from_secs(60),
+            shutdown_retry_grace: crate::worker_pool::DEFAULT_SHUTDOWN_RETRY_GRACE,
             control_tx,
             control_rx,
             worker_control_tx,

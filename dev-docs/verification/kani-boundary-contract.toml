@@ -43,6 +43,12 @@ reason = "Registry ordering and apply-ack helpers are bounded pure logic with ex
 issue = 1314
 
 [[seams]]
+path = "crates/ffwd-types/src/pipeline/ord_map.rs"
+status = "recommended"
+reason = "Swaps BTreeMap for a fixed-capacity sorted array under cfg(kani) so lifecycle and registry proofs fit the per-PR budget; no proof harnesses, proptest checks it against BTreeMap."
+issue = 1314
+
+[[seams]]
 path = "crates/ffwd-types/src/diagnostics.rs"
 status = "recommended"
 reason = "Contains cfg(kani) stubs for atomic counter operations (inc_send, send_ns_total, send_count) that Kani cannot model; no proof harnesses, only Kani-compatible no-op implementations."

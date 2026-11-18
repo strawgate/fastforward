@@ -33,15 +33,24 @@ fn verify_is_leap_year_gregorian_rules() {
     }
 }
 
-/// Prove write_ts_suffix produces valid ASCII for any representative
-/// timestamp in the first 16 years of the epoch (bounded for solver speed).
+/// Prove write_ts_suffix produces valid ASCII for any timestamp in the
+/// first two years of the epoch (1970-01-01 to 1971-12-31) and any fraction.
+///
+/// Sixteen years ran CBMC out of memory (>6 GB): every extra year adds a
+/// symbolic iteration of the year loop. Two years still cover a full
+/// month/day walk and every hour/minute/second; the unit tests in
+/// `tests/timestamp.rs` cover leap years and far-future dates.
 #[kani::proof]
+#[kani::solver(kissat)] // slow (>10s) proof
+#[kani::unwind(48)] // the 47-byte check loop; the year loop exits after <= 2
 fn verify_write_ts_suffix_ascii() {
-    // Restrict to first ~16 years (0..504921600) to keep the solver tractable.
     let secs: u64 = kani::any();
-    kani::assume(secs < 504_921_600); // 1970-01-01 to 1985-12-31
+    kani::assume(secs < 63_072_000); // 1970-01-01 to 1971-12-31
     let frac: u64 = kani::any();
     kani::assume(frac < 1_000_000_000);
+
+    kani::cover!(secs >= 31_536_000, "timestamp in the second year");
+    kani::cover!(frac == 999_999_999, "largest fraction");
 
     let mut buf = [0u8; 47];
     write_ts_suffix(&mut buf, secs, frac);

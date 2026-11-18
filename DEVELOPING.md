@@ -420,6 +420,12 @@ Optional dependencies behind non-default features (for example `quick-xml` under
 
 Kani proofs that ran out of memory or time in CI showed up as failures for months, so a real counterexample would have looked the same as a resource failure. When `verify_rebuild_attempts_bounded` (ffwd-runtime `reload.rs`) finally fit the budget, it failed: the harness started from a state the reload coordinator can never reach. Keep every PR-CI harness inside the 6 GB / 15 minute budget (see `dev-docs/VERIFICATION.md`), and treat `scripts/kani_nightly_only.txt` as debt to pay down, not a parking lot.
 
+Once `verify_committed_monotonic` (ffwd-types `lifecycle.rs`) fit the budget, it failed too: it never assumed the batches' checkpoints were nondecreasing, which the TLA+ model assumes. That precondition is now explicit, and so is the case it misses: a truncated file that keeps its `SourceId` (see "Kani checkpoint proof domain" in `dev-docs/DESIGN.md`).
+
+### Small Rust idioms can cost CBMC 20x
+
+In `ArrayMap` (ffwd-types `pipeline/ord_map.rs`), moving slots with `slice::swap` and iterating with `FilterMap` over a function pointer gave a two-batch lifecycle proof 548k symex steps and ran it out of memory. Moving with `Option::take` and a plain iterator struct cut it to 30k steps and 6 seconds. When a harness blows up, check `size of program expression` in Kani's verbose output before shrinking the inputs.
+
 ### Check a varint's 10th byte before shifting it in
 
 `decode_varint` (ffwd-core `otlp.rs`) once ran its overflow check on the 9th byte instead of the 10th. It rejected valid 10-byte varints such as `u64::MAX` and accepted a 10th byte whose payload overflowed 64 bits. Only bit 0 of the 10th byte may be set; `decode_varint_accepts_ten_byte_u64_max` and `decode_varint_rejects_tenth_byte_payload_above_one` pin this down.
@@ -448,6 +454,10 @@ Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pi
 The `unsafe_needs_safety_comment` check in `xtask/src/main.rs` scans the `unsafe {` line and the six lines before it for `SAFETY:`. A long rationale comment that puts `SAFETY:` at its top pushes it out of that window, so `cargo run -p xtask -- verify` fails even though the block is documented. This happened in the Prometheus builder (`crates/ffwd-arrow/src/prom.rs`, `StringViewArray::new_unchecked`).
 
 Fix: put the background rationale first and end the comment with the `// SAFETY:` paragraph, so `SAFETY:` sits directly above the block.
+
+### A saturated output pool hides the shutdown signal from the pipeline loop
+
+When an output is down and the worker pool is full, `run_async` sits inside `submit_batch` waiting for a worker slot, so its `select!` never sees the shutdown token. Workers retry forever, so the slot never frees, and shutdown waits out the whole pool drain timeout (60s). That is why `run_async` spawns a small task that opens the pool's shutdown retry window (`ShutdownRetryGrace::begin`) the moment the token fires, independently of the loop. When the window (`shutdown_retry_grace_ms`, default 10s) closes, the busy worker gives up its batch without acking it, the blocked submit completes, and the loop exits. An unacked batch is not durably held: checkpointed inputs (files) replay it from their last committed checkpoint on restart, while inputs without checkpoints (TCP/UDP/OTLP receivers) lose it. A test that only uses a few hundred lines never fills the pool and passes without the fix; `shutdown_with_down_output_and_saturated_pool_exits_promptly` uses 50,000 lines and 64-byte batches for this reason.
 
 ### String-vs-number SQL comparisons are strict
 

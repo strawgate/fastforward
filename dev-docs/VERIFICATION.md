@@ -227,11 +227,20 @@ CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
 - Each harness gets at most 6 GB of address space and 15 minutes. A harness
   that needs more fails on its own ("CBMC failed with status 6") instead of
   getting the runner killed and hiding the rest of the shard.
-- Harnesses listed in `scripts/kani_nightly_only.txt` do not fit that budget
-  yet. PR and push CI skip them and the nightly workflow runs them. The
-  script fails if a listed harness no longer exists. Shrink a harness (fewer
-  symbolic bytes, enumerated cases, `Vec::with_capacity`) and remove it from
-  the list rather than growing the list.
+- `scripts/kani_nightly_only.txt` is for harnesses that do not fit that
+  budget yet: PR and push CI skip them and the nightly workflow runs them.
+  The list is empty; keep it that way. The script fails if a listed harness
+  no longer exists. Shrink a harness rather than listing it:
+  - Enumerate small enums and permutations with constant `match` arms or
+    loops instead of one symbolic tag. A symbolic event or ack order makes
+    every map key symbolic.
+  - Use fixed arrays and `Vec::with_capacity` instead of symbolic-size
+    vectors; stub `std::fmt::format` when the proof never reads messages.
+  - Under `cfg(kani)`, `ffwd-types` swaps `BTreeMap` for `ArrayMap`
+    (`pipeline/ord_map.rs`), a sorted fixed-capacity array tested against
+    `BTreeMap`. CBMC cannot bound a B-tree, so no lifecycle proof fit before.
+  - Prove a byte-level helper instead of code that walks `str::chars()`
+    (see `for_each_kept_range` in `ffwd-diagnostics`).
 - The `kani` job does not wait on `Lint`, so a lint failure does not hide
   proof results.
 - Harnesses that exceed the per-harness CI budget are gated behind the
@@ -392,14 +401,17 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (17 proofs, 4 `kani-slow`) |
 | `ffwd-core/prom_text.rs` | Prometheus text exposition scanner: SIMD structural mask, line walker, value fast path | Kani (6 proofs, 2 `kani-slow`: `verify_prom_structural_mask_simd_eq_scalar` (SIMD mask ≡ scalar for all blocks), `verify_parse_prom_value_integers` (integer fast path exact), `verify_parse_prom_value_signed_decimal_exact` (sign and decimal-point paths exact for zero fractions, including `-0.0`), `verify_parse_prom_value_no_panic`, `verify_scan_prom_text_name_value_oracle` (`m <digit>` → one row with that name and value), `verify_scan_prom_text_no_panic` (any one byte of `m 1\n` replaced)). Proofs stub `core`'s float parser (`parse_prom_value_fallback`, trusted) and, in the scan proofs, the SIMD block mask (scalar classifier over the zero-padded 8-byte prefix; SIMD ≡ scalar is proven separately). The two scan proofs take over 10 min each (scratch `Vec` growth in symex), so they are `kani-slow` via `cfg_attr(feature = "kani-slow", kani::proof)`; default PR CI covers the scanner with proptest. Local run (Kani 0.68): SIMD mask 46 s, integers 18 s, signed decimal 23 s, value no-panic 4 s, all successful) + proptest (SIMD ≡ scalar, decimal fast path ≡ `core` parser, generated-exposition round trip, arbitrary-input no-panic). Why proptest suffices for non-zero decimal fractions: the fast path runs only for ≤ 15 digits, so the mantissa is < 10^15 < 2^53 and `POW10[k]` (k ≤ 15) is exact in f64. One IEEE-754 division of two exact operands is correctly rounded, so the result is the nearest f64 to the decimal (Clinger's fast path). The proptest checks that bit-for-bit against `core`'s parser. |
 | `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (50 proofs incl. contract verifications and compositional stubs, 5 `kani-slow`) |
-| `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs) + proptest + **TLA+** |
+| `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani bounded (16 proofs, run against `ArrayMap` with capacity 4; `u8` checkpoints, narrowed to ≤ 4 or ≤ 8 in the multi-batch proofs) + proptest + **TLA+** |
+| `ffwd-types/pipeline/registry.rs` | Source registry states (Active → Draining → Committed), upsert, generation pruning | Kani bounded (4 proofs, run against `ArrayMap` with capacity 4) + unit tests |
+| `ffwd-types/pipeline/ord_map.rs` | `OrdMap`: `BTreeMap` normally, fixed-capacity sorted `ArrayMap` under `cfg(kani)` | No Kani proofs of its own; proptest checks every `ArrayMap` operation against `BTreeMap` |
+| `ffwd-runtime/reload.rs` | Reload coordinator state machine (shutdown, rebuild limit, has_pending, drain-only-from-Running) | Kani exhaustive (16 proofs: states and events enumerated, two properties split per starting state) + unit tests |
 | `ffwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `ffwd-types/pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
 | `ffwd-types/diagnostics/health.rs` | `ComponentHealth` lattice (`combine`, readiness, storage repr) | Kani exhaustive (4 proofs) + unit tests |
 | `ffwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (8 proofs: ColVariant field preservation, variant_dt, is_conflict_struct, json/str priority contracts) |
 | `ffwd-output/sink.rs` | Fanout helper correctness: `merge_child_send_result` pending-signal tracking and `finalize_fanout_outcome` outcome precedence | Kani (2 proofs: `verify_merge_child_send_result_tracks_pending_signals`, `verify_finalize_fanout_outcome_precedence`) |
 | `ffwd-output/sink/health.rs` | Output health reducer + fanout roll-up semantics | Kani (7 proofs: retrying terminal preservation, shutdown completion, startup recovery, delivery recovery, shutdown request semantics, fanout commutativity, fatal-failure drain preservation) + unit tests + proptest sequence/aggregation checks |
-| `ffwd-diagnostics/stderr_capture.rs` | Stderr capture buffering + ANSI stripping helpers | Kani exhaustive (2 proofs) + unit tests |
+| `ffwd-diagnostics/stderr_capture.rs` | Stderr capture buffering + ANSI stripping helpers | Kani bounded (2 proofs on the byte scanner `for_each_kept_range`, inputs up to 8 bytes) + unit tests + proptest against the old char-based `strip_ansi` |
 | `ffwd-diagnostics/metric_history.rs` | Tiered diagnostics metric history retention/serialization helpers | Unit tests |
 | `ffwd-diagnostics/span_exporter.rs` | In-process OTel span snapshot buffering/export helpers | Unit tests |
 | `ffwd-diagnostics/diagnostics/policy.rs` | Control-plane readiness/status policy mapping (`health_reason`, `readiness_impact`, readiness snapshot consistency) | Kani exhaustive (4 proofs) + unit tests + proptest mapping checks |
@@ -409,7 +421,7 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-io/tcp_input.rs` (wrapper over `tcp_input/*`) | TCP per-client bounded-read predicate (`should_stop_client_read`) and noisy-neighbor progress envelope | Kani (3 proofs: zero counters, independent caps, predicate equivalence) + unit tests + proptest predicate equivalence + noisy-vs-quiet bounded-progress regression |
 | `ffwd-io/udp_input.rs` | UDP bounded-drain predicate (`should_stop_udp_drain`), per-poll datagram work cap, and sender-scoped source identity | Kani (3 proofs: zero counters, independent caps, predicate equivalence) + unit tests + proptest predicate equivalence + bounded-drain/recovery regression + IPv4/IPv6 `SourceId` attribution tests |
 | `ffwd-io/s3_input/mod.rs` | S3 object fetch orchestration, per-object `SourceId`, EOF flushing, and optional object-key source metadata snapshots | Kani exempt: async/network shell with stateful channel orchestration. Unit tests cover source path enable/disable, active/current snapshot cleanup, and EOF-only snapshot preservation; S3 integration tests cover parallel fetch ordering, accounted bytes, and EOF marker behavior. |
-| `ffwd-output/elasticsearch.rs` | Elasticsearch bulk NDJSON serialization + timestamp suffix writer | Unit tests + proptest oracle checks (serialize_batch and timestamp suffix fast-vs-simple equivalence) + ignored release microbench guardrails |
+| `ffwd-output/elasticsearch.rs` | Elasticsearch bulk NDJSON serialization + timestamp suffix writer | Kani (2 proofs in `elasticsearch/kani_proofs.rs`: leap-year rules, ASCII timestamp suffix over 1970–1971) + unit tests + proptest oracle checks (serialize_batch and timestamp suffix fast-vs-simple equivalence) + ignored release microbench guardrails |
 | `ffwd-output/otlp_sink.rs` | OTLP sink row encoder and generated-fast encoder parity | Unit tests + proptest oracle check (generated-fast vs handwritten encoder equivalence on random UTF-8 rows) |
 | `ffwd-transform/enrichment.rs` | CSV enrichment parsing, header validation, nullable `Utf8View` batch production, and DataFusion join integration | Unit tests for CSV edge cases and legacy-value/null parity + integration test for `Utf8View` join output. Kani is not required because this path is heap-heavy CSV/DataFusion integration rather than a bounded pure seam. |
 | `ffwd-io/polling_input_health.rs` | Polling-input source health reducer for tail/TCP/UDP (`healthy`, backpressure, error-backoff) | Kani exhaustive (3 proofs) + unit tests + proptest sequence checks |
@@ -425,6 +437,7 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-runtime/pipeline/input_poll.rs` | Turmoil input-loop flush predicate (`should_flush_buffer`) for byte-batch/timeout emission policy | Kani (3 proofs: empty-buffer no-flush, timeout gate semantics, predicate equivalence) + unit tests + proptest policy equivalence |
 | `ffwd-runtime/worker_pool/health.rs` | Pool idle-phase insertion + worker-slot aggregation policy | Kani exhaustive (3 proofs) + unit tests + proptest aggregation checks |
 | `ffwd-runtime/worker_pool.rs` | MRU dispatch decision + typed delivery outcome helpers | Kani (8 dispatch/outcome proofs) + unit tests for worker-slot aggregation, drain-phase stickiness, and create-failure behavior |
+| `ffwd-runtime/worker_pool/worker.rs` | Delivery retry loop (`process_item`): retry forever on transient failure, terminate on cancel, keep retrying for a bounded window once shutdown begins, then stop (`ShutdownRetryGrace`) | TLA+ `DeliveryRetry.tla` (safety, liveness, `GracefulSpec` graceful-shutdown liveness incl. `ShutdownTerminates`, coverage) + async unit tests for one-attempt-after-stop and backoff abort + pool tests for delivery inside the window, hold after it, zero window, drain-timeout cap + pipeline test with a down output and saturated pool. `PipelineMachine.tla` is unaffected: a batch the window gives up on resolves as `PoolClosed`, which is the existing `Hold` disposition the machine already models for pool cancellation, and the drain/ack ordering is unchanged. Ack ordering is per source: a held batch keeps later acks of the same source from advancing the checkpoint, which `PipelineMachine.tla` models. The single-batch `DeliveryRetry` model covers the retry/stop interleavings of each `process_item` call |
 | `ffwd-arrow/storage_builder.rs` | StructArray conflict column assembly | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
 | `ffwd-arrow/streaming_builder.rs` | StructArray conflict column assembly (StringView) | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
 | `ffwd-arrow/columnar/builder.rs` | Generated-string offset accounting and lowercase hex append helpers | Kani recommended (5 proofs: buffer-len add, append-len add, `StringRef` conversion, hex-length doubling, hex oracle) + unit tests + proptest hex oracle |

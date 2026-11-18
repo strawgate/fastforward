@@ -25,6 +25,7 @@
 
 mod batch;
 mod lifecycle;
+mod ord_map;
 mod registry;
 
 // Batch ticket types
@@ -35,3 +36,7 @@ pub use lifecycle::{CheckpointAdvance, Draining, PipelineMachine, Running, Start
 
 // Source registry types
 pub use registry::{SourceEntry, SourceRegistry, SourceState};
+
+/// Ordered map behind [`PipelineMachine`] and [`SourceRegistry`]:
+/// `BTreeMap` in normal builds, a small fixed-capacity model under Kani.
+pub use ord_map::OrdMap;

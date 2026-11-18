@@ -32,6 +32,7 @@ const DRAIN_CANCEL_GRACE: Duration = Duration::from_millis(50);
 pub(super) struct WorkerConfig {
     pub(super) idle_timeout: Duration,
     pub(super) cancel: CancellationToken,
+    pub(super) stop_retrying: CancellationToken,
     pub(super) max_retry_delay: Duration,
     pub(super) metrics: Arc<PipelineMetrics>,
     pub(super) output_health: Arc<OutputHealthTracker>,

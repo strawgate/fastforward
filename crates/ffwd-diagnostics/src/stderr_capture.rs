@@ -324,79 +324,130 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
 #[allow(dead_code)]
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.next() {
-                Some(']') => {
-                    // OSC sequence: terminated by BEL (\x07) or ST (\x1b\).
-                    for c2 in chars.by_ref() {
-                        if c2 == '\x07' {
-                            break;
-                        }
-                        if c2 == '\x1b' {
-                            // ST is \x1b\ — only consume and break if next is '\'.
-                            if chars.clone().next() == Some('\\') {
-                                chars.next();
-                            }
-                            break;
-                        }
-                    }
-                }
-                Some(c2) if !c2.is_ascii_alphabetic() => {
-                    // CSI or other sequence: skip until alphabetic terminator.
-                    for c3 in chars.by_ref() {
-                        if c3.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-                Some(_) | None => {}
-            }
-        } else {
-            out.push(c);
+    // Every kept range starts and ends next to an ASCII byte or at an end
+    // of `s`, so each is on a char boundary.
+    for_each_kept_range(s.as_bytes(), |start, end| {
+        if let Some(text) = s.get(start..end) {
+            out.push_str(text);
         }
-    }
+    });
     out
+}
+
+/// Call `keep(start, end)` for each byte range of `bytes` that survives ANSI
+/// stripping, in order. Ranges are non-empty, ascending, and disjoint.
+///
+/// Works on bytes: every byte the escape grammar looks at (ESC, `]`, BEL,
+/// `\`, ASCII letters) is ASCII, and UTF-8 never uses ASCII values inside a
+/// multi-byte character, so this matches a char-by-char scan of valid UTF-8.
+/// Escape grammar:
+/// - `ESC ]` starts an OSC sequence, ended by BEL or by ESC (plus a
+///   following `\`, if present).
+/// - `ESC` + a non-letter starts a CSI or other sequence, ended by the next
+///   ASCII letter.
+/// - `ESC` + a letter drops both; a trailing `ESC` is dropped.
+fn for_each_kept_range(bytes: &[u8], mut keep: impl FnMut(usize, usize)) {
+    let len = bytes.len();
+    let mut start = 0;
+    let mut i = 0;
+    while i < len {
+        if bytes.get(i) != Some(&0x1b) {
+            i += 1;
+            continue;
+        }
+        if start < i {
+            keep(start, i);
+        }
+        i += 1;
+        match bytes.get(i).copied() {
+            Some(b']') => {
+                i += 1;
+                while let Some(&c) = bytes.get(i) {
+                    i += 1;
+                    if c == 0x07 {
+                        break;
+                    }
+                    if c == 0x1b {
+                        if bytes.get(i) == Some(&b'\\') {
+                            i += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(c) if !c.is_ascii_alphabetic() => {
+                i += 1;
+                while let Some(&c) = bytes.get(i) {
+                    i += 1;
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            Some(_) => i += 1,
+            None => {}
+        }
+        start = i;
+    }
+    if start < len {
+        keep(start, len);
+    }
 }
 
 #[cfg(kani)]
 mod verification {
     use super::*;
 
+    // The proofs target the byte scanner: `strip_ansi` only adds `push_str`
+    // of the kept ranges. Proving `strip_ansi` itself with symbolic UTF-8
+    // ran CBMC out of memory even at 4 bytes.
+
+    /// Kept ranges are in bounds, non-empty, ascending, and never contain ESC.
     #[kani::proof]
-    #[kani::unwind(9)]
-    fn strip_ansi_preserves_non_escape_chars() {
-        // Prove: for inputs ≤8 bytes with no \x1b, output == input
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(10)]
+    fn verify_kept_ranges_exclude_escapes() {
+        let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any();
         kani::assume(len <= 8);
-        let mut bytes = [0u8; 8];
-        for i in 0..len {
-            bytes[i] = kani::any();
-            kani::assume(bytes[i] != 0x1b); // no escape chars
-        }
-        let input = std::str::from_utf8(&bytes[..len]);
-        if let Ok(s) = input {
-            let result = strip_ansi(s);
-            assert_eq!(result, s);
-        }
+        let input = &bytes[..len];
+
+        let mut prev_end = 0;
+        for_each_kept_range(input, |start, end| {
+            assert!(prev_end <= start && start < end && end <= input.len());
+            for &b in &input[start..end] {
+                assert!(b != 0x1b, "kept range contains ESC");
+            }
+            prev_end = end;
+        });
+        kani::cover!(len == 8 && bytes[0] == 0x1b, "escape at the start");
+        kani::cover!(
+            len == 8 && bytes[0] == 0x1b && bytes[1] == b']' && bytes[7] == b'x',
+            "OSC sequence followed by kept text"
+        );
     }
 
+    /// Input without ESC is kept whole, as a single range.
     #[kani::proof]
-    #[kani::unwind(13)]
-    fn strip_ansi_removes_escapes() {
-        // Prove: output never contains \x1b
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(10)]
+    fn verify_kept_ranges_without_escape_keep_everything() {
+        let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any();
-        kani::assume(len <= 12);
-        let mut bytes = [0u8; 12];
-        for i in 0..len {
-            bytes[i] = kani::any();
+        kani::assume(len <= 8);
+        let input = &bytes[..len];
+        for &b in input {
+            kani::assume(b != 0x1b);
         }
-        let input = std::str::from_utf8(&bytes[..len]);
-        if let Ok(s) = input {
-            let result = strip_ansi(s);
-            assert!(!result.contains('\x1b'));
-        }
+
+        let mut calls = 0;
+        for_each_kept_range(input, |start, end| {
+            assert!(start == 0 && end == input.len());
+            calls += 1;
+        });
+        assert!(calls == usize::from(len > 0));
+        kani::cover!(len == 0, "empty input");
+        kani::cover!(len == 8, "full buffer");
     }
 }
 
@@ -410,6 +461,64 @@ mod tests {
         assert_eq!(strip_ansi("\x1b[31;1mRED\x1b[0m"), "RED");
         assert_eq!(strip_ansi("no escapes"), "no escapes");
         assert_eq!(strip_ansi(""), "");
+    }
+
+    /// The char-by-char implementation `strip_ansi` replaced; the byte
+    /// scanner must match it on every valid UTF-8 input.
+    fn strip_ansi_chars_oracle(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                match chars.next() {
+                    Some(']') => {
+                        for c2 in chars.by_ref() {
+                            if c2 == '\x07' {
+                                break;
+                            }
+                            if c2 == '\x1b' {
+                                if chars.clone().next() == Some('\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    Some(c2) if !c2.is_ascii_alphabetic() => {
+                        for c3 in chars.by_ref() {
+                            if c3.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(_) | None => {}
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn strip_ansi_matches_char_oracle(
+            parts in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::strategy::Just("\x1b".to_string()),
+                    proptest::strategy::Just("\x1b]".to_string()),
+                    proptest::strategy::Just("\x07".to_string()),
+                    proptest::strategy::Just("\\".to_string()),
+                    proptest::strategy::Just("[".to_string()),
+                    "[a-zA-Z0-9;]{0,3}",
+                    "\\PC{0,3}",
+                ],
+                0..12,
+            )
+        ) {
+            let s: String = parts.concat();
+            proptest::prop_assert_eq!(strip_ansi(&s), strip_ansi_chars_oracle(&s));
+        }
     }
 
     #[test]

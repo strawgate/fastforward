@@ -33,6 +33,7 @@ pub(super) async fn worker_task(
     let WorkerConfig {
         idle_timeout,
         cancel,
+        stop_retrying,
         max_retry_delay,
         metrics,
         output_health,
@@ -41,6 +42,10 @@ pub(super) async fn worker_task(
         output_health: Arc::clone(&output_health),
         worker_id: id,
     };
+    // Set once a retry send was dropped mid-flight when the shutdown retry
+    // window closed. The sink may then hold partial state, so later batches
+    // on this worker are held for replay without being sent.
+    let mut is_send_abandoned = false;
     loop {
         tokio::select! {
             biased; // check cancel first
@@ -82,7 +87,14 @@ pub(super) async fn worker_task(
                             resp_bytes = tracing::field::Empty,
                         );
                         let output_name = sink.name().to_string();
-                        let process_result = AssertUnwindSafe(
+                        let process_result = if is_send_abandoned {
+                            tracing::info!(
+                                worker_id = id,
+                                "worker_pool: output send was abandoned at shutdown; batch held for replay without sending"
+                            );
+                            Ok((DeliveryOutcome::PoolClosed, 0, 0))
+                        } else {
+                            AssertUnwindSafe(
                             process_item(
                                 ProcessItemContext {
                                     worker_id: id,
@@ -91,6 +103,8 @@ pub(super) async fn worker_task(
                                     metadata: &metadata,
                                     max_retry_delay,
                                     cancel: &cancel,
+                                    stop_retrying: &stop_retrying,
+                                    is_send_abandoned: &mut is_send_abandoned,
                                     #[cfg(feature = "turmoil")]
                                     batch_id,
                                 },
@@ -99,7 +113,8 @@ pub(super) async fn worker_task(
                             .instrument(output_span.clone()),
                         )
                         .catch_unwind()
-                        .await;
+                        .await
+                        };
                         let mut recycle_worker_after_ack = false;
                         let (outcome, send_latency_ns, retries) = match process_result {
                             Ok(result) => result,
@@ -204,6 +219,12 @@ pub(super) struct ProcessItemContext<'a> {
     pub(super) max_retry_delay: Duration,
     /// Shutdown signal checked between retries and before sleeps.
     pub(super) cancel: &'a tokio_util::sync::CancellationToken,
+    /// Graceful-shutdown signal: once fired, a failed send is not retried.
+    pub(super) stop_retrying: &'a tokio_util::sync::CancellationToken,
+    /// Set when a retry send was dropped mid-flight because the retry window
+    /// closed. The sink may hold partial state (for example half a record on
+    /// a TCP stream), so the worker must not send through it again.
+    pub(super) is_send_abandoned: &'a mut bool,
     #[cfg(feature = "turmoil")]
     /// Turmoil-only batch id used for deterministic barrier injection.
     pub(super) batch_id: u64,
@@ -244,7 +265,8 @@ pub(super) async fn recv_with_idle_timeout(
 ///
 /// - `Delivered` — batch was sent successfully
 /// - `Rejected` — sink permanently rejected the data (4xx, schema error)
-/// - `PoolClosed` — shutdown cancellation was observed
+/// - `PoolClosed` — shutdown cancellation was observed, or a send failed
+///   after shutdown began (`stop_retrying`); the batch is held for replay
 /// - `InternalFailure` — unknown `SendResult` variant
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_item(
@@ -257,6 +279,7 @@ pub(super) async fn process_item(
     let metadata = context.metadata;
     let max_retry_delay = context.max_retry_delay;
     let cancel = context.cancel;
+    let stop_retrying = context.stop_retrying;
     #[cfg(feature = "turmoil")]
     let batch_id = context.batch_id;
 
@@ -293,6 +316,20 @@ pub(super) async fn process_item(
     let mut retries_count = 0;
 
     loop {
+        // Stopping retries is cooperative, not a hard barrier. This check
+        // skips a retry when the window has already closed. The window can
+        // still close just after it, so a retry may be invoked at or after
+        // expiry; the `select!` below then abandons it at its next poll. In
+        // both cases the batch is held (at-least-once). A batch's first
+        // attempt is never skipped or cut short by the window.
+        let is_retry = retries_count > 0;
+        if is_retry && stop_retrying.is_cancelled() {
+            tracing::info!(
+                worker_id,
+                "worker_pool: shutdown retry window closed; batch held for replay"
+            );
+            return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
+        }
         // Hard per-batch timeout: prevents one slow/broken batch from
         // tying up the worker indefinitely.
         let send_start = std::time::Instant::now();
@@ -300,6 +337,20 @@ pub(super) async fn process_item(
             biased;
             () = cancel.cancelled() => {
                 tracing::warn!(worker_id, "worker_pool: cancellation observed during batch send");
+                send_latency_ns += send_start.elapsed().as_nanos() as u64;
+                return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
+            }
+            // Cooperative cancellation of a retry send: observed when this
+            // future is next polled after the window closes, so the sink may
+            // already have started the request. The batch is held, so if the
+            // abandoned send did reach the output it is replayed
+            // (at-least-once). A batch's first attempt is not cut short.
+            () = stop_retrying.cancelled(), if is_retry => {
+                tracing::info!(
+                    worker_id,
+                    "worker_pool: shutdown retry window closed during a retry send; batch held for replay"
+                );
+                *context.is_send_abandoned = true;
                 send_latency_ns += send_start.elapsed().as_nanos() as u64;
                 return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
             }
@@ -345,13 +396,8 @@ pub(super) async fn process_item(
                         "worker_pool: batch send timed out, retrying"
                     );
                 }
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        tracing::warn!(worker_id, "worker_pool: cancellation observed during timeout backoff");
-                        return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
-                    }
-                    () = tokio::time::sleep(delay) => {}
+                if !wait_before_retry(worker_id, cancel, stop_retrying, delay).await {
+                    return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
                 }
             }
             Ok(SendResult::Ok) => {
@@ -392,13 +438,8 @@ pub(super) async fn process_item(
                     retries = retries_count,
                     "worker_pool: rate-limited, retrying"
                 );
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        tracing::warn!(worker_id, "worker_pool: cancellation observed during retry-after backoff");
-                        return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
-                    }
-                    () = tokio::time::sleep(sleep_for) => {}
+                if !wait_before_retry(worker_id, cancel, stop_retrying, sleep_for).await {
+                    return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
                 }
             }
             Ok(SendResult::IoError(e)) => {
@@ -436,13 +477,8 @@ pub(super) async fn process_item(
                         "worker_pool: transient error, retrying"
                     );
                 }
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        tracing::warn!(worker_id, "worker_pool: cancellation observed during retry backoff");
-                        return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
-                    }
-                    () = tokio::time::sleep(delay) => {}
+                if !wait_before_retry(worker_id, cancel, stop_retrying, delay).await {
+                    return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
                 }
             }
             // Future SendResult variants (#[non_exhaustive]) — treat as failure.
@@ -455,6 +491,43 @@ pub(super) async fn process_item(
                 );
             }
         }
+    }
+}
+
+/// Sleep for `delay` before the next send attempt.
+///
+/// Returns `false` when the batch should not be retried: either the pool was
+/// cancelled, or graceful shutdown has begun. During shutdown a failed send is
+/// not retried, because waiting on an output that is down would hold shutdown
+/// open until the drain timeout. The caller resolves the batch as
+/// `PoolClosed`, which holds its checkpoint so the data is replayed on restart.
+async fn wait_before_retry(
+    worker_id: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+    stop_retrying: &tokio_util::sync::CancellationToken,
+    delay: Duration,
+) -> bool {
+    if stop_retrying.is_cancelled() {
+        tracing::info!(
+            worker_id,
+            "worker_pool: shutting down; not retrying failed send, batch held for replay"
+        );
+        return false;
+    }
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            tracing::warn!(worker_id, "worker_pool: cancellation observed during retry backoff");
+            false
+        }
+        () = stop_retrying.cancelled() => {
+            tracing::info!(
+                worker_id,
+                "worker_pool: shutting down during retry backoff; batch held for replay"
+            );
+            false
+        }
+        () = tokio::time::sleep(delay) => true,
     }
 }
 
@@ -562,6 +635,74 @@ mod tests {
         }
     }
 
+    /// Sink that always fails with a transient I/O error, like an output
+    /// whose endpoint refuses connections.
+    struct DownSink {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Sink for DownSink {
+        fn send_batch<'a>(
+            &'a mut self,
+            _batch: &'a RecordBatch,
+            _metadata: &'a BatchMetadata,
+        ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async {
+                SendResult::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+            })
+        }
+
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn name(&self) -> &str {
+            "down-sink"
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Fails the first send transiently, then hangs on every later send.
+    struct FailThenHangSink {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Sink for FailThenHangSink {
+        fn send_batch<'a>(
+            &'a mut self,
+            _batch: &'a RecordBatch,
+            _metadata: &'a BatchMetadata,
+        ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if attempt == 0 {
+                    SendResult::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+                } else {
+                    std::future::pending().await
+                }
+            })
+        }
+
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn name(&self) -> &str {
+            "fail-then-hang-sink"
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     fn make_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["hello"]))]).unwrap()
@@ -582,6 +723,7 @@ mod tests {
         let cfg = WorkerConfig {
             idle_timeout: Duration::from_secs(5),
             cancel: cancel.clone(),
+            stop_retrying: CancellationToken::new(),
             max_retry_delay: Duration::from_millis(10),
             metrics: make_metrics(),
             output_health: Arc::new(OutputHealthTracker::new(vec![])),
@@ -636,6 +778,8 @@ mod tests {
                 metadata: &metadata,
                 max_retry_delay: Duration::from_millis(10),
                 cancel: &cancel,
+                stop_retrying: &CancellationToken::new(),
+                is_send_abandoned: &mut false,
                 #[cfg(feature = "turmoil")]
                 batch_id: 0, // test only
             },
@@ -645,6 +789,145 @@ mod tests {
 
         assert_eq!(outcome, DeliveryOutcome::PoolClosed);
         assert_eq!(retries, 0);
+    }
+
+    #[tokio::test]
+    async fn process_item_does_not_retry_failed_send_after_stop_retrying() {
+        let cancel = CancellationToken::new();
+        let stop_retrying = CancellationToken::new();
+        stop_retrying.cancel();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut sink = DownSink {
+            attempts: Arc::clone(&attempts),
+        };
+        let output_health = Arc::new(OutputHealthTracker::new(vec![]));
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::default(),
+            observed_time_ns: 0,
+        };
+
+        let (outcome, _send_latency_ns, retries) = tokio::time::timeout(
+            Duration::from_secs(1),
+            process_item(
+                ProcessItemContext {
+                    worker_id: 0,
+                    sink: &mut sink,
+                    output_health: &output_health,
+                    metadata: &metadata,
+                    max_retry_delay: Duration::from_secs(30),
+                    cancel: &cancel,
+                    stop_retrying: &stop_retrying,
+                    is_send_abandoned: &mut false,
+                    #[cfg(feature = "turmoil")]
+                    batch_id: 0, // test only
+                },
+                make_batch(),
+            ),
+        )
+        .await
+        .expect("failed send during shutdown must not back off");
+
+        assert_eq!(outcome, DeliveryOutcome::PoolClosed);
+        assert_eq!(retries, 1);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "batch should get exactly one attempt once shutdown has begun"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_item_abandons_retry_send_when_stop_retrying_fires() {
+        let cancel = CancellationToken::new();
+        let stop_retrying = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut sink = FailThenHangSink {
+            attempts: Arc::clone(&attempts),
+        };
+        let output_health = Arc::new(OutputHealthTracker::new(vec![]));
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::default(),
+            observed_time_ns: 0,
+        };
+
+        let stopper = stop_retrying.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            stopper.cancel();
+        });
+
+        let started = tokio::time::Instant::now();
+        let (outcome, _send_latency_ns, _retries) = process_item(
+            ProcessItemContext {
+                worker_id: 0,
+                sink: &mut sink,
+                output_health: &output_health,
+                metadata: &metadata,
+                max_retry_delay: Duration::from_millis(100),
+                cancel: &cancel,
+                stop_retrying: &stop_retrying,
+                is_send_abandoned: &mut false,
+                #[cfg(feature = "turmoil")]
+                batch_id: 0, // test only
+            },
+            make_batch(),
+        )
+        .await;
+
+        assert_eq!(outcome, DeliveryOutcome::PoolClosed);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "a hanging retry must end when the window closes, not at the 60s send timeout; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_item_leaves_retry_backoff_when_stop_retrying_fires() {
+        let cancel = CancellationToken::new();
+        let stop_retrying = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut sink = DownSink {
+            attempts: Arc::clone(&attempts),
+        };
+        let output_health = Arc::new(OutputHealthTracker::new(vec![]));
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::default(),
+            observed_time_ns: 0,
+        };
+        let stopper = stop_retrying.clone();
+        tokio::spawn(async move {
+            // Let the worker go through several backoff rounds first.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            stopper.cancel();
+        });
+        let started = tokio::time::Instant::now();
+
+        let (outcome, _send_latency_ns, retries) = process_item(
+            ProcessItemContext {
+                worker_id: 0,
+                sink: &mut sink,
+                output_health: &output_health,
+                metadata: &metadata,
+                max_retry_delay: Duration::from_secs(30),
+                cancel: &cancel,
+                stop_retrying: &stop_retrying,
+                is_send_abandoned: &mut false,
+                #[cfg(feature = "turmoil")]
+                batch_id: 0, // test only
+            },
+            make_batch(),
+        )
+        .await;
+
+        assert_eq!(outcome, DeliveryOutcome::PoolClosed);
+        assert!(retries >= 2, "worker should have retried before shutdown");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "worker should leave backoff as soon as shutdown begins, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

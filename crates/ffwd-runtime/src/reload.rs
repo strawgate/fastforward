@@ -907,21 +907,21 @@ mod kani_proofs {
 
     #[kani::proof]
     #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(7)]
     fn verify_shutdown_requested_always_terminal() {
-        let state_tag: u8 = kani::any();
-        let first_run: bool = kani::any();
-        let has_pending: bool = kani::any();
-        let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
+        // States are enumerated: a symbolic `State` (with its `Option<String>`
+        // payload) ran CBMC out of memory. Flags stay symbolic.
+        for state_tag in 0u8..6 {
+            let first_run: bool = kani::any();
+            let has_pending: bool = kani::any();
+            let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
 
-        let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
-        c.step(Event::ShutdownRequested);
+            let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
+            c.step(Event::ShutdownRequested);
 
-        // After ShutdownRequested, must be in ShuttingDown
-        assert!(matches!(c.state(), State::ShuttingDown { .. }));
-
-        kani::cover!(state_tag % 6 == 0, "shutdown from Starting");
-        kani::cover!(state_tag % 6 == 1, "shutdown from Running");
-        kani::cover!(state_tag % 6 == 4, "shutdown from Building");
+            // After ShutdownRequested, must be in ShuttingDown
+            assert!(matches!(c.state(), State::ShuttingDown { .. }));
+        }
     }
 
     // ── Property 3: First-run build failure is always fatal ──
@@ -955,6 +955,7 @@ mod kani_proofs {
     // ── Property 4: Rebuild attempts never exceed MAX ──
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(5)]
     fn verify_rebuild_attempts_bounded() {
@@ -994,68 +995,156 @@ mod kani_proofs {
     }
 
     // ── Property 5: has_pending consistency ──
+    //
+    // Properties 5 and 6 get one harness per state, each looping over all 11
+    // events. A symbolic event (with its `String` payloads) or all 66
+    // state/event pairs in one harness ran CBMC out of memory.
+
+    /// After any single step from `state_tag`, has_pending implies Building
+    /// or ShuttingDown.
+    fn check_has_pending_invariant(state_tag: u8) {
+        for event_tag in 0u8..11 {
+            // has_pending is enumerated too: when it is symbolic, Building's
+            // PipelinesBuilt arm pushes a symbolic number of effects and the
+            // Vec reallocation ran CBMC out of memory.
+            for has_pending in [false, true] {
+                let first_run: bool = kani::any();
+                let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
+                // Start from a state that satisfies the invariant: has_pending is
+                // only set on entering Building (and can survive into ShuttingDown).
+                if has_pending
+                    && !matches!(
+                        arb_state(state_tag),
+                        State::Building | State::ShuttingDown { .. }
+                    )
+                {
+                    continue;
+                }
+
+                let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
+                c.step(arb_event(event_tag));
+
+                if c.has_pending() {
+                    assert!(
+                        matches!(c.state(), State::Building | State::ShuttingDown { .. }),
+                        "has_pending=true in unexpected state"
+                    );
+                }
+            }
+        }
+    }
 
     #[kani::proof]
     #[kani::stub(std::fmt::format, stub_format)]
-    fn verify_has_pending_invariant() {
-        let state_tag: u8 = kani::any();
-        let first_run: bool = kani::any();
-        let has_pending: bool = kani::any();
-        let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
-        let event_tag: u8 = kani::any();
-        // Start from a state that satisfies the invariant: has_pending is
-        // only set on entering Building (and can survive into ShuttingDown).
-        kani::assume(
-            !has_pending
-                || matches!(
-                    arb_state(state_tag),
-                    State::Building | State::ShuttingDown { .. }
-                ),
-        );
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_starting() {
+        check_has_pending_invariant(0);
+    }
 
-        let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
-        let event = arb_event(event_tag);
-        c.step(event);
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_running() {
+        check_has_pending_invariant(1);
+    }
 
-        // After any single step, has_pending implies Building or ShuttingDown
-        if c.has_pending() {
-            assert!(
-                matches!(c.state(), State::Building | State::ShuttingDown { .. }),
-                "has_pending=true in unexpected state"
-            );
-        }
+    #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_draining() {
+        check_has_pending_invariant(2);
+    }
 
-        kani::cover!(c.has_pending(), "has_pending is true after step");
-        kani::cover!(!c.has_pending(), "has_pending is false after step");
+    #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_validating() {
+        check_has_pending_invariant(3);
+    }
+
+    #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_building() {
+        check_has_pending_invariant(4);
+    }
+
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_has_pending_invariant_from_shutting_down() {
+        check_has_pending_invariant(5);
     }
 
     // ── Property 6: DrainPipelines only emitted from Running ──
 
+    /// No event emits DrainPipelines from `state_tag` unless it is Running.
+    fn check_drain_only_from_running(state_tag: u8) {
+        let was_running = matches!(arb_state(state_tag), State::Running);
+        for event_tag in 0u8..11 {
+            // has_pending is enumerated too: when it is symbolic, Building's
+            // PipelinesBuilt arm pushes a symbolic number of effects and the
+            // Vec reallocation ran CBMC out of memory.
+            for has_pending in [false, true] {
+                let first_run: bool = kani::any();
+                let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
+
+                let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
+                let effects = c.step(arb_event(event_tag));
+
+                let drained = effects.iter().any(|e| matches!(e, Effect::DrainPipelines));
+                if drained {
+                    assert!(was_running, "DrainPipelines emitted from non-Running state");
+                }
+                kani::cover!(drained, "drain was emitted");
+            }
+        }
+    }
+
     #[kani::proof]
     #[kani::stub(std::fmt::format, stub_format)]
-    #[kani::unwind(3)]
-    fn verify_drain_only_from_running() {
-        let state_tag: u8 = kani::any();
-        let first_run: bool = kani::any();
-        let has_pending: bool = kani::any();
-        let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
-        let event_tag: u8 = kani::any();
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_starting() {
+        check_drain_only_from_running(0);
+    }
 
-        let state_before = arb_state(state_tag);
-        let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
-        let event = arb_event(event_tag);
-        let effects = c.step(event);
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_running() {
+        check_drain_only_from_running(1);
+    }
 
-        if effects.iter().any(|e| matches!(e, Effect::DrainPipelines)) {
-            assert!(
-                matches!(state_before, State::Running),
-                "DrainPipelines emitted from non-Running state"
-            );
-        }
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_draining() {
+        check_drain_only_from_running(2);
+    }
 
-        kani::cover!(
-            effects.iter().any(|e| matches!(e, Effect::DrainPipelines)),
-            "drain was emitted"
-        );
+    #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_validating() {
+        check_drain_only_from_running(3);
+    }
+
+    #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_building() {
+        check_drain_only_from_running(4);
+    }
+
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(12)]
+    fn verify_drain_only_from_running_from_shutting_down() {
+        check_drain_only_from_running(5);
     }
 }

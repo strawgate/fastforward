@@ -7,7 +7,7 @@
 //! Generic over K (identity key) and M (metadata). For file inputs:
 //! K = SourceId (wrapping file fingerprint), M = PathBuf.
 
-use alloc::collections::BTreeMap;
+use super::ord_map::OrdMap;
 
 /// Lifecycle state of a data source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub struct SourceEntry<M> {
 /// The lifecycle is monotonic: Active → Draining → Committed.
 /// `upsert` on a Committed entry re-activates it (file reappears with same fingerprint).
 pub struct SourceRegistry<K: Ord, M> {
-    entries: BTreeMap<K, SourceEntry<M>>,
+    entries: OrdMap<K, SourceEntry<M>>,
     current_generation: u64,
 }
 
@@ -49,7 +49,7 @@ impl<K: Ord + Clone, M> SourceRegistry<K, M> {
     /// Create an empty registry.
     pub fn new() -> Self {
         SourceRegistry {
-            entries: BTreeMap::new(),
+            entries: OrdMap::new(),
             current_generation: 0,
         }
     }
@@ -276,6 +276,8 @@ mod verification {
     /// State transitions are monotonic: Active → Draining → Committed.
     /// No backwards transitions except via upsert (re-activation).
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn state_transitions_monotonic() {
         let mut reg = SourceRegistry::<u64, u64>::new();
         let key: u64 = kani::any();
@@ -306,6 +308,8 @@ mod verification {
 
     /// prune_committed never removes Active or Draining entries.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn prune_never_removes_active_or_draining() {
         let mut reg = SourceRegistry::<u64, u64>::new();
         let k1: u64 = kani::any();
@@ -331,6 +335,8 @@ mod verification {
 
     /// upsert on an existing Committed entry re-activates it.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn upsert_reactivates_committed() {
         let mut reg = SourceRegistry::<u64, u64>::new();
         let key: u64 = kani::any();
@@ -346,6 +352,8 @@ mod verification {
 
     /// prune_committed respects generation — only prunes old entries.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
+    #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn prune_respects_generation() {
         let mut reg = SourceRegistry::<u64, u64>::new();
         let k1: u64 = kani::any();

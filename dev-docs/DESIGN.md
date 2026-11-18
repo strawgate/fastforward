@@ -150,6 +150,41 @@ without interpreting their arithmetic meaning. TLA+ coverage is unchanged: the
 while checking batch sequencing, ACK/reject advance, drain, and ordering
 invariants.
 
+`verify_committed_monotonic` also assumes the batches of one source carry
+nondecreasing checkpoints in creation order. The machine commits each batch's
+own checkpoint, so the committed checkpoint is monotonic only when that
+precondition holds. The TLA+ model has it built in: there `committed[s]` is a
+batch sequence number. Real inputs do not always satisfy it. When a tailed file
+is truncated, the reader resets its offset to 0 (`ffwd-io` `tail/lifecycle.rs`),
+and if the rewritten file keeps the same device, inode and leading bytes it
+keeps its `SourceId`, so later batches carry smaller offsets and the committed
+checkpoint goes back with them. The proof does not cover that path.
+
+### `BTreeMap` replaced by `ArrayMap` under Kani
+
+**Context:** `PipelineMachine` and `SourceRegistry` keep their state in
+`BTreeMap`s. CBMC cannot bound a B-tree's height, so every map operation
+unrolled node walks and drop glue to the full unwind bound. Even one-batch
+lifecycle proofs ran out of memory, and 18 of the 20 lifecycle and registry
+harnesses had to leave PR CI.
+
+**Decision:** both use `OrdMap` (`pipeline/ord_map.rs`). It is
+`alloc::collections::BTreeMap` in every normal build and `ArrayMap<K, V, 4>`
+under `cfg(kani)`: a sorted array of `Option<(K, V)>` slots with the subset of
+the `BTreeMap` API the pipeline uses.
+
+**Consequences:** the Kani proofs verify the state-machine logic against
+`ArrayMap`, not `BTreeMap`. A proptest compares every `ArrayMap` operation with
+`BTreeMap`, which covers that gap. Proofs may hold at most 4 entries per map;
+going past that panics, so a proof that outgrows it fails instead of passing.
+Production code and its behavior are unchanged.
+
+**Alternatives considered:** a sorted `Vec` fixed single-batch proofs but not
+the ack path, where nested heap buffers move through `memmove`. Shrinking the
+harnesses alone was not enough: a two-batch proof still ran out of memory with
+`BTreeMap`. Keeping the proofs nightly-only meant a real counterexample would
+look the same as a resource failure.
+
 ### Rejected batches advance the checkpoint
 
 `RejectBatch` has the same state transition as `AckBatch` — permanently-undeliverable data
@@ -160,6 +195,30 @@ This matches Filebeat's behavior (advance past malformed records) and differs fr
 Bit (drops the route, retries via a backlog). If a batch is rejected, the data in that
 batch is lost — the correct behavior for a forwarder where corrupted or oversized data
 cannot be retried, but it must be metered.
+
+### Output retries are bounded once shutdown begins
+
+Output workers retry transient failures forever while running, so a down output turns into
+backpressure, not data loss. Once shutdown begins (`ShutdownRetryGrace::begin`, called as
+soon as the pipeline's shutdown token is cancelled), workers keep retrying with their normal
+backoff for a bounded window: `shutdown_retry_grace_ms`, default 10s, capped by the pool
+drain timeout. When the window closes, a worker in backoff gives up at once and later
+transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
+advanced). The window bounds retries cooperatively: a retry can still start at or just after
+expiry, and a retry that is mid-send is abandoned at its next poll, with the batch held
+(at-least-once). Because an abandoned send can leave the sink mid-request, that worker then
+holds its remaining batches without sending them. A batch's first attempt still runs until it completes or the drain timeout
+cancels the worker. Without a bound, a down
+output held every shutdown open for the full pool drain timeout (60s), which is longer than the Kubernetes default termination grace period (30s).
+A 10s default leaves room inside that period while still riding out a short collector
+restart. `0` gives up on the first failure after shutdown begins.
+
+Trade-off: checkpointed inputs (files) replay held batches on restart. Non-checkpointed
+inputs (TCP, UDP, OTLP receivers) lose a batch that is still failing when the window closes.
+They already lost it after the drain timeout, and usually to SIGKILL first. This sits between
+Filebeat's default (`shutdown_timeout: 0`, no waiting for acks at shutdown) and Vector, which
+waits up to its graceful shutdown limit (60s). Modeled in `tla/DeliveryRetry.tla`
+(`BeginShutdown`/`StopRetrying`, checked under `GracefulSpec`).
 
 ### Per-source independent checkpoints
 

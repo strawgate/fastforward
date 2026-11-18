@@ -296,6 +296,30 @@ pipelines:
     }
 
     #[test]
+    fn shutdown_retry_grace_ms_parses_including_zero() {
+        for (value, expected) in [("2500", 2_500_u64), ("0", 0), ("\"750\"", 750)] {
+            let yaml = format!(
+                "
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    shutdown_retry_grace_ms: {value}
+"
+            );
+            let config = Config::load_str(&yaml).expect("config should load");
+            assert_eq!(
+                config.pipelines["test"].shutdown_retry_grace_ms,
+                Some(expected),
+                "value {value}"
+            );
+        }
+    }
+
+    #[test]
     fn poll_interval_ms_must_be_positive() {
         let yaml = r"
 pipelines:

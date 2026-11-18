@@ -6,28 +6,5 @@
 #
 # Format: <crate> <harness path>   # reason
 # kani_shard.py fails if a listed harness no longer exists.
-
-ffwd-output elasticsearch::kani_proofs::verify_write_ts_suffix_ascii  # civil-date division over 16 years of seconds; OOM at 6 GB
-ffwd-types pipeline::lifecycle::verification::verify_all_acked_final_checkpoint  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_committed_monotonic  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_drain_to_stop  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_dropped_ticket_does_not_block  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_duplicate_ack_harmless  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_force_stop_always_succeeds  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_force_stop_preserves_committed  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_mixed_ack_reject_advances  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_multi_source_independence  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_not_drained_with_in_flight  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_ordered_ack  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_reject_advances_checkpoint  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_stop_blocks_when_in_flight  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::lifecycle::verification::verify_symbolic_order_ack_4_batches  # nested BTreeMaps in PipelineMachine; OOM or >15 min
-ffwd-types pipeline::registry::verification::prune_never_removes_active_or_draining  # BTreeMap-backed registry; OOM or >15 min
-ffwd-types pipeline::registry::verification::prune_respects_generation  # BTreeMap-backed registry; OOM or >15 min
-ffwd-types pipeline::registry::verification::state_transitions_monotonic  # BTreeMap-backed registry; OOM or >15 min
-ffwd-types pipeline::registry::verification::upsert_reactivates_committed  # BTreeMap-backed registry; OOM or >15 min
-ffwd-runtime reload::kani_proofs::verify_drain_only_from_running  # symbolic state x event over all of step(); OOM or >15 min
-ffwd-runtime reload::kani_proofs::verify_shutdown_requested_always_terminal  # symbolic state x event over all of step(); OOM or >15 min
-ffwd-runtime reload::kani_proofs::verify_has_pending_invariant  # symbolic state x event over all of step(); OOM or >15 min
-ffwd-diagnostics stderr_capture::verification::strip_ansi_preserves_non_escape_chars  # symbolic from_utf8 + chars(); OOM even at 4 ASCII bytes (8 here)
-ffwd-diagnostics stderr_capture::verification::strip_ansi_removes_escapes  # symbolic from_utf8 + chars(); OOM even at 5 ASCII bytes (12 here)
+#
+# Empty since the follow-up to #2925: every harness fits the PR budget again.
