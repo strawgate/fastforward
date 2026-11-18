@@ -69,6 +69,32 @@ fn belongs_to_family(sample: &[u8], family: &[u8]) -> bool {
     }
 }
 
+/// Legacy metric name: `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+#[inline(always)]
+fn is_valid_metric_name(name: &[u8]) -> bool {
+    match name.split_first() {
+        Some((first, rest)) => {
+            (first.is_ascii_alphabetic() || matches!(first, b'_' | b':'))
+                && rest
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':'))
+        }
+        None => false,
+    }
+}
+
+/// Legacy label name: `[a-zA-Z_][a-zA-Z0-9_]*`.
+#[inline(always)]
+fn is_valid_label_name(name: &[u8]) -> bool {
+    match name.split_first() {
+        Some((first, rest)) => {
+            (first.is_ascii_alphabetic() || *first == b'_')
+                && rest.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        }
+        None => false,
+    }
+}
+
 #[inline(always)]
 fn is_reserved_column(key: &[u8]) -> bool {
     key == PROM_VALUE_FIELD || key == PROM_TIMESTAMP_FIELD || key == PROM_TYPE_FIELD
@@ -116,6 +142,9 @@ pub enum PromErrorKind {
     UnterminatedString,
     /// Unexpected bytes after the value / timestamp.
     TrailingGarbage,
+    /// An unquoted metric or label name has a byte outside the legacy
+    /// Prometheus name charset. Quote the name to use other characters.
+    InvalidName,
 }
 
 /// A scan failure with its 1-based line number and byte offset.
@@ -389,6 +418,9 @@ struct Walker<'a, 'b, B: PromBuilder> {
     type_idx: Option<usize>,
     /// Current `# TYPE` family name span and type token span.
     family: Option<(usize, usize, usize, usize)>,
+    /// Span of the last bare metric name that passed validation. Series of
+    /// one family sit on consecutive lines, so most names skip the check.
+    last_name: (usize, usize),
 }
 
 impl<B: PromBuilder> Walker<'_, '_, B> {
@@ -426,6 +458,13 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                     ));
                 }
                 Some(b'\\') => {
+                    // An escape may not swallow the line break or run off the end.
+                    match self.byte(q + 1) {
+                        Some(b'\n') | None => {
+                            return Err(self.err(q + 1, PromErrorKind::UnterminatedString));
+                        }
+                        Some(_) => {}
+                    }
                     escaped = true;
                     pos = q + 2;
                 }
@@ -451,13 +490,23 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
 
     /// Resolve a label key, using the per-position cache when the key bytes
     /// match the previous sample's key at the same position.
+    /// Keys are validated only on a cache miss: a hit means the same bytes
+    /// were already validated.
     #[inline(always)]
-    fn resolve_key(&mut self, slot: usize, start: usize, end: usize) -> usize {
+    fn resolve_key(
+        &mut self,
+        slot: usize,
+        start: usize,
+        end: usize,
+    ) -> Result<usize, PromParseError> {
         let key = &self.buf[start..end];
         if let Some(&(cs, cl, idx)) = self.scratch.key_cache.get(slot)
             && self.buf.get(cs..cs + cl) == Some(key)
         {
-            return idx;
+            return Ok(idx);
+        }
+        if !is_valid_label_name(key) {
+            return Err(self.err(start, PromErrorKind::InvalidName));
         }
         let idx = self.builder.resolve_field(key);
         let entry = (start, end - start, idx);
@@ -466,7 +515,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         } else {
             self.scratch.key_cache.push(entry);
         }
-        idx
+        Ok(idx)
     }
 
     /// Resolve a label key that cannot be used as-is: escaped keys are
@@ -501,15 +550,15 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         let mut slot = 0usize;
         loop {
             pos = skip_blanks(self.buf, pos);
-            let (key, key_escaped, after) = match self.byte(pos) {
+            let (key, key_escaped, key_quoted, after) = match self.byte(pos) {
                 Some(b'}') => return Ok((pos + 1, quoted_name)),
                 Some(b'"') => {
                     let (q, after) = self.read_quoted(pos + 1)?;
-                    ((q.start, q.end), q.escaped, after)
+                    ((q.start, q.end), q.escaped, true, after)
                 }
                 Some(_) => {
                     let q = self.cur.next_from(pos);
-                    ((pos, q), false, q)
+                    ((pos, q), false, false, q)
                 }
                 None => return Err(self.err(pos, PromErrorKind::InvalidLabels)),
             };
@@ -541,10 +590,12 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                             _ => return Err(self.err(pos, PromErrorKind::InvalidLabels)),
                         }
                     }
-                    let idx = if key_escaped || is_reserved_column(raw_key) {
+                    // Quoted keys skip the legacy charset check and the
+                    // position cache (they are rare, Prometheus 3 UTF-8 names).
+                    let idx = if key_quoted || is_reserved_column(raw_key) {
                         self.resolve_owned_key(key.0, key.1, key_escaped)
                     } else {
-                        self.resolve_key(slot, key.0, key.1)
+                        self.resolve_key(slot, key.0, key.1)?
                     };
                     slot += 1;
                     self.append_str_span(idx, val.start, val.end, val.escaped);
@@ -632,14 +683,30 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
     }
 
     /// Parse one sample line starting at `pos` (first non-blank byte).
+    /// The row is closed on error too, so the caller can discard the batch.
     #[inline(always)]
     fn sample(&mut self, pos: usize) -> Result<usize, PromParseError> {
         self.builder.begin_row();
+        let r = self.sample_row(pos);
+        self.builder.end_row();
+        r
+    }
+
+    #[inline(always)]
+    fn sample_row(&mut self, pos: usize) -> Result<usize, PromParseError> {
         // Metric name (bare) unless the line starts with `{`.
         let (mut name, mut p) = if self.byte(pos) == Some(b'{') {
             (None, pos)
         } else {
             let q = self.cur.next_from(pos);
+            let bare = &self.buf[pos..q];
+            let (ls, le) = self.last_name;
+            if le == ls || self.buf.get(ls..le) != Some(bare) {
+                if !is_valid_metric_name(bare) {
+                    return Err(self.err(pos, PromErrorKind::InvalidName));
+                }
+                self.last_name = (pos, q);
+            }
             (
                 Some(Quoted {
                     start: pos,
@@ -705,7 +772,6 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         {
             self.builder.append_str_by_idx(type_idx, &self.buf[ts..te]);
         }
-        self.builder.end_row();
         Ok(p + 1)
     }
 
@@ -749,6 +815,7 @@ pub fn scan_prom_text<B: PromBuilder>(
         ts_idx,
         type_idx,
         family: None,
+        last_name: (0, 0),
     };
     let mut stats = PromScanStats::default();
     let mut pos = 0usize;
@@ -790,6 +857,7 @@ mod tests {
         names: Vec<Vec<u8>>,
         rows: Vec<Vec<(String, String)>>,
         cur: Vec<(String, String)>,
+        open_rows: i32,
     }
 
     impl Rec {
@@ -801,9 +869,11 @@ mod tests {
 
     impl ScanBuilder for Rec {
         fn begin_row(&mut self) {
+            self.open_rows += 1;
             self.cur.clear();
         }
         fn end_row(&mut self) {
+            self.open_rows -= 1;
             let row = core::mem::take(&mut self.cur);
             self.rows.push(row);
         }
@@ -1056,6 +1126,12 @@ mod tests {
             ("foo{a=\"1} 1\n", PromErrorKind::UnterminatedString),
             ("{a=\"1\"} 1\n", PromErrorKind::MissingName),
             ("foo{=\"1\"} 1\n", PromErrorKind::InvalidLabels),
+            ("9bad 1\n", PromErrorKind::InvalidName),
+            ("foo-bar 1\n", PromErrorKind::InvalidName),
+            ("m{bad-name=\"x\"} 1\n", PromErrorKind::InvalidName),
+            ("m{a:b=\"x\"} 1\n", PromErrorKind::InvalidName),
+            ("m{a=\"x\\\n\"} 1\n", PromErrorKind::UnterminatedString),
+            ("m{a=\"x\\", PromErrorKind::UnterminatedString),
         ];
         for (input, kind) in cases {
             let err = scan(input).expect_err(input);
@@ -1063,6 +1139,29 @@ mod tests {
             assert_eq!(err.line, 1);
         }
         assert_eq!(scan("ok 1\nbad\n").expect_err("should fail").line, 2);
+    }
+
+    #[test]
+    fn failed_sample_closes_its_row() {
+        for input in ["bad\n", "m{a=\"1\" 1\n", "9bad 1\n", "m 1 x\n"] {
+            let mut rec = Rec::default();
+            let mut scratch = PromScratch::new();
+            scan_prom_text(
+                input.as_bytes(),
+                &PromScanConfig::default(),
+                &mut scratch,
+                &mut rec,
+            )
+            .expect_err(input);
+            assert_eq!(rec.open_rows, 0, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_names_bypass_legacy_charset() {
+        let rows = scan("{\"my.metric\", \"a-b\"=\"x\"} 1\nok:sub_1{_l1=\"y\"} 2\n")
+            .expect("should parse");
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
