@@ -17,7 +17,7 @@
  *    BackoffEventuallyResolves under Fairness.
  *
  * 3. GRACEFUL (DeliveryRetry.graceful.cfg):
- *    Checks StopRetryingTerminates and HealthySinkDelivers under
+ *    Checks StopRetryingTerminates, ShutdownTerminates and HealthySinkDelivers under
  *    GracefulSpec (no fairness on Cancel).
  *
  * 4. COVERAGE (DeliveryRetry.coverage.cfg):

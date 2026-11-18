@@ -24,7 +24,7 @@ impl OutputWorkerPool {
             ack_rx,
             ack_tx,
             cancel: CancellationToken::new(),
-            stop_retrying: CancellationToken::new(),
+            retry_grace: ShutdownRetryGrace::new(DEFAULT_SHUTDOWN_RETRY_GRACE),
             join_set: JoinSet::new(),
             channel_capacity: 1,
             max_workers,
@@ -199,24 +199,32 @@ impl OutputWorkerPool {
         }
     }
 
-    /// Tell workers that shutdown has begun: stop retrying failed sends.
+    /// Tell workers that shutdown has begun, opening the retry grace window.
     ///
-    /// Each worker still finishes the send it is making, and batches that
-    /// are queued or submitted later still get one delivery attempt. A
-    /// failed attempt resolves as [`DeliveryOutcome::PoolClosed`] instead of
-    /// backing off, so the batch is held for replay from the last checkpoint
-    /// rather than keeping shutdown waiting on an output that is down.
-    /// [`Self::drain`] also calls this; calling it earlier lets the pipeline
-    /// stop retries before it flushes its input channel.
+    /// Workers keep retrying failed sends with backoff until the window
+    /// closes (see [`ShutdownRetryGrace`]). After that, a failed send
+    /// resolves as [`DeliveryOutcome::PoolClosed`] instead of backing off,
+    /// so the batch is held for replay from the last checkpoint rather than
+    /// keeping shutdown waiting on an output that is down.
+    /// [`Self::drain`] also opens the window; opening it earlier starts the
+    /// clock before the pipeline flushes its input channel. Idempotent.
     pub fn stop_retrying(&self) {
-        self.stop_retrying.cancel();
+        self.retry_grace.begin();
     }
 
-    /// Clone of the stop-retrying token, so a caller can fire it from a task
-    /// that does not hold the pool (for example when shutdown arrives while
-    /// the pipeline loop is blocked inside [`Self::submit`]).
-    pub fn stop_retrying_token(&self) -> CancellationToken {
-        self.stop_retrying.clone()
+    /// Set how long workers keep retrying after shutdown begins.
+    ///
+    /// Zero means a failed send is not retried once shutdown begins. Has no
+    /// effect once the window has opened.
+    pub fn set_shutdown_retry_grace(&self, grace: Duration) {
+        self.retry_grace.set_grace(grace);
+    }
+
+    /// Shared handle to the retry grace window, so a caller can open it from
+    /// a task that does not hold the pool (for example when shutdown arrives
+    /// while the pipeline loop is blocked inside [`Self::submit`]).
+    pub fn shutdown_retry_grace(&self) -> ShutdownRetryGrace {
+        self.retry_grace.clone()
     }
 
     /// Try to receive any pending ack items without blocking.
@@ -243,7 +251,7 @@ impl OutputWorkerPool {
         // race with the start of drain are rejected, closing the window between
         // the guard check in submit() and the actual teardown below.
         self.is_draining = true;
-        self.stop_retrying.cancel();
+        self.retry_grace.begin_capped(graceful_timeout);
         #[cfg(feature = "turmoil")]
         crate::turmoil_barriers::trigger(
             crate::turmoil_barriers::RuntimeBarrierEvent::PoolDrainBegin,
@@ -340,7 +348,7 @@ impl OutputWorkerPool {
             .apply_worker_event(id, OutputHealthEvent::StartupSucceeded);
         let cfg = WorkerConfig {
             cancel: self.cancel.clone(),
-            stop_retrying: self.stop_retrying.clone(),
+            stop_retrying: self.retry_grace.stop_token(),
             idle_timeout: self.idle_timeout,
             max_retry_delay: self.max_retry_delay,
             metrics: Arc::clone(&self.metrics),

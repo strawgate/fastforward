@@ -429,8 +429,10 @@ async fn shutdown_with_down_output_and_saturated_pool_exits_promptly() {
     pipeline = pipeline.with_sink(Box::new(FailingSink::new(u32::MAX)));
     pipeline.batch_target_bytes = 64;
     pipeline.batch_timeout = Duration::from_millis(10);
-    // Keep the production default so a regression shows up as a long stall.
+    // Keep the production drain default so a regression shows up as a long
+    // stall; use a short retry window so the test stays quick.
     pipeline.set_pool_drain_timeout(Duration::from_secs(60));
+    pipeline.set_shutdown_retry_grace(Duration::from_secs(1));
 
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
@@ -447,11 +449,13 @@ async fn shutdown_with_down_output_and_saturated_pool_exits_promptly() {
         "shutdown stalled behind a saturated pool with a down output"
     );
     assert!(result.unwrap().is_ok(), "pipeline should shut down cleanly");
+    let elapsed = started.elapsed();
+    // 500ms before shutdown plus the 1s retry window.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "shutdown took {:?}",
-        started.elapsed()
+        elapsed >= Duration::from_millis(1400),
+        "workers should keep retrying for the grace window, shutdown took {elapsed:?}"
     );
+    assert!(elapsed < Duration::from_secs(5), "shutdown took {elapsed:?}");
     assert_eq!(
         pipeline
             .metrics

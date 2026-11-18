@@ -57,6 +57,7 @@
             fail_shutdown: false,
         });
         let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), test_metrics());
+        pool.set_shutdown_retry_grace(Duration::from_millis(500));
 
         pool.submit(empty_work_item()).await;
         // Let the worker enter its retry loop.
@@ -64,10 +65,15 @@
 
         let started = std::time::Instant::now();
         pool.drain(Duration::from_secs(60)).await;
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "drain should stop retries instead of waiting out the graceful timeout, took {:?}",
-            started.elapsed()
+            elapsed >= Duration::from_millis(400),
+            "drain should keep retrying for the grace window, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "drain should stop retrying when the grace window closes instead of \
+             waiting out the graceful timeout, took {elapsed:?}"
         );
 
         let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
@@ -76,6 +82,88 @@
             DeliveryOutcome::PoolClosed,
             "undelivered batch should be held for replay"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pool_delivers_batch_when_output_recovers_within_shutdown_grace() {
+        let factory = Arc::new(ScriptedSinkFactory::new(
+            "scripted",
+            vec![
+                ScriptedResult::RetryAfter(Duration::from_secs(1)),
+                ScriptedResult::RetryAfter(Duration::from_secs(1)),
+                ScriptedResult::RetryAfter(Duration::from_secs(1)),
+                ScriptedResult::Ok,
+            ],
+        ));
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), test_metrics());
+        pool.set_shutdown_retry_grace(Duration::from_secs(10));
+
+        pool.submit(empty_work_item()).await;
+        pool.stop_retrying();
+        pool.drain(Duration::from_secs(60)).await;
+
+        let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
+        assert_eq!(
+            ack.outcome,
+            DeliveryOutcome::Delivered,
+            "a send that recovers inside the grace window should be delivered"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pool_holds_batch_when_output_still_down_after_shutdown_grace() {
+        let factory = Arc::new(ScriptedSinkFactory::new(
+            "scripted",
+            vec![ScriptedResult::RetryAfter(Duration::from_secs(1)); 30],
+        ));
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), test_metrics());
+        pool.set_shutdown_retry_grace(Duration::from_secs(3));
+
+        pool.submit(empty_work_item()).await;
+        let started = tokio::time::Instant::now();
+        pool.stop_retrying();
+        pool.drain(Duration::from_secs(60)).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(5),
+            "drain should end when the 3s grace window closes, took {elapsed:?}"
+        );
+        let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
+        assert_eq!(ack.outcome, DeliveryOutcome::PoolClosed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pool_zero_shutdown_grace_does_not_retry() {
+        let factory = Arc::new(ScriptedSinkFactory::new(
+            "scripted",
+            vec![ScriptedResult::RetryAfter(Duration::from_secs(1)), ScriptedResult::Ok],
+        ));
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), test_metrics());
+        pool.set_shutdown_retry_grace(Duration::ZERO);
+
+        pool.stop_retrying();
+        pool.submit(empty_work_item()).await;
+        pool.drain(Duration::from_secs(60)).await;
+
+        let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
+        assert_eq!(
+            ack.outcome,
+            DeliveryOutcome::PoolClosed,
+            "with zero grace a failed send during shutdown is held, not retried"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_grace_is_capped_by_drain_timeout() {
+        let grace = ShutdownRetryGrace::new(Duration::from_secs(10));
+        let stop = grace.stop_token();
+        let started = tokio::time::Instant::now();
+        grace.begin_capped(Duration::from_secs(2));
+        // A later uncapped begin must not extend the window.
+        grace.begin();
+        stop.cancelled().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
     }
 
     #[tokio::test]

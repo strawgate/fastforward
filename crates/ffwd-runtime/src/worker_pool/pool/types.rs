@@ -13,9 +13,10 @@ pub struct OutputWorkerPool {
     ack_tx: mpsc::UnboundedSender<AckItem>,
     /// Cancellation token sent to all workers.
     cancel: CancellationToken,
-    /// Fired when shutdown begins. Workers finish the send in progress but
-    /// stop retrying failed sends, so a down output cannot stall shutdown.
-    stop_retrying: CancellationToken,
+    /// Retry window opened when shutdown begins. Workers keep retrying
+    /// failed sends until it closes, then give up so a down output cannot
+    /// stall shutdown.
+    retry_grace: ShutdownRetryGrace,
     /// Tracks all spawned worker tasks for clean drain.
     join_set: JoinSet<()>,
     /// Per-worker channel capacity (currently 1).

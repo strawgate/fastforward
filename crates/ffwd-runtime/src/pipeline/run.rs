@@ -128,17 +128,17 @@ impl Pipeline {
 
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
 
-        // Fire the pool's stop-retrying signal as soon as shutdown is
+        // Open the pool's shutdown retry window as soon as shutdown is
         // requested, independently of this loop. With the output down and the
         // pool saturated, the loop can be parked in `submit_batch` (waiting
-        // for a worker slot) and would never see `shutdown`. Stopping retries
-        // makes the busy worker give up its batch (held for replay), which
+        // for a worker slot) and would never see `shutdown`. When the window
+        // closes the busy worker gives up its batch (held for replay), which
         // frees the slot so the blocked submit completes and the loop exits.
-        let stop_retrying = self.pool.stop_retrying_token();
+        let retry_grace = self.pool.shutdown_retry_grace();
         let shutdown_for_stop = shutdown.clone();
         let stop_retrying_link = tokio::spawn(async move {
             shutdown_for_stop.cancelled().await;
-            stop_retrying.cancel();
+            retry_grace.begin();
         });
 
         let mut heartbeat_interval = tokio::time::interval(self.batch_timeout);
@@ -259,10 +259,11 @@ impl Pipeline {
             }
         }
 
-        // Shutdown has begun: stop retrying failed output sends. Without this,
-        // a down output keeps every worker in its retry loop, so flushing the
-        // input channel blocks on a full pool and pool drain waits out its
-        // whole timeout. Batches that fail from here on are held for replay.
+        // Shutdown has begun: open the retry window (idempotent if the link
+        // task already did). Without a bound, a down output keeps every worker
+        // in its retry loop, so flushing the input channel blocks on a full
+        // pool and pool drain waits out its whole timeout. Batches that still
+        // fail when the window closes are held for replay.
         self.pool.stop_retrying();
         stop_retrying_link.abort();
 

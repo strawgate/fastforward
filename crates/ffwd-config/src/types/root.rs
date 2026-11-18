@@ -30,6 +30,10 @@ pub struct PipelineConfig {
     pub batch_timeout_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub poll_interval_ms: Option<PositiveMillis>,
+    /// How long output workers keep retrying failed sends after shutdown
+    /// begins, in milliseconds. `0` disables retries during shutdown.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub shutdown_retry_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]

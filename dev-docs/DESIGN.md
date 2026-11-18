@@ -161,22 +161,25 @@ Bit (drops the route, retries via a backlog). If a batch is rejected, the data i
 batch is lost — the correct behavior for a forwarder where corrupted or oversized data
 cannot be retried, but it must be metered.
 
-### Output retries stop when shutdown begins
+### Output retries are bounded once shutdown begins
 
 Output workers retry transient failures forever while running, so a down output turns into
-backpressure, not data loss. Once shutdown begins (`stop_retrying`, fired as soon as the
-pipeline's shutdown token is cancelled), workers stop retrying: queued and in-progress
-batches still get their delivery attempt, but a transient failure resolves as `PoolClosed`
-(held, checkpoint not advanced) instead of backing off. Without this, a down output held
-every shutdown open for the full pool drain timeout (60s), which is longer than the
-Kubernetes default termination grace period.
+backpressure, not data loss. Once shutdown begins (`ShutdownRetryGrace::begin`, called as
+soon as the pipeline's shutdown token is cancelled), workers keep retrying with their normal
+backoff for a bounded window: `shutdown_retry_grace_ms`, default 10s, capped by the pool
+drain timeout. When the window closes, a worker in backoff gives up at once and later
+transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
+advanced). Without a bound, a down output held every shutdown open for the full pool drain
+timeout (60s), which is longer than the Kubernetes default termination grace period (30s).
+A 10s default leaves room inside that period while still riding out a short collector
+restart. `0` gives up on the first failure after shutdown begins.
 
 Trade-off: checkpointed inputs (files) replay held batches on restart. Non-checkpointed
-inputs (TCP, UDP, OTLP receivers) lose a batch that hits a transient error during shutdown.
-They already lost it after the drain timeout, and usually to SIGKILL first. This matches
-Filebeat's default (`shutdown_timeout: 0`, no waiting for acks at shutdown). Vector instead
+inputs (TCP, UDP, OTLP receivers) lose a batch that is still failing when the window closes.
+They already lost it after the drain timeout, and usually to SIGKILL first. This sits between
+Filebeat's default (`shutdown_timeout: 0`, no waiting for acks at shutdown) and Vector, which
 waits up to its graceful shutdown limit (60s). Modeled in `tla/DeliveryRetry.tla`
-(`GracefulSpec`).
+(`BeginShutdown`/`StopRetrying`, checked under `GracefulSpec`).
 
 ### Per-source independent checkpoints
 
