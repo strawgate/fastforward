@@ -420,7 +420,7 @@ Optional dependencies behind non-default features (for example `quick-xml` under
 
 Kani proofs that ran out of memory or time in CI showed up as failures for months, so a real counterexample would have looked the same as a resource failure. When `verify_rebuild_attempts_bounded` (ffwd-runtime `reload.rs`) finally fit the budget, it failed: the harness started from a state the reload coordinator can never reach. Keep every PR-CI harness inside the 6 GB / 15 minute budget (see `dev-docs/VERIFICATION.md`), and treat `scripts/kani_nightly_only.txt` as debt to pay down, not a parking lot.
 
-Once `verify_committed_monotonic` (ffwd-types `lifecycle.rs`) fit the budget, it failed too: it never assumed the batches' checkpoints were nondecreasing, which the pipeline relies on and the TLA+ model assumes.
+Once `verify_committed_monotonic` (ffwd-types `lifecycle.rs`) fit the budget, it failed too: it never assumed the batches' checkpoints were nondecreasing, which the TLA+ model assumes. That precondition is now explicit, and so is the case it misses: a truncated file that keeps its `SourceId` (see "Kani checkpoint proof domain" in `dev-docs/DESIGN.md`).
 
 ### Small Rust idioms can cost CBMC 20x
 

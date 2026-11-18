@@ -396,8 +396,8 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (4 proofs incl. mid-range and overflow boundary, 2 `kani-slow`) |
 | `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (17 proofs, 4 `kani-slow`) |
 | `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (50 proofs incl. contract verifications and compositional stubs, 5 `kani-slow`) |
-| `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs, run against `ArrayMap`) + proptest + **TLA+** |
-| `ffwd-types/pipeline/registry.rs` | Source registry states (Active → Draining → Committed), upsert, generation pruning | Kani (4 proofs, run against `ArrayMap`) + unit tests |
+| `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani bounded (16 proofs, run against `ArrayMap` with capacity 4; `u8` checkpoints, narrowed to ≤ 4 or ≤ 8 in the multi-batch proofs) + proptest + **TLA+** |
+| `ffwd-types/pipeline/registry.rs` | Source registry states (Active → Draining → Committed), upsert, generation pruning | Kani bounded (4 proofs, run against `ArrayMap` with capacity 4) + unit tests |
 | `ffwd-types/pipeline/ord_map.rs` | `OrdMap`: `BTreeMap` normally, fixed-capacity sorted `ArrayMap` under `cfg(kani)` | No Kani proofs of its own; proptest checks every `ArrayMap` operation against `BTreeMap` |
 | `ffwd-runtime/reload.rs` | Reload coordinator state machine (shutdown, rebuild limit, has_pending, drain-only-from-Running) | Kani exhaustive (16 proofs: states and events enumerated, two properties split per starting state) + unit tests |
 | `ffwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |

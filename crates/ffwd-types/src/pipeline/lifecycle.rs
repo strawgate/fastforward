@@ -1070,8 +1070,10 @@ mod verification {
         kani::assume(cp3 <= 8);
         // The machine treats checkpoints as opaque and commits each batch's
         // own value, so it is monotonic only if checkpoints are created in
-        // nondecreasing order, as file offsets are. The TLA+ model assumes
-        // the same: there a batch's checkpoint is its sequence number.
+        // nondecreasing order. The TLA+ model assumes the same: there a
+        // batch's checkpoint is its sequence number. A truncated file that
+        // keeps its SourceId breaks this precondition (see "Kani checkpoint
+        // proof domain" in dev-docs/DESIGN.md), and this proof does not cover it.
         // Without this, Kani finds acks of (cp1=1, cp2=0) "regressing".
         kani::assume(cp1 <= cp2 && cp2 <= cp3);
 

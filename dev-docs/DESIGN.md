@@ -152,9 +152,13 @@ invariants.
 
 `verify_committed_monotonic` also assumes the batches of one source carry
 nondecreasing checkpoints in creation order. The machine commits each batch's
-own checkpoint, so it can only be monotonic if its inputs are. Real inputs
-satisfy this (file offsets only grow), and the TLA+ model has it built in:
-there `committed[s]` is a batch sequence number.
+own checkpoint, so the committed checkpoint is monotonic only when that
+precondition holds. The TLA+ model has it built in: there `committed[s]` is a
+batch sequence number. Real inputs do not always satisfy it. When a tailed file
+is truncated, the reader resets its offset to 0 (`ffwd-io` `tail/lifecycle.rs`),
+and if the rewritten file keeps the same device, inode and leading bytes it
+keeps its `SourceId`, so later batches carry smaller offsets and the committed
+checkpoint goes back with them. The proof does not cover that path.
 
 ### `BTreeMap` replaced by `ArrayMap` under Kani
 
