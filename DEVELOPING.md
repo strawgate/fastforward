@@ -434,3 +434,9 @@ Both use the same `StreamingBuilder` (which implements `ScanBuilder`), sharing t
 In `_bench-pair`, the receiver diagnostics HTTP server (`/ready`) can return `200 OK` before `run_async()` has finished binding the actual TCP/UDP receiver sockets. Starting the sender immediately after the readiness check causes intermittent connection-refused failures in CI.
 
 Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pipeline is registered), then sleep 1 second to let `run_async()` complete socket binding before spawning the sender. Without this grace period, the race window is ~1 ms and triggers roughly 10 % of the time on loaded CI runners. (See PR #1320.)
+
+### `xtask verify` only looks 6 lines above `unsafe {` for `SAFETY:`
+
+The `unsafe_needs_safety_comment` check in `xtask/src/main.rs` scans the `unsafe {` line and the six lines before it for `SAFETY:`. A long rationale comment that puts `SAFETY:` at its top pushes it out of that window, so `cargo run -p xtask -- verify` fails even though the block is documented. This happened in the Prometheus builder (`crates/ffwd-arrow/src/prom.rs`, `StringViewArray::new_unchecked`).
+
+Fix: put the background rationale first and end the comment with the `// SAFETY:` paragraph, so `SAFETY:` sits directly above the block.

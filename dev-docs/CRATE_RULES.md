@@ -29,7 +29,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 
 | Rule | Enforcement |
 |------|-------------|
-| unsafe allowed (SIMD only) | Code review. SIMD impls only. |
+| unsafe allowed for SIMD, plus the trusted-path `Utf8View` exception: `StringViewArray::new_unchecked` over buffers already validated as UTF-8 (`columnar::accumulator`, `columnar::builder`, `prom`), each with a `// SAFETY:` comment | Code review + `xtask verify` (`unsafe_needs_safety_comment`) |
 | Implements core's ScanBuilder + CharDetector traits | Compilation |
 | proptest: SIMD output == scalar output | CI test suite |
 | Deps: core + arrow + bytes | Cargo.toml |
