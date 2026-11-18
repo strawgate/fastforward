@@ -1762,6 +1762,13 @@ mod tests {
     }
 
     proptest! {
+        // No failure persistence: it calls `getcwd`, which Miri's isolation
+        // rejects. Fewer cases under Miri, where each one is ~100x slower.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            cases: if cfg!(miri) { 32 } else { 256 },
+            .. ProptestConfig::default()
+        })]
         #[test]
         fn simd_mask_eq_scalar(block in proptest::collection::vec(any::<u8>(), 64)) {
             let arr: [u8; 64] = block.try_into().expect("should succeed");
