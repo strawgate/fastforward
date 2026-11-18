@@ -31,6 +31,84 @@ use ffwd_core::prom_text::{
 };
 use ffwd_core::scanner::ScanBuilder;
 
+/// Column holding a stable 64-bit identity of each sample's series.
+///
+/// The id hashes the metric name and every non-null label (column name and
+/// value), so it does not depend on label order or on which other columns
+/// the batch happens to contain. Use it to group, join or deduplicate series
+/// without comparing every label column.
+pub const PROM_SERIES_ID_FIELD: &str = "__series_id__";
+
+/// Seed for the series hash. Changing it changes every series id.
+const SERIES_SEED: u64 = 0x6666_7764_7072_6f6d;
+
+/// Return `batch` with a [`PROM_SERIES_ID_FIELD`] `UInt64` column appended.
+///
+/// Label columns are the string columns other than `__name__` and `__type__`
+/// (and any column whose name starts with `__`). Each non-null label
+/// contributes `xxh64(value, seed = xxh64(column name))`; contributions are
+/// summed, which makes the id independent of column order. Rows without a
+/// name hash only their labels.
+pub fn append_series_id(batch: &RecordBatch) -> Result<RecordBatch, ArrowError> {
+    use arrow::array::{Array, AsArray, UInt64Array};
+    use xxhash_rust::xxh64::xxh64;
+
+    let num_rows = batch.num_rows();
+    let mut ids = vec![SERIES_SEED; num_rows];
+    let schema = batch.schema();
+    for (field, col) in schema.fields().iter().zip(batch.columns()) {
+        let name = field.name().as_str();
+        let is_name = name == "__name__";
+        if !is_name && name.starts_with("__") {
+            continue;
+        }
+        let col_seed = xxh64(name.as_bytes(), SERIES_SEED);
+        let mut add = |row: usize, value: &[u8]| {
+            let h = xxh64(value, col_seed);
+            if let Some(id) = ids.get_mut(row) {
+                *id = id.wrapping_add(h.rotate_left(17) ^ h);
+            }
+        };
+        match col.data_type() {
+            DataType::Utf8View => {
+                let a = col.as_string_view();
+                for row in 0..num_rows {
+                    if a.is_valid(row) {
+                        add(row, a.value(row).as_bytes());
+                    }
+                }
+            }
+            DataType::Utf8 => {
+                let a = col.as_string::<i32>();
+                for row in 0..num_rows {
+                    if a.is_valid(row) {
+                        add(row, a.value(row).as_bytes());
+                    }
+                }
+            }
+            DataType::LargeUtf8 => {
+                let a = col.as_string::<i64>();
+                for row in 0..num_rows {
+                    if a.is_valid(row) {
+                        add(row, a.value(row).as_bytes());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut arrays: Vec<ArrayRef> = batch.columns().to_vec();
+    if let Some(pos) = fields.iter().position(|f| f.name() == PROM_SERIES_ID_FIELD) {
+        fields.remove(pos);
+        arrays.remove(pos);
+    }
+    fields.push(Field::new(PROM_SERIES_ID_FIELD, DataType::UInt64, false));
+    arrays.push(Arc::new(UInt64Array::from(ids)));
+    let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
+    RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &opts)
+}
+
 /// Errors from [`PromBatchBuilder::scan`].
 #[derive(Debug)]
 pub enum PromToArrowError {
@@ -484,6 +562,34 @@ mod tests {
             .expect("value")
             .as_primitive::<Float64Type>();
         assert_eq!(values.value(0), 2.0);
+    }
+
+    #[test]
+    fn series_id_ignores_label_order_and_separates_series() {
+        use arrow::datatypes::UInt64Type;
+        let batch = scan(
+            "m{a=\"1\",b=\"2\"} 1\n\
+             m{b=\"2\",a=\"1\"} 2\n\
+             m{a=\"2\",b=\"1\"} 3\n\
+             m{a=\"1\"} 4\n\
+             n{a=\"1\",b=\"2\"} 5\n",
+        );
+        let with_id = append_series_id(&batch).expect("series id");
+        let ids = with_id
+            .column_by_name(PROM_SERIES_ID_FIELD)
+            .expect("id column")
+            .as_primitive::<UInt64Type>();
+        assert_eq!(ids.value(0), ids.value(1));
+        for other in 2..5 {
+            assert_ne!(ids.value(0), ids.value(other), "row {other}");
+        }
+        // Stable across batches with different column sets.
+        let alone = append_series_id(&scan("m{b=\"2\",a=\"1\"} 9\n")).expect("series id");
+        let alone_ids = alone
+            .column_by_name(PROM_SERIES_ID_FIELD)
+            .expect("id column")
+            .as_primitive::<UInt64Type>();
+        assert_eq!(alone_ids.value(0), ids.value(0));
     }
 
     #[test]
