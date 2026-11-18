@@ -216,8 +216,10 @@ CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
   `.cargo/config.toml`, `.github/workflows/ci.yml`, the Kani plan/shard
   scripts, and the Kani boundary contract and its checker) run every shard.
   Other changes (docs, book, TLA+) run none.
-- **Pushes** and PRs labeled **`ci:full`** run every shard. Draft PRs run no
-  Kani shards; mark the PR ready for review first.
+- **Pushes** and PRs labeled **`ci:full`** run every shard, including drafts
+  that already carry the label when the workflow runs (adding the label alone
+  does not start a run). Drafts without the label run no Kani shards; mark the
+  PR ready for review first.
 - Each shard runs `scripts/kani_shard.py`, which lists the crate's harnesses
   with `cargo kani list`, takes every Nth one, and verifies them with
   `--jobs 2` (more CBMC processes run the 16 GB runners out of memory). Shard

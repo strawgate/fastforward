@@ -247,6 +247,8 @@ mod verification {
         let expected = ffwd_kani::numeric::parse_int_oracle(input);
 
         assert!(result == expected, "parse_int_fast disagrees with oracle");
+        kani::cover!(result.is_some(), "accepted integer");
+        kani::cover!(result.is_none() && len > 0, "rejected non-empty input");
     }
 
     /// Targeted proof for i64 overflow boundary in parse_int_fast.

@@ -49,6 +49,7 @@ GLOBAL_INPUTS = {
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
+    ".cargo/config",
     ".cargo/config.toml",
     ".github/workflows/ci.yml",
     "scripts/kani_plan.py",

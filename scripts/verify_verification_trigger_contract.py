@@ -218,9 +218,14 @@ def extract_kani_plan_crates(source: str | None = None) -> set[str]:
     if source is None:
         source = (ROOT / "scripts" / "kani_plan.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        target = getattr(node, "target", None)
-        if isinstance(target, ast.Name) and target.id == "SHARDS" and node.value is not None:
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "SHARDS" for t in targets) and node.value is not None:
             shards = ast.literal_eval(node.value)
             return {crate for crate, count in shards.items() if isinstance(count, int) and count > 0}
     raise ValueError("scripts/kani_plan.py missing SHARDS table")
@@ -368,8 +373,40 @@ def pattern_base_exists(pattern: str) -> bool:
     return (ROOT / base).exists()
 
 
-def validate() -> list[str]:
+def load_kani_plan():
+    """Import scripts/kani_plan.py, which plans the CI Kani shards."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("kani_plan", ROOT / "scripts" / "kani_plan.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load scripts/kani_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Paths whose change alone must run every Kani shard, and one that must run none.
+KANI_PLAN_ALL_SHARD_PATHS = (
+    "dev-docs/verification/kani-boundary-contract.toml",
+    "scripts/verify_kani_boundary_contract.py",
+)
+KANI_PLAN_NO_SHARD_PATH = "README.md"
+
+
+def validate_kani_plan() -> list[str]:
     errors: list[str] = []
+    kani_plan = load_kani_plan()
+    every_crate = {crate for crate, count in kani_plan.SHARDS.items() if count > 0}
+    for path in KANI_PLAN_ALL_SHARD_PATHS:
+        if kani_plan.affected_kani_crates([path]) != every_crate:
+            errors.append(f"kani_plan.py does not run every shard for: {path}")
+    if kani_plan.affected_kani_crates([KANI_PLAN_NO_SHARD_PATH]):
+        errors.append(f"kani_plan.py runs shards for unrelated path: {KANI_PLAN_NO_SHARD_PATH}")
+    return errors
+
+
+def validate() -> list[str]:
+    errors: list[str] = validate_kani_plan()
     ci_text = CI_WORKFLOW.read_text(encoding="utf-8")
     just_text = JUSTFILE.read_text(encoding="utf-8")
 
@@ -612,13 +649,11 @@ jobs:
         source = 'SHARDS: dict[str, int] = {"ffwd-core": 0, "ffwd-arrow": 2}\n'
         self.assertEqual(extract_kani_plan_crates(source), {"ffwd-arrow"})
 
-    def test_kani_plan_selects_crates_from_changed_paths(self) -> None:
-        import importlib.util
+    def test_extract_kani_plan_crates_plain_assignment(self) -> None:
+        self.assertEqual(extract_kani_plan_crates('SHARDS = {"ffwd-core": 1}\n'), {"ffwd-core"})
 
-        spec = importlib.util.spec_from_file_location("kani_plan", ROOT / "scripts" / "kani_plan.py")
-        assert spec and spec.loader
-        kani_plan = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(kani_plan)
+    def test_kani_plan_selects_crates_from_changed_paths(self) -> None:
+        kani_plan = load_kani_plan()
         plan = kani_plan.affected_kani_crates
         self.assertEqual(plan(["README.md"]), set())
         self.assertEqual(
