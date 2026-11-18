@@ -438,3 +438,7 @@ Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pi
 ### String-vs-number SQL comparisons are strict
 
 Since DataFusion 55, `WHERE status >= 400` on a Utf8 column strictly casts the column to Int64. One non-numeric value (`'N/A'`) fails the query and the pipeline drops the whole batch. This is intentional for now (we follow upstream); users write `int(status) >= 400` for fields that may hold text. A lenient analyzer rule (TRY_CAST for comparisons, BETWEEN, IN) was prototyped in PR #2921 and removed; see DESIGN.md. Synthetic probe batches (e.g. `ff validate`) must use null values, not placeholder strings, so they don't trip value errors like this cast or division by zero.
+
+### opentelemetry-otlp's HTTP exporter needs an explicit TLS feature
+
+opentelemetry-otlp 0.33 moved to reqwest 0.13, which ships no TLS backend by default. Without the `reqwest-rustls` feature on `opentelemetry-otlp`, self-telemetry exports to `https://` endpoints fail to connect (plain `http://` keeps working, so it's easy to miss). The workspace enables `reqwest-rustls`, and `otlp_http_exporter_speaks_tls_to_https_endpoints` in `ffwd-runtime/src/bootstrap.rs` checks that a ClientHello goes out. Re-check this whenever opentelemetry-otlp or reqwest is bumped.
