@@ -28,13 +28,15 @@ pub mod udf {
 }
 
 /// Unified error type for transform operations.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum TransformError {
     #[error("transform error: {0}")]
     Message(String),
+    /// Error from the DataFusion SQL engine. The original error is kept as the
+    /// source so callers can walk the full error chain.
     #[cfg(feature = "datafusion")]
     #[error("datafusion error: {0}")]
-    DataFusion(String),
+    DataFusion(#[from] ffwd_transform::TransformError),
 }
 
 impl TransformError {
@@ -48,7 +50,7 @@ impl TransformError {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn from_df_error(e: ffwd_transform::TransformError) -> Self {
-        TransformError::DataFusion(e.to_string())
+        TransformError::DataFusion(e)
     }
 }
 
@@ -291,6 +293,19 @@ mod tests {
     fn transform_error_display_formats_correctly() {
         let err = TransformError::Message("test error".to_string());
         assert!(err.to_string().contains("test error"));
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn datafusion_error_keeps_source_error() {
+        use std::error::Error as _;
+
+        let err = TransformError::from_df_error(ffwd_transform::TransformError::Sql(
+            "bad column".to_string(),
+        ));
+        assert_eq!(err.to_string(), "datafusion error: SQL error: bad column");
+        let source = err.source().expect("DataFusion variant exposes its source");
+        assert_eq!(source.to_string(), "SQL error: bad column");
     }
 
     #[tokio::test]
