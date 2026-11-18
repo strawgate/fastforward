@@ -727,6 +727,11 @@ jobs:
         with:
           tla-file: tla/MCDeliveryRetry.tla
           config: tla/DeliveryRetry.liveness.cfg
+      - name: "TLC: DeliveryRetry — graceful shutdown liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCDeliveryRetry.tla
+          config: tla/DeliveryRetry.graceful.cfg
       - name: "TLC: WorkerPoolDispatch — safety"
         uses: ./.github/actions/run-tlc
         with:
