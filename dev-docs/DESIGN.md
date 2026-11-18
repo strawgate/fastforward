@@ -200,18 +200,18 @@ provides bare-name access for suffixed columns.
 
 **Research:** `dev-docs/research/type-suffix-redesign.md`. **Related:** #445.
 
-### Lenient string-vs-number SQL comparisons
+### Strict string-vs-number SQL comparisons (follow DataFusion)
 
-`WHERE status >= 400` on a Utf8 column wraps the string side in `TRY_CAST` (analyzer rule
-in `ffwd-transform/src/lenient_comparison.rs`, run before DataFusion's `TypeCoercion`).
-Numeric strings compare numerically; non-numeric values become NULL and don't match.
+`WHERE status >= 400` on a Utf8 column uses DataFusion's coercion: the column is cast
+to the numeric type with a strict `CAST`, so numeric strings compare numerically and a
+non-numeric value fails the transform (the batch is dropped).
 
-**Why:** DataFusion 55 casts strictly, so one `"N/A"` fails the query and the runtime drops
-the whole batch. Log fields routinely mix numbers and placeholders.  
-**Rejected:** accepting the strict cast (batch loss on one bad value); restoring
-DataFusion 53's string comparison (silently wrong: `'50' >= 400` is true).  
-**Scope:** comparisons, `BETWEEN`, `IN`. Explicit `CAST` stays strict; `int()`/`float()`
-remain the explicit lenient casts.
+**Why:** match upstream semantics; leniency can be added later without breaking anyone.
+Users opt in per expression with `int()` / `float()`, which return NULL on bad input.  
+**Considered:** an analyzer rule that rewrites the implicit cast to `TRY_CAST` for
+comparisons, `BETWEEN` and `IN` (prototyped in PR #2921). Deferred; revisit if
+dropped batches from mixed-type fields show up in practice.  
+**Rejected:** restoring DataFusion 53's string comparison (`'50' >= 400` is true).
 
 ### Flat schema (not OTAP star schema)
 

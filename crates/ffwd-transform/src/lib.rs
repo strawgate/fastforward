@@ -8,7 +8,6 @@ pub mod error;
 pub mod udf;
 
 mod cast_udf;
-mod lenient_comparison;
 mod query_analyzer;
 mod sql_transform;
 
