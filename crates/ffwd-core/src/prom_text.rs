@@ -162,7 +162,8 @@ pub struct PromScanConfig {
     /// Parse timestamps as OpenMetrics float seconds instead of Prometheus
     /// text integer milliseconds. Set this when the scrape response is
     /// `application/openmetrics-text`. Either way [`PROM_TIMESTAMP_FIELD`]
-    /// holds milliseconds.
+    /// holds milliseconds. Only OpenMetrics treats `# EOF` as the end of the
+    /// exposition; in Prometheus text it is an ordinary comment.
     pub openmetrics: bool,
 }
 
@@ -715,8 +716,8 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
     }
 
     /// Handle a `#` line starting at `pos`. Returns the position after the
-    /// line, or `None` when `# EOF` ends the exposition. Comments other than
-    /// `# TYPE` and `# EOF` are ignored.
+    /// line, or `None` when `# EOF` ends an OpenMetrics exposition. Other
+    /// comments, and `# EOF` in Prometheus text, are ignored.
     fn comment(&mut self, pos: usize) -> Result<Option<usize>, PromParseError> {
         let end = crate::byte_search::find_byte(self.buf, b'\n', pos).unwrap_or(self.buf.len());
         let line = &self.buf[pos..end];
@@ -738,9 +739,10 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                 let after_kw = keyword.map_or(end, |(_, e)| e);
                 self.family = Some(self.parse_type_line(after_kw, end)?);
             }
-            // Only a bare `# EOF` ends the exposition; `# EOF pending` is
-            // an ordinary comment.
-            Some(b"EOF") if toks.next().is_none() => return Ok(None),
+            // Only a bare `# EOF` in OpenMetrics ends the exposition;
+            // `# EOF pending`, or any `# EOF` in Prometheus text, is an
+            // ordinary comment.
+            Some(b"EOF") if self.openmetrics && toks.next().is_none() => return Ok(None),
             _ => {}
         }
         Ok(Some(end + 1))
@@ -1163,14 +1165,24 @@ mod tests {
     }
 
     fn scan(input: &str) -> Result<Vec<Vec<(String, String)>>, PromParseError> {
+        scan_rows(input, &PromScanConfig::default())
+    }
+
+    fn scan_om(input: &str) -> Result<Vec<Vec<(String, String)>>, PromParseError> {
+        let config = PromScanConfig {
+            openmetrics: true,
+            ..PromScanConfig::default()
+        };
+        scan_rows(input, &config)
+    }
+
+    fn scan_rows(
+        input: &str,
+        config: &PromScanConfig,
+    ) -> Result<Vec<Vec<(String, String)>>, PromParseError> {
         let mut rec = Rec::default();
         let mut scratch = PromScratch::new();
-        scan_prom_text(
-            input.as_bytes(),
-            &PromScanConfig::default(),
-            &mut scratch,
-            &mut rec,
-        )?;
+        scan_prom_text(input.as_bytes(), config, &mut scratch, &mut rec)?;
         Ok(rec.rows)
     }
 
@@ -1295,7 +1307,7 @@ mod tests {
 
     #[test]
     fn openmetrics_eof_and_exemplar() {
-        let rows = scan(
+        let rows = scan_om(
             "foo_bucket{le=\"1\"} 3 # {trace_id=\"abc\"} 0.5 123\nbar 1\n# EOF\nignored garbage {\n",
         )
         .expect("should succeed");
@@ -1430,10 +1442,16 @@ mod tests {
 
     #[test]
     fn eof_with_trailing_tokens_is_an_ordinary_comment() {
-        let rows = scan("up 1\n# EOF pending\nother 2\n").expect("should parse");
+        let rows = scan_om("up 1\n# EOF pending\nother 2\n").expect("should parse");
         assert_eq!(rows.len(), 2);
-        let rows = scan("up 1\n#  EOF  \nother 2\n").expect("should parse");
+        let rows = scan_om("up 1\n#  EOF  \nother 2\n").expect("should parse");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn eof_is_an_ordinary_comment_in_prometheus_text() {
+        let rows = scan("a 1\n# EOF\nb 2\n").expect("should parse");
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

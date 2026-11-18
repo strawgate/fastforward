@@ -246,6 +246,7 @@ impl Columns<'_> {
 /// without a `__timestamp_ms__` value.
 pub(crate) fn encode_metrics_batch(
     batch: &RecordBatch,
+    resource_attrs: &[(String, String)],
     default_time_ns: u64,
     out: &mut Vec<u8>,
 ) -> Result<usize, String> {
@@ -294,7 +295,15 @@ pub(crate) fn encode_metrics_batch(
             fam.groups.retain_mut(|g| finalize_group(g, kind));
         }
         let start = begin(out);
-        encode_resource_metrics(res, &cols, default_time_ns, &mut scratch, out, &mut points);
+        encode_resource_metrics(
+            res,
+            &cols,
+            resource_attrs,
+            default_time_ns,
+            &mut scratch,
+            out,
+            &mut points,
+        );
         end(out, REQUEST_RESOURCE_METRICS, start);
     }
     Ok(points)
@@ -593,12 +602,22 @@ fn time_ns(time_ms: Option<i64>, default_ns: u64) -> u64 {
 fn encode_resource_metrics(
     res: &Resource<'_>,
     cols: &Columns<'_>,
+    resource_attrs: &[(String, String)],
     default_ns: u64,
     scratch: &mut Scratch,
     out: &mut Vec<u8>,
     points: &mut usize,
 ) {
     let start = begin(out);
+    // Configured resource attributes first. The scraped target's identity
+    // (`job`, `instance`) wins over a configured key of the same name.
+    for (k, v) in resource_attrs {
+        let is_overridden = (k == "service.name" && res.job.is_some())
+            || (k == "service.instance.id" && res.instance.is_some());
+        if !is_overridden {
+            encode_kv(out, RESOURCE_ATTRIBUTES, k, v);
+        }
+    }
     if let Some(job) = res.job {
         encode_kv(out, RESOURCE_ATTRIBUTES, "service.name", job);
     }
@@ -850,7 +869,7 @@ mod tests {
 
     fn decode(b: &RecordBatch) -> ExportMetricsServiceRequest {
         let mut out = Vec::new();
-        encode_metrics_batch(b, 99, &mut out).expect("encode");
+        encode_metrics_batch(b, &[], 99, &mut out).expect("encode");
         ExportMetricsServiceRequest::decode(out.as_slice()).expect("valid protobuf")
     }
 
@@ -905,6 +924,33 @@ mod tests {
         )
         .expect("batch");
         assert!(!is_metric_batch(&logs));
+    }
+
+    #[test]
+    fn configured_resource_attributes_are_added_and_target_identity_wins() {
+        let b = batch(&[(
+            "up",
+            1.0,
+            None,
+            Some("gauge"),
+            &[("job", "node"), ("instance", "h:1")],
+        )]);
+        let attrs = [
+            ("deployment.environment".to_string(), "prod".to_string()),
+            ("service.name".to_string(), "configured".to_string()),
+        ];
+        let mut out = Vec::new();
+        encode_metrics_batch(&b, &attrs, 0, &mut out).expect("encode");
+        let req = ExportMetricsServiceRequest::decode(out.as_slice()).expect("valid protobuf");
+        let res = req.resource_metrics[0].resource.as_ref().expect("resource");
+        assert_eq!(attr(&res.attributes, "deployment.environment"), "prod");
+        assert_eq!(attr(&res.attributes, "service.name"), "node");
+        let names = res
+            .attributes
+            .iter()
+            .filter(|kv| kv.key == "service.name")
+            .count();
+        assert_eq!(names, 1, "service.name appears once");
     }
 
     #[test]
@@ -1260,7 +1306,7 @@ mod tests {
         )
         .expect("batch");
         let mut out = Vec::new();
-        let err = encode_metrics_batch(&b, 0, &mut out).expect_err("string value");
+        let err = encode_metrics_batch(&b, &[], 0, &mut out).expect_err("string value");
         assert!(err.contains("numeric __value__"), "{err}");
     }
 

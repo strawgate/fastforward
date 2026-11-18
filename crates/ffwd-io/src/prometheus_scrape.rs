@@ -133,6 +133,8 @@ impl PrometheusScrapeInput {
         }
         let mut targets = Vec::with_capacity(settings.targets.len());
         for (i, url) in settings.targets.iter().enumerate() {
+            // Trimmed the same way config validation trims it.
+            let url = url.trim();
             // Errors name the target by index: the URL may carry credentials.
             let parsed = reqwest::Url::parse(url).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("targets[{i}]: {e}"))
@@ -269,16 +271,17 @@ struct Target {
     instance: String,
 }
 
-/// A target URL safe to log: scheme, host, port and path only. User info,
-/// query string and fragment are dropped since they can carry secrets.
-/// Unparseable input is replaced by a placeholder.
+/// A target URL safe to log: scheme, host and port only. User info, path,
+/// query string and fragment are dropped since any of them can carry
+/// secrets (some exporters take a token in the path).
+/// Unparsable input is replaced by a placeholder.
 pub fn redact_url(url: &str) -> String {
-    match reqwest::Url::parse(url) {
+    match reqwest::Url::parse(url.trim()) {
         Ok(u) => {
             let host = u.host_str().unwrap_or("");
             match u.port() {
-                Some(port) => format!("{}://{host}:{port}{}", u.scheme(), u.path()),
-                None => format!("{}://{host}{}", u.scheme(), u.path()),
+                Some(port) => format!("{}://{host}:{port}", u.scheme()),
+                None => format!("{}://{host}", u.scheme()),
             }
         }
         Err(_) => "<invalid url>".to_string(),
@@ -539,8 +542,10 @@ fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
 ///
 /// - Exposition labels named `job` / `instance` are renamed to
 ///   `exported_job` / `exported_instance` (Prometheus `honor_labels: false`).
-///   If that name is taken too, `exported_` is prepended again until it is
-///   free, as Prometheus does.
+///   If a sample already has that label, `exported_` is prepended again
+///   until the name is free for that sample, as Prometheus does. This is
+///   decided per sample, so rows without `exported_job` still use
+///   `exported_job`.
 /// - `job` and `instance` columns are appended for every row.
 /// - Samples without a timestamp get the scrape time; with
 ///   `honor_timestamps = false`, every sample does.
@@ -556,17 +561,24 @@ pub fn finish_batch(
     let mut fields: Vec<FieldRef> = Vec::with_capacity(schema.fields().len() + 2);
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len() + 2);
     let mut has_ts = false;
-    for (field, col) in schema.fields().iter().zip(batch.columns()) {
+    let mut replaced: Vec<(usize, ArrayRef)> = Vec::new();
+    let mut appended: Vec<(FieldRef, ArrayRef)> = Vec::new();
+    for label in ["job", "instance"] {
+        if let Some(plan) = plan_export(batch, label)? {
+            replaced.extend(plan.replaced);
+            appended.extend(plan.appended);
+        }
+    }
+    for (i, (field, col)) in schema.fields().iter().zip(batch.columns()).enumerate() {
         let name = field.name().as_str();
+        if let Some((_, merged)) = replaced.iter().find(|(idx, _)| *idx == i) {
+            fields.push(Arc::new(Field::new(name, DataType::Utf8View, true)));
+            arrays.push(Arc::clone(merged));
+            continue;
+        }
         match name {
-            "job" | "instance" => {
-                let mut renamed = format!("exported_{name}");
-                while schema.field_with_name(&renamed).is_ok() {
-                    renamed.insert_str(0, "exported_");
-                }
-                fields.push(Arc::new(field.as_ref().clone().with_name(renamed)));
-                arrays.push(Arc::clone(col));
-            }
+            // Moved to an `exported_` column by `plan_export`.
+            "job" | "instance" => {}
             _ if name.as_bytes() == PROM_TIMESTAMP_FIELD => {
                 has_ts = true;
                 let ts = col.as_primitive::<Int64Type>();
@@ -596,6 +608,10 @@ pub fn finish_batch(
         )));
         arrays.push(Arc::new(Int64Array::from_value(scrape_ms, num_rows)));
     }
+    for (field, array) in appended {
+        fields.push(field);
+        arrays.push(array);
+    }
     for (label, value) in [("job", job), ("instance", instance)] {
         fields.push(Arc::new(Field::new(label, DataType::Utf8View, false)));
         arrays.push(constant_string(value, num_rows)?);
@@ -603,6 +619,92 @@ pub fn finish_batch(
     let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
     let schema = Schema::new_with_metadata(fields, schema.metadata().clone());
     RecordBatch::try_new_with_options(Arc::new(schema), arrays, &opts)
+}
+
+/// Where the exposition's own `job` / `instance` values go.
+struct ExportPlan {
+    /// Existing `exported_*` columns (by index) with values merged in.
+    replaced: Vec<(usize, ArrayRef)>,
+    /// A new `exported_*` column, when some sample needs one.
+    appended: Option<(FieldRef, ArrayRef)>,
+}
+
+/// Plan the per-sample rename of the exposition label `label`.
+///
+/// Each sample's value goes to the first of `exported_<label>`,
+/// `exported_exported_<label>`, ... that the sample does not already have.
+/// Returns `None` when the exposition has no `label` column.
+fn plan_export(
+    batch: &RecordBatch,
+    label: &str,
+) -> Result<Option<ExportPlan>, arrow::error::ArrowError> {
+    let schema = batch.schema();
+    let Ok(src_idx) = schema.index_of(label) else {
+        return Ok(None);
+    };
+    // Existing chain: exported_<label>, exported_exported_<label>, ...
+    let mut chain: Vec<usize> = Vec::new();
+    let mut name = format!("exported_{label}");
+    while let Ok(idx) = schema.index_of(&name) {
+        chain.push(idx);
+        name.insert_str(0, "exported_");
+    }
+    let src_field = schema.field(src_idx);
+    if chain.is_empty() {
+        // Common case: a plain rename.
+        let field = Arc::new(src_field.clone().with_name(name));
+        return Ok(Some(ExportPlan {
+            replaced: Vec::new(),
+            appended: Some((field, Arc::clone(batch.column(src_idx)))),
+        }));
+    }
+    let as_view = |idx: usize| arrow::compute::cast(batch.column(idx), &DataType::Utf8View);
+    let src = as_view(src_idx)?;
+    let src = src.as_string_view();
+    let chain_cols = chain
+        .iter()
+        .map(|&idx| as_view(idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let chain_cols: Vec<&StringViewArray> =
+        chain_cols.iter().map(AsArray::as_string_view).collect();
+    // Slot each row's value lands in: 0..chain.len() is an existing column,
+    // chain.len() is the new one.
+    let slots: Vec<Option<usize>> = (0..batch.num_rows())
+        .map(|row| {
+            src.is_valid(row).then(|| {
+                chain_cols
+                    .iter()
+                    .position(|c| c.is_null(row))
+                    .unwrap_or(chain_cols.len())
+            })
+        })
+        .collect();
+    let merge = |slot: usize, existing: Option<&StringViewArray>| -> ArrayRef {
+        let merged: StringViewArray = slots
+            .iter()
+            .enumerate()
+            .map(|(row, s)| {
+                if *s == Some(slot) {
+                    Some(src.value(row))
+                } else {
+                    existing.and_then(|c| c.is_valid(row).then(|| c.value(row)))
+                }
+            })
+            .collect();
+        Arc::new(merged)
+    };
+    let replaced = chain
+        .iter()
+        .zip(&chain_cols)
+        .enumerate()
+        .filter(|(slot, _)| slots.contains(&Some(*slot)))
+        .map(|(slot, (&idx, col))| (idx, merge(slot, Some(col))))
+        .collect();
+    let appended = slots.contains(&Some(chain.len())).then(|| {
+        let field = Arc::new(Field::new(name, DataType::Utf8View, true));
+        (field, merge(chain.len(), None))
+    });
+    Ok(Some(ExportPlan { replaced, appended }))
 }
 
 /// A `Utf8View` column repeating `value`; all rows share one data buffer.
@@ -786,6 +888,18 @@ mod tests {
     }
 
     #[test]
+    fn targets_are_trimmed_like_config_validation() {
+        let url = serve_typed(b"up 1\n".to_vec(), "text/plain; version=0.0.4", "");
+        let padded = format!("\u{a0} {url}\u{a0}");
+        let mut settings = PrometheusScrapeSettings::new(vec![padded], "test".into());
+        settings.interval = Duration::from_millis(50);
+        let mut input =
+            PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
+                .expect("padded target should be accepted");
+        assert_eq!(poll_until_batch(&mut input).num_rows(), 1);
+    }
+
+    #[test]
     fn malformed_scrape_degrades_health_and_counts_error() {
         let url = serve(b"broken{\n".to_vec(), "");
         let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
@@ -890,9 +1004,10 @@ mod tests {
     fn urls_are_redacted_for_logs() {
         assert_eq!(
             redact_url("https://user:pw@h:9100/metrics?token=x#f"),
-            "https://h:9100/metrics"
+            "https://h:9100"
         );
-        assert_eq!(redact_url("http://h/metrics"), "http://h/metrics");
+        assert_eq!(redact_url("http://h/metrics/s3cr3t"), "http://h");
+        assert_eq!(redact_url("  http://h/metrics "), "http://h");
         assert_eq!(redact_url("not a url"), "<invalid url>");
     }
 
@@ -924,5 +1039,22 @@ mod tests {
         assert_eq!(col("job"), "node");
         assert_eq!(col("exported_job"), "y");
         assert_eq!(col("exported_exported_job"), "x");
+    }
+
+    #[test]
+    fn exported_label_names_are_chosen_per_sample() {
+        let batch = scan("a{job=\"x\"} 1\nb{job=\"x\",exported_job=\"y\"} 2\nc 3\n");
+        let out = finish_batch(&batch, "node", "h:1", 0, true).expect("finish");
+        let col = |n: &str| -> Vec<Option<String>> {
+            let c = out.column_by_name(n).unwrap_or_else(|| panic!("{n}"));
+            let c = c.as_string_view();
+            (0..c.len())
+                .map(|i| c.is_valid(i).then(|| c.value(i).to_string()))
+                .collect()
+        };
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(col("exported_job"), vec![s("x"), s("y"), None]);
+        assert_eq!(col("exported_exported_job"), vec![None, s("x"), None]);
+        assert_eq!(col("job"), vec![s("node"), s("node"), s("node")]);
     }
 }

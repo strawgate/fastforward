@@ -274,6 +274,7 @@ impl super::super::sink::Sink for OtlpSink {
             if as_metrics {
                 if let Err(e) = super::metrics::encode_metrics_batch(
                     batch,
+                    &metadata.resource_attrs,
                     metadata.observed_time_ns,
                     &mut self.encoder_buf,
                 ) {

@@ -607,6 +607,7 @@ fn validate_pipeline_read_only(
                 | InputTypeConfig::WindowsEbpfSensor(_)
                 | InputTypeConfig::HostMetrics(_)
                 | InputTypeConfig::ArrowIpc(_)
+                | InputTypeConfig::PrometheusScrape(_)
         ) {
             if input_cfg.format.is_some() {
                 return Err(format!(
