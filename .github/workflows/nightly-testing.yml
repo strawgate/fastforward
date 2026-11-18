@@ -259,7 +259,8 @@ jobs:
             echo "Reproduce locally:"
             echo
             echo '```sh'
-            sort -u "$repro_file" | head -n 20
+            # sed (not head) consumes all input, avoiding SIGPIPE under pipefail.
+            sort -u "$repro_file" | sed -n '1,20p'
             echo '```'
             echo
             echo "Full logs: artifacts \`turmoil-sweep-shard-*-${{ github.run_id }}\` on the run page."
