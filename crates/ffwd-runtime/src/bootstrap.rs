@@ -930,39 +930,63 @@ fn output_label(o: &ffwd_config::OutputConfigV2) -> String {
     }
 }
 
+/// Line and batch totals summed across pipelines for the shutdown summary.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ShutdownTotals {
+    lines_in: u64,
+    /// Lines that left the transform and were handed to the outputs.
+    lines_processed: u64,
+    /// Lines an output confirmed it delivered.
+    lines_delivered: u64,
+    bytes_in: u64,
+    batches: u64,
+    transform_errors: u64,
+    dropped_batches: u64,
+}
+
+/// Lines a pipeline delivered, from its output-sink stats.
+///
+/// Sinks count lines only after the destination accepts them, so this
+/// excludes batches that were retried, held for replay, or abandoned at
+/// shutdown. With several outputs, the best-delivering output is used, which
+/// matches `lines_out` on the diagnostics status endpoint.
+fn pipeline_delivered_lines(metrics: &ffwd_diagnostics::diagnostics::PipelineMetrics) -> u64 {
+    metrics
+        .outputs
+        .iter()
+        .map(|(_, _, stats)| stats.lines())
+        .max()
+        .unwrap_or(0)
+}
+
+fn collect_shutdown_totals(
+    metrics: &[Arc<ffwd_diagnostics::diagnostics::PipelineMetrics>],
+) -> ShutdownTotals {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let mut totals = ShutdownTotals::default();
+    for m in metrics {
+        totals.lines_in += m.transform_in.lines();
+        totals.lines_processed += m.transform_out.lines();
+        totals.lines_delivered += pipeline_delivered_lines(m);
+        totals.bytes_in += m
+            .inputs
+            .iter()
+            .map(|(_, _, stats)| stats.bytes_total.load(Relaxed))
+            .sum::<u64>();
+        totals.batches += m.batches_total.load(Relaxed);
+        totals.transform_errors += m.transform_errors.load(Relaxed);
+        totals.dropped_batches += m.dropped_batches_total.load(Relaxed);
+    }
+    totals
+}
+
 fn print_shutdown_stats(
     metrics: &[Arc<ffwd_diagnostics::diagnostics::PipelineMetrics>],
     uptime: Duration,
     use_color: bool,
 ) {
-    use std::sync::atomic::Ordering::Relaxed;
-
-    let total_lines_in: u64 = metrics
-        .iter()
-        .map(|m| m.transform_in.lines_total.load(Relaxed))
-        .sum();
-    let total_lines_out: u64 = metrics
-        .iter()
-        .map(|m| m.transform_out.lines_total.load(Relaxed))
-        .sum();
-    let total_bytes_in: u64 = metrics
-        .iter()
-        .map(|m| {
-            m.inputs
-                .iter()
-                .map(|(_, _, stats)| stats.bytes_total.load(Relaxed))
-                .sum::<u64>()
-        })
-        .sum();
-    let total_batches: u64 = metrics.iter().map(|m| m.batches_total.load(Relaxed)).sum();
-    let total_errors: u64 = metrics
-        .iter()
-        .map(|m| m.transform_errors.load(Relaxed))
-        .sum();
-    let total_dropped: u64 = metrics
-        .iter()
-        .map(|m| m.dropped_batches_total.load(Relaxed))
-        .sum();
+    let totals = collect_shutdown_totals(metrics);
 
     eprintln!();
     eprintln!(
@@ -972,23 +996,34 @@ fn print_shutdown_stats(
         format_duration(uptime),
     );
 
-    if total_lines_in > 0 || total_batches > 0 {
+    if totals.lines_in > 0 || totals.batches > 0 {
         eprintln!(
-            "  lines  {} in → {} out  ({} batches)",
-            format_count(total_lines_in),
-            format_count(total_lines_out),
-            format_count(total_batches),
+            "  lines  {} in → {} delivered  ({} batches)",
+            format_count(totals.lines_in),
+            format_count(totals.lines_delivered),
+            format_count(totals.batches),
         );
-        if total_bytes_in > 0 {
-            eprintln!("  bytes  {} in", format_bytes(total_bytes_in));
+        if totals.bytes_in > 0 {
+            eprintln!("  bytes  {} in", format_bytes(totals.bytes_in));
         }
-        if total_errors > 0 || total_dropped > 0 {
+        let undelivered = totals
+            .lines_processed
+            .saturating_sub(totals.lines_delivered);
+        if undelivered > 0 {
+            eprintln!(
+                "  {}undelivered{} {} lines were not accepted by an output",
+                yellow(use_color),
+                reset(use_color),
+                format_count(undelivered),
+            );
+        }
+        if totals.transform_errors > 0 || totals.dropped_batches > 0 {
             eprintln!(
                 "  {}errors{} {} transform, {} dropped batches",
                 yellow(use_color),
                 reset(use_color),
-                total_errors,
-                total_dropped,
+                totals.transform_errors,
+                totals.dropped_batches,
             );
         }
     }
@@ -1183,7 +1218,49 @@ fn style(use_color: bool, color: &'static str, bold: &'static str) -> &'static s
 
 #[cfg(test)]
 mod tests {
-    use super::redact_url;
+    use std::sync::Arc;
+
+    use super::{ShutdownTotals, collect_shutdown_totals, redact_url};
+    use ffwd_diagnostics::diagnostics::PipelineMetrics;
+
+    #[test]
+    fn shutdown_totals_count_delivered_lines_not_processed_lines() {
+        let meter = opentelemetry::global::meter("test");
+        let mut pm = PipelineMetrics::new("main", "SELECT * FROM logs", &meter);
+        let output = pm.add_output("otlp", "otlp");
+        pm.transform_in.inc_lines(20_000);
+        // 12.5K lines left the transform but the output only accepted 5.6K.
+        pm.transform_out.inc_lines(12_500);
+        output.inc_lines(5_600);
+
+        let totals = collect_shutdown_totals(&[Arc::new(pm)]);
+
+        assert_eq!(totals.lines_in, 20_000);
+        assert_eq!(totals.lines_processed, 12_500);
+        assert_eq!(totals.lines_delivered, 5_600);
+    }
+
+    #[test]
+    fn shutdown_totals_use_best_output_per_pipeline_and_sum_pipelines() {
+        let meter = opentelemetry::global::meter("test");
+        let mut fan_out = PipelineMetrics::new("fan_out", "", &meter);
+        let primary = fan_out.add_output("primary", "otlp");
+        let backup = fan_out.add_output("backup", "file");
+        primary.inc_lines(100);
+        backup.inc_lines(40);
+        let mut single = PipelineMetrics::new("single", "", &meter);
+        single.add_output("out", "stdout").inc_lines(7);
+
+        let totals = collect_shutdown_totals(&[Arc::new(fan_out), Arc::new(single)]);
+
+        assert_eq!(
+            totals,
+            ShutdownTotals {
+                lines_delivered: 107,
+                ..ShutdownTotals::default()
+            }
+        );
+    }
 
     #[test]
     fn redact_url_handles_urls_without_scheme() {
