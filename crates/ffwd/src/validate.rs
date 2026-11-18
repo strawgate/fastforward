@@ -207,6 +207,15 @@ fn validate_transform_probe_read_only(
                 .iter()
                 .map(|(name, ty)| Field::new(*name, ty.clone(), true)),
         );
+        // `SELECT *` still names columns elsewhere (`WHERE __name__ = 'up'`);
+        // the probe needs them too or planning fails on a valid query.
+        let mut referenced: Vec<&String> = transform.analyzer().referenced_columns.iter().collect();
+        referenced.sort();
+        for name in referenced {
+            if !base.iter().any(|f| f.name() == name) {
+                base.push(Field::new(name.as_str(), DataType::Utf8, true));
+            }
+        }
         base
     } else {
         scan_config
@@ -1273,6 +1282,33 @@ pipelines:
         path: /tmp/logs.json
         format: json
     transform: SELECT 100 / int(duration_ms) AS rate FROM logs WHERE status >= 400
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
+    }
+
+    #[test]
+    fn select_star_probe_includes_where_columns() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: prometheus_scrape
+        targets: [http://localhost:9100/metrics]
+    transform: SELECT * FROM logs WHERE __name__ = 'up' AND __value__ > 0
     outputs:
       - type: stdout
 "#;
