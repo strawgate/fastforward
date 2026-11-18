@@ -2193,6 +2193,7 @@ mod verification {
     #[kani::proof]
     #[kani::stub(encode_varint, encode_varint_stub)]
     #[kani::unwind(12)]
+    #[kani::solver(kissat)] // slow under the default solver
     fn verify_encode_bytes_field_content_compositional() {
         let field_number: u32 = kani::any();
         kani::assume(field_number > 0 && field_number <= 100);

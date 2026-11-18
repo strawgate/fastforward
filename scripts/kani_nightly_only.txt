@@ -29,3 +29,5 @@ ffwd-types pipeline::registry::verification::upsert_reactivates_committed  # BTr
 ffwd-runtime reload::kani_proofs::verify_drain_only_from_running  # symbolic state x event over all of step(); OOM or >15 min
 ffwd-runtime reload::kani_proofs::verify_shutdown_requested_always_terminal  # symbolic state x event over all of step(); OOM or >15 min
 ffwd-runtime reload::kani_proofs::verify_has_pending_invariant  # symbolic state x event over all of step(); OOM or >15 min
+ffwd-diagnostics stderr_capture::verification::strip_ansi_preserves_non_escape_chars  # symbolic from_utf8 + chars(); OOM even at 4 ASCII bytes (8 here)
+ffwd-diagnostics stderr_capture::verification::strip_ansi_removes_escapes  # symbolic from_utf8 + chars(); OOM even at 5 ASCII bytes (12 here)

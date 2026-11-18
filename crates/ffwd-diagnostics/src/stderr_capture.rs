@@ -364,15 +364,13 @@ fn strip_ansi(s: &str) -> String {
 mod verification {
     use super::*;
 
-    // Input sizes are kept small: 8 and 12 bytes timed out after 15 minutes
-    // in CI. Four bytes still covers every UTF-8 sequence length.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(9)]
     fn strip_ansi_preserves_non_escape_chars() {
-        // Prove: for inputs ≤4 bytes with no \x1b, output == input
+        // Prove: for inputs ≤8 bytes with no \x1b, output == input
         let len: usize = kani::any();
-        kani::assume(len <= 4);
-        let mut bytes = [0u8; 4];
+        kani::assume(len <= 8);
+        let mut bytes = [0u8; 8];
         for i in 0..len {
             bytes[i] = kani::any();
             kani::assume(bytes[i] != 0x1b); // no escape chars
@@ -385,13 +383,12 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(13)]
     fn strip_ansi_removes_escapes() {
-        // Prove: output never contains \x1b (≤6 bytes: room for an escape
-        // sequence followed by a second escape)
+        // Prove: output never contains \x1b
         let len: usize = kani::any();
-        kani::assume(len <= 6);
-        let mut bytes = [0u8; 6];
+        kani::assume(len <= 12);
+        let mut bytes = [0u8; 12];
         for i in 0..len {
             bytes[i] = kani::any();
         }
@@ -413,6 +410,12 @@ mod tests {
         assert_eq!(strip_ansi("\x1b[31;1mRED\x1b[0m"), "RED");
         assert_eq!(strip_ansi("no escapes"), "no escapes");
         assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn test_strip_ansi_keeps_multibyte_text() {
+        assert_eq!(strip_ansi("héllo → 世界 🚀"), "héllo → 世界 🚀");
+        assert_eq!(strip_ansi("\x1b[32m世界\x1b[0m é"), "世界 é");
     }
 
     #[test]
