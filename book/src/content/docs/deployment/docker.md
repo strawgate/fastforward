@@ -110,12 +110,18 @@ docker run -d \
 Then reference them in `config.yaml`:
 
 ```yaml
-output:
-  type: otlp
-  endpoint: "${OTEL_ENDPOINT}"
-  compression: zstd
-  auth:
-    bearer_token: "${OTEL_TOKEN}"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/app/*.log
+        format: json
+    outputs:
+      - type: otlp
+        endpoint: "${OTEL_ENDPOINT}"
+        compression: zstd
+        auth:
+          bearer_token: "${OTEL_TOKEN}"
 ```
 
 ## Network inputs with port mapping
@@ -146,12 +152,18 @@ pipelines:
       - type: tcp
         listen: 0.0.0.0:5140
         format: raw
+    outputs:
+      - type: otlp
+        endpoint: ${OTEL_ENDPOINT}
 
   syslog-udp:
     inputs:
       - type: udp
         listen: 0.0.0.0:5140
         format: raw
+    outputs:
+      - type: otlp
+        endpoint: ${OTEL_ENDPOINT}
 ```
 
 :::caution
