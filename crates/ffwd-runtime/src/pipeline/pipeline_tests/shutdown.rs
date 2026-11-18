@@ -92,68 +92,180 @@ async fn test_async_shutdown_drains_with_slow_output() {
     );
 }
 
+/// Emits one newline-terminated JSON line per `poll()` so every line becomes
+/// its own `ProcessedBatch` when `batch_target_bytes` is tiny.
+struct OneLinePerPollInput {
+    lines: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl OneLinePerPollInput {
+    fn new(count: usize) -> Self {
+        let lines = (0..count)
+            .map(|i| format!(r#"{{"seq":{i}}}"#).into_bytes())
+            .map(|mut line| {
+                line.push(b'\n');
+                line
+            })
+            .collect();
+        Self { lines }
+    }
+}
+
+impl InputSource for OneLinePerPollInput {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
+        Ok(self
+            .lines
+            .pop_front()
+            .map(|line| {
+                let accounted_bytes = line.len() as u64;
+                vec![SourceEvent::Data {
+                    bytes: Bytes::from(line),
+                    source_id: None,
+                    accounted_bytes,
+                    cri_metadata: None,
+                }]
+            })
+            .unwrap_or_default())
+    }
+
+    fn name(&self) -> &str {
+        "one-line-per-poll"
+    }
+
+    fn health(&self) -> ComponentHealth {
+        ComponentHealth::Healthy
+    }
+}
+
+/// Blocks every send until `release` is cancelled, then counts delivered rows.
+struct GatedCountingSink {
+    release: CancellationToken,
+    rows: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Sink for GatedCountingSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+        Box::pin(async move {
+            self.release.cancelled().await;
+            self.rows
+                .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+            SendResult::Ok
+        })
+    }
+
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        "gated-counting"
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// DrainIngress must not disable queued-input draining during a later shutdown.
 ///
 /// Regression for #2716: the control-plane branch previously set
-/// `should_drain_input_channel = false` on DrainIngress, which caused a later
-/// shutdown to skip draining already queued batches.
+/// `should_drain_input_channel = false` on DrainIngress, so a later shutdown
+/// dropped the input channel receiver with batches still queued in it.
+///
+/// The test is deterministic rather than timing-based:
+/// 1. DrainIngress is queued before `run_async` starts. The run loop's biased
+///    `select!` polls the control channel before the input channel, so it is
+///    handled before any data batch.
+/// 2. The sink blocks, and the single output worker has a one-slot queue, so
+///    the run loop stalls in `pool.submit` and later batches pile up in the
+///    bounded input channel.
+/// 3. Once every line has been transformed and the channel holds batches,
+///    shutdown is cancelled and only then is the sink released.
+///
+/// Every line must reach the sink. With the bug, the queued batches are lost.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_drain_ingress_keeps_later_shutdown_channel_drain_enabled() {
-    use std::sync::atomic::Ordering;
+async fn drain_ingress_then_shutdown_delivers_queued_batches() {
+    const LINES: u64 = 12;
 
     let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("drain_ingress_then_shutdown.log");
-
-    let mut data = String::new();
-    for i in 0..120 {
-        data.push_str(&format!(r#"{{"msg":"drain-ingress {}"}}"#, i));
-        data.push('\n');
-    }
-    std::fs::write(&log_path, data.as_bytes()).unwrap();
-
+    // The config needs one input; this empty file never produces data. All
+    // rows come from `OneLinePerPollInput` below.
+    let empty_path = dir.path().join("unused.log");
+    std::fs::write(&empty_path, b"").unwrap();
     let yaml = single_pipeline_yaml(
-        &format!("type: file\npath: \"{}\"\nformat: json", log_path.display()),
+        &format!("type: file\npath: \"{}\"\nformat: json", empty_path.display()),
         "type: stdout\nformat: json",
     );
-
     let config = ffwd_config::Config::load_str(&yaml).unwrap();
     let pipe_cfg = &config.pipelines["default"];
-    let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-    pipeline = pipeline.with_sink(Box::new(SlowSink {
-        delay: Duration::from_millis(30),
-    }));
-    // Encourage queue buildup so shutdown has buffered work to drain.
-    pipeline.batch_target_bytes = 64;
-    pipeline.batch_timeout = Duration::from_millis(10);
 
-    let control_tx = pipeline.clone_control_sender();
+    let release = CancellationToken::new();
+    let delivered_rows = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+    // One line per batch: each poll yields one line and flushes immediately.
+    pipeline.batch_target_bytes = 1;
+    pipeline.batch_timeout = Duration::from_millis(5);
+    pipeline.set_pool_drain_timeout(Duration::from_secs(5));
+    pipeline = pipeline
+        .with_input("one-line", Box::new(OneLinePerPollInput::new(LINES as usize)))
+        .with_sink(Box::new(GatedCountingSink {
+            release: release.clone(),
+            rows: Arc::clone(&delivered_rows),
+        }));
+
+    pipeline
+        .clone_control_sender()
+        .send(ControlMessage::DrainIngress)
+        .expect("control channel open");
+
     let metrics = Arc::clone(&pipeline.metrics);
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
-
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while metrics.transform_in.lines_total.load(Ordering::Relaxed) < 64 {
-            if tokio::time::Instant::now() >= deadline {
+    let gate = release.clone();
+    let driver = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let transformed = metrics.transform_in.lines_total.load(Ordering::Relaxed);
+            let queued = metrics.channel_depth.load(Ordering::Relaxed);
+            if transformed == LINES && queued > 0 {
                 break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                sd.cancel();
+                gate.cancel();
+                panic!(
+                    "setup did not queue batches in the input channel \
+                     (transformed={transformed}, queued={queued})"
+                );
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let _ = control_tx.send(ControlMessage::DrainIngress);
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        let queued = metrics.channel_depth.load(Ordering::Relaxed);
         sd.cancel();
+        gate.cancel();
+        queued
     });
 
-    pipeline.run_async(&shutdown).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), pipeline.run_async(&shutdown))
+        .await
+        .expect("pipeline shutdown should not hang");
+    result.expect("pipeline run should succeed");
+    let queued_at_shutdown = driver.await.expect("driver task should not panic");
 
-    let lines_out = pipeline
-        .metrics
-        .transform_out
-        .lines_total
-        .load(Ordering::Relaxed);
     assert!(
-        lines_out >= 120,
-        "shutdown after drain-ingress should still process queued input, got {lines_out} output lines"
+        queued_at_shutdown > 0,
+        "test setup must have batches queued in the input channel at shutdown"
+    );
+    assert_eq!(
+        delivered_rows.load(Ordering::Relaxed),
+        LINES,
+        "shutdown after DrainIngress must deliver the {queued_at_shutdown} batches \
+         queued in the input channel"
     );
 }
 
