@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,18 @@ REPO = Path(__file__).resolve().parent.parent
 # Unstable features every proof in the workspace may use. Must match for
 # listing and verification, or compilation of contract proofs fails.
 UNSTABLE = ["-Z", "function-contracts", "-Z", "mem-predicates", "-Z", "stubbing"]
+
+
+def cap_address_space(limit_gb: float) -> None:
+    """Limit each process in the Kani tree to `limit_gb` of address space.
+
+    A CBMC process that outgrows the runner's RAM gets the whole runner
+    killed ("The runner has received a shutdown signal"), which hides every
+    other result in the shard. With a cap, CBMC fails that one harness with
+    "out of memory" and the shard goes on to report the rest.
+    """
+    limit = int(limit_gb * 1024**3)
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 
 def list_harnesses(crate_dir: Path, cargo_args: list[str]) -> list[str]:
@@ -60,6 +73,17 @@ def main() -> int:
     parser.add_argument("--features", default="", help="cargo features, e.g. kani-slow")
     parser.add_argument("--jobs", type=int, default=2, help="parallel CBMC processes")
     parser.add_argument("--lib", action="store_true", help="verify only the lib target")
+    parser.add_argument(
+        "--harness-timeout",
+        default="",
+        help="per-harness timeout, e.g. 15m (empty = none)",
+    )
+    parser.add_argument(
+        "--memory-limit-gb",
+        type=float,
+        default=0,
+        help="address-space cap per process (0 = none); CI uses 6 with --jobs 2",
+    )
     args = parser.parse_args()
 
     if not 1 <= args.shard <= args.of:
@@ -88,13 +112,21 @@ def main() -> int:
         "--output-format",
         "terse",
         *UNSTABLE,
+        *(["-Z", "unstable-options", "--harness-timeout", args.harness_timeout] if args.harness_timeout else []),
         *features,
         *target,
         "--exact",
     ]
     for name in mine:
         cmd += ["--harness", name]
-    return subprocess.run(cmd, cwd=crate_dir, env=os.environ).returncode
+    preexec = None
+    if args.memory_limit_gb > 0:
+        limit_gb = args.memory_limit_gb
+
+        def preexec() -> None:
+            cap_address_space(limit_gb)
+
+    return subprocess.run(cmd, cwd=crate_dir, env=os.environ, preexec_fn=preexec).returncode
 
 
 if __name__ == "__main__":

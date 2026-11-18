@@ -472,6 +472,8 @@ jobs:
           --shard ${{ matrix.shard }}
           --of ${{ matrix.of }}
           --jobs 2
+          --memory-limit-gb 6
+          --harness-timeout 15m
           ${{ matrix.lib && '--lib' || '' }}
           ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') && (matrix.crate == 'ffwd-core' || matrix.crate == 'ffwd-kani') && '--features kani-slow' || '' }}
 
