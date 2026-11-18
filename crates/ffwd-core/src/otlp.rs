@@ -1534,9 +1534,9 @@ mod verification {
     ///
     /// Gated behind `kani-slow`: 10 case-insensitive comparisons over
     /// symbolic [u8; 8] takes ~59s in the solver.
-    #[cfg(feature = "kani-slow")]
-    #[kani::proof]
-    #[kani::unwind(9)] // eq_ignore_case_match: Zip over ≤8-byte targets + 1 terminator
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(9))] // eq_ignore_case_match: Zip over ≤8-byte targets + 1 terminator
     pub(super) fn verify_parse_severity_no_false_positives() {
         let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any_where(|&l: &usize| l <= 8);
@@ -2248,9 +2248,9 @@ mod verification {
     /// for all bounded byte inputs and valid wire types, including the EOF boundary.
     ///
     /// Gated behind `kani-slow`: [u8; 32] symbolic + varint decode loops takes >30s.
-    #[cfg(feature = "kani-slow")]
-    #[kani::proof]
-    #[kani::unwind(22)]
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(22))]
     pub(super) fn verify_skip_field_vs_oracle() {
         let data: [u8; 32] = kani::any();
         let wire_type: u8 = kani::any();

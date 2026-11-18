@@ -1244,9 +1244,9 @@ mod verification {
     /// expand to 6 chars (\uXXXX), so worst case = 48 output bytes.
     ///
     /// Gated behind `kani-slow`: [u8; 8] + unwind 50 through escape logic ~30s.
-    #[cfg(feature = "kani-slow")]
-    #[kani::proof]
-    #[kani::unwind(50)]
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(50))]
     pub(super) fn verify_json_escape_bytes_vs_oracle() {
         let src: [u8; 8] = kani::any();
         let len: usize = kani::any_where(|&l| l <= 8);

@@ -802,10 +802,10 @@ mod verification {
     /// to inherit the proof without re-verification.
     ///
     /// Gated behind `kani-slow`: three symbolic u64 + 65-unwind takes >60s.
-    #[cfg(feature = "kani-slow")]
-    #[kani::proof]
-    #[kani::unwind(65)]
-    #[kani::solver(kissat)]
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(65))]
+    #[cfg_attr(feature = "kani-slow", kani::solver(kissat))]
     pub(super) fn verify_compute_real_quotes_vs_oracle() {
         let quote_bits: u64 = kani::any();
         let bs_bits: u64 = kani::any();
@@ -830,10 +830,10 @@ mod verification {
     /// This formally links the production function to the canonical oracle in ffwd-kani.
     ///
     /// Gated behind `kani-slow`: symbolic u64 + 65-unwind takes >30s.
-    #[cfg(feature = "kani-slow")]
-    #[kani::proof]
-    #[kani::unwind(65)]
-    #[kani::solver(kissat)]
+    // Kept compiled without `kani-slow` so `#[verified]` on the production fn resolves.
+    #[cfg_attr(feature = "kani-slow", kani::proof)]
+    #[cfg_attr(feature = "kani-slow", kani::unwind(65))]
+    #[cfg_attr(feature = "kani-slow", kani::solver(kissat))]
     pub(super) fn verify_prefix_xor_vs_oracle() {
         let input: u64 = kani::any();
         let result_prod = prefix_xor(input);
