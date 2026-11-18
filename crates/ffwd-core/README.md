@@ -19,6 +19,7 @@ Proven pure-logic kernel. Scanner, parsers, pipeline state machine, OTLP encodin
 - `scanner.rs` — scanner-to-builder protocol (`ScanBuilder`, `BuilderState`)
 - `structural.rs` — SIMD structural character detection (quote, backslash, bitmasks)
 - `cri.rs` — CRI log format parser + reassembler
+- `prom_text.rs` — Prometheus text exposition scanner (SIMD classifier + line walker) via ScanBuilder callbacks
 - `framer.rs` — NewlineFramer (Kani-proven, fixed-size, no heap)
 - `reassembler.rs` — CriReassembler (zero-copy F path, Kani-proven)
 - `pipeline/` — BatchTicket, PipelineMachine (typestate, Kani-proven)

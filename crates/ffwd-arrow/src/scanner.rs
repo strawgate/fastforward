@@ -657,3 +657,14 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+impl ffwd_core::prom_text::PromBuilder for StreamingBuilder {
+    #[inline(always)]
+    fn append_f64_by_idx(&mut self, idx: usize, value: f64) {
+        self.append_f64_value_by_idx(idx, value);
+    }
+    #[inline(always)]
+    fn append_i64_by_idx(&mut self, idx: usize, value: i64) {
+        self.append_i64_value_by_idx(idx, value);
+    }
+}

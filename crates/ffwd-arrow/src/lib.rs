@@ -13,6 +13,7 @@
 pub mod columnar;
 pub mod conflict_schema;
 pub mod materialize;
+pub mod prom;
 pub mod scanner;
 pub mod star_schema;
 pub mod streaming_builder;

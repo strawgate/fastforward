@@ -134,7 +134,7 @@ random — the SAT solver considers ALL possible values simultaneously.
 
 Add Kani proofs when implementing or modifying:
 
-1. **Parsers** — Any code handling raw bytes (`framer.rs`, `cri.rs`, `json_scanner.rs`)
+1. **Parsers** — Any code handling raw bytes (`framer.rs`, `cri.rs`, `json_scanner.rs`, `prom_text.rs`)
    - MUST have `verify_<function>_no_panic` proof
    - SHOULD have correctness proof against an oracle
 
@@ -375,6 +375,7 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs) + proptest oracle + compliance regressions |
 | `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (2 proofs) |
 | `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (19 proofs) |
+| `ffwd-core/prom_text.rs` | Prometheus text exposition scanner: SIMD structural mask, line walker, value fast path | Kani (3 proofs: SIMD mask ≡ scalar for all blocks, integer fast path exact, no panic on 8-byte inputs) + proptest (SIMD ≡ scalar, decimal fast path ≡ `core` parser, generated-exposition round trip, arbitrary-input no-panic) |
 | `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (37 proofs incl. 3 contract verifications + 4 compositional stubs) |
 | `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs) + proptest + **TLA+** |
 | `ffwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |

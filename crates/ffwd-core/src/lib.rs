@@ -27,6 +27,8 @@ pub mod framer;
 pub mod json_scanner;
 /// OTLP protobuf encoding helpers and parsers.
 pub mod otlp;
+/// Prometheus text exposition format scanner (SIMD stage 1 + line walker).
+pub mod prom_text;
 /// CRI partial line reassembler (P/F reassembly).
 pub mod reassembler;
 /// Scanner configuration and field selection.
