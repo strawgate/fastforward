@@ -212,6 +212,13 @@ impl OutputWorkerPool {
         self.stop_retrying.cancel();
     }
 
+    /// Clone of the stop-retrying token, so a caller can fire it from a task
+    /// that does not hold the pool (for example when shutdown arrives while
+    /// the pipeline loop is blocked inside [`Self::submit`]).
+    pub fn stop_retrying_token(&self) -> CancellationToken {
+        self.stop_retrying.clone()
+    }
+
     /// Try to receive any pending ack items without blocking.
     ///
     /// Call this from the pipeline's `select!` loop to advance checkpoints.

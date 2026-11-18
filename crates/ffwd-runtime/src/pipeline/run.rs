@@ -128,6 +128,19 @@ impl Pipeline {
 
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
 
+        // Fire the pool's stop-retrying signal as soon as shutdown is
+        // requested, independently of this loop. With the output down and the
+        // pool saturated, the loop can be parked in `submit_batch` (waiting
+        // for a worker slot) and would never see `shutdown`. Stopping retries
+        // makes the busy worker give up its batch (held for replay), which
+        // frees the slot so the blocked submit completes and the loop exits.
+        let stop_retrying = self.pool.stop_retrying_token();
+        let shutdown_for_stop = shutdown.clone();
+        let stop_retrying_link = tokio::spawn(async move {
+            shutdown_for_stop.cancelled().await;
+            stop_retrying.cancel();
+        });
+
         let mut heartbeat_interval = tokio::time::interval(self.batch_timeout);
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -251,6 +264,7 @@ impl Pipeline {
         // input channel blocks on a full pool and pool drain waits out its
         // whole timeout. Batches that fail from here on are held for replay.
         self.pool.stop_retrying();
+        stop_retrying_link.abort();
 
         if should_drain_input_channel && !internal_faults::shutdown_skip_channel_drain() {
             // Drain channel messages before joining input threads.
