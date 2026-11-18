@@ -127,21 +127,25 @@ const GRPC_METRICS_PATH: &str = "/opentelemetry.proto.collector.metrics.v1.Metri
 /// Derive the metrics endpoint from the configured (logs) endpoint.
 ///
 /// gRPC: the service path is replaced with `MetricsService/Export`.
-/// HTTP: a trailing `/v1/logs` becomes `/v1/metrics`; any other URL is used
-/// as configured, so a dedicated metrics output can point anywhere.
+/// HTTP: a path ending in `/v1/logs` becomes `/v1/metrics`, keeping any
+/// query string; any other URL is used as configured, so a dedicated metrics
+/// output can point anywhere.
 pub(super) fn metrics_endpoint_for(endpoint: &str, protocol: OtlpProtocol) -> String {
+    if protocol == OtlpProtocol::Http {
+        let (path, query) = endpoint
+            .find('?')
+            .map_or((endpoint, ""), |i| endpoint.split_at(i));
+        return match path.trim_end_matches('/').strip_suffix("/v1/logs") {
+            Some(base) => format!("{base}/v1/metrics{query}"),
+            None => endpoint.to_string(),
+        };
+    }
     let trimmed = endpoint.trim_end_matches('/');
-    if protocol == OtlpProtocol::Grpc {
-        if trimmed.ends_with(GRPC_METRICS_PATH) {
-            return trimmed.to_string();
-        }
-        let base = trimmed.strip_suffix(GRPC_LOGS_PATH).unwrap_or(trimmed);
-        return format!("{base}{GRPC_METRICS_PATH}");
+    if trimmed.ends_with(GRPC_METRICS_PATH) {
+        return trimmed.to_string();
     }
-    match trimmed.strip_suffix("/v1/logs") {
-        Some(base) => format!("{base}/v1/metrics"),
-        None => endpoint.to_string(),
-    }
+    let base = trimmed.strip_suffix(GRPC_LOGS_PATH).unwrap_or(trimmed);
+    format!("{base}{GRPC_METRICS_PATH}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

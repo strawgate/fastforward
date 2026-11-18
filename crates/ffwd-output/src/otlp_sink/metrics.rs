@@ -7,16 +7,25 @@
 //! following the OpenTelemetry Prometheus compatibility spec:
 //!
 //! - `job` → resource `service.name`, `instance` → `service.instance.id`.
-//! - `__type__ = counter` → monotonic cumulative `Sum`.
+//! - `__type__` is matched case-insensitively.
+//! - `__type__ = counter` → monotonic cumulative `Sum`. An OpenMetrics
+//!   `foo_created` sample next to `foo_total` is a start time and is dropped.
 //! - `gauge`, `unknown`/untyped, `info`, `stateset`, `gaugehistogram` and
 //!   samples without a type → `Gauge`.
 //! - `histogram` → cumulative `Histogram`, rebuilt from the `_bucket`
 //!   (`le`), `_sum` and `_count` samples of each series.
 //! - `summary` → `Summary`, rebuilt from the `quantile`, `_sum` and `_count`
 //!   samples of each series.
-//! - Other label columns become data point attributes. Columns whose names
-//!   start with `__` are internal and are not exported. The `label:` prefix
-//!   the scanner adds to labels that collide with its own columns is removed.
+//!   Samples are grouped per label set *and* timestamp. A histogram without
+//!   a count (no `_count` and no `+Inf` bucket), with decreasing buckets, or
+//!   whose `+Inf` bucket disagrees with `_count` is dropped, as is a summary
+//!   without `_count`.
+//! - Other label columns become data point attributes; `le` is folded only
+//!   into histogram points and `quantile` only into summary points, so on any
+//!   other metric they stay attributes. Columns whose names start with `__`
+//!   are internal and are not exported, and columns with no string form
+//!   (structs, lists) are skipped. The `label:` prefix the scanner adds to
+//!   labels that collide with its own columns is removed.
 //!
 //! Metric names are kept as scraped (no unit or `_total` suffix trimming), so
 //! a round trip back to Prometheus keeps the original names. Start times are
@@ -84,6 +93,7 @@ const VALUE_COL: &str = "__value__";
 const TS_COL: &str = "__timestamp_ms__";
 const TYPE_COL: &str = "__type__";
 const RESERVED_LABEL_PREFIX: &str = "label:";
+const SERIES_ID_COL: &str = "__series_id__";
 
 /// Returns true when `batch` has the columns needed to encode it as metrics.
 pub(crate) fn is_metric_batch(batch: &RecordBatch) -> bool {
@@ -139,6 +149,29 @@ enum Kind {
     Summary,
 }
 
+/// Declared Prometheus type of a row, matched case-insensitively.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeTag {
+    Counter,
+    Histogram,
+    Summary,
+    Other,
+}
+
+impl TypeTag {
+    fn parse(ty: &str) -> Self {
+        if ty.eq_ignore_ascii_case("counter") {
+            Self::Counter
+        } else if ty.eq_ignore_ascii_case("histogram") {
+            Self::Histogram
+        } else if ty.eq_ignore_ascii_case("summary") {
+            Self::Summary
+        } else {
+            Self::Other
+        }
+    }
+}
+
 enum Role {
     Point,
     Bucket,
@@ -148,12 +181,12 @@ enum Role {
     Skip,
 }
 
-/// One histogram or summary series being reassembled.
+/// One histogram or summary series at one timestamp being reassembled.
 struct Group {
     rep: usize,
-    time_ms: i64,
-    buckets: Vec<(f64, f64)>,
-    quantiles: Vec<(f64, f64)>,
+    time_ms: Option<i64>,
+    /// `(le, cumulative count)` or `(quantile, value)`, sorted by `finalize`.
+    entries: Vec<(f64, f64)>,
     sum: Option<f64>,
     count: Option<f64>,
 }
@@ -185,6 +218,28 @@ struct Columns<'a> {
     quantile: Option<usize>,
 }
 
+impl Columns<'_> {
+    fn time_ms(&self, row: usize) -> Option<i64> {
+        self.ts.and_then(|t| t.is_valid(row).then(|| t.value(row)))
+    }
+
+    fn type_tag(&self, row: usize) -> TypeTag {
+        self.ty
+            .as_ref()
+            .and_then(|c| c.get(row))
+            .map_or(TypeTag::Other, TypeTag::parse)
+    }
+
+    /// The label folded into points of `kind` (`le` or `quantile`), if any.
+    fn folded_label(&self, kind: Kind) -> Option<usize> {
+        match kind {
+            Kind::Histogram => self.le,
+            Kind::Summary => self.quantile,
+            Kind::Gauge | Kind::Counter => None,
+        }
+    }
+}
+
 /// Encode `batch` as an `ExportMetricsServiceRequest` into `out`.
 ///
 /// Returns the number of data points written. `default_time_ns` stamps rows
@@ -201,6 +256,12 @@ pub(crate) fn encode_metrics_batch(
     for (field, col) in schema.fields().iter().zip(batch.columns()) {
         let name = field.name().as_str();
         let target = match name {
+            VALUE_COL if !col.data_type().is_numeric() => {
+                return Err(format!(
+                    "metric batch needs a numeric __value__ column, got {}",
+                    col.data_type()
+                ));
+            }
             VALUE_COL => Some(DataType::Float64),
             TS_COL => Some(DataType::Int64),
             _ if name.starts_with("__") && name != NAME_COL && name != TYPE_COL => continue,
@@ -208,23 +269,49 @@ pub(crate) fn encode_metrics_batch(
             _ => Some(DataType::Utf8),
         };
         let arr = match target {
-            Some(dt) if col.data_type() != &dt => {
-                cast(col, &dt).map_err(|e| format!("cast column '{name}': {e}"))?
-            }
+            Some(dt) if col.data_type() != &dt => match cast(col, &dt) {
+                Ok(arr) => arr,
+                // The value and timestamp columns must be usable.
+                Err(e) if name == VALUE_COL || name == TS_COL => {
+                    return Err(format!("cast column '{name}': {e}"));
+                }
+                // Extra columns that have no string form (structs, lists,
+                // ...) are left out of the attributes.
+                Err(_) => continue,
+            },
             _ => std::sync::Arc::clone(col),
         };
         owned.push((name.to_string(), arr));
     }
     let cols = resolve_columns(&owned)?;
-    let resources = group_rows(&cols, batch.num_rows());
+    let mut resources = group_rows(&cols, batch.num_rows());
     let mut points = 0usize;
     let mut scratch = Scratch::default();
-    for res in &resources {
+    for res in &mut resources {
+        drop_openmetrics_created(res);
+        for fam in &mut res.families {
+            let kind = fam.kind;
+            fam.groups.retain_mut(|g| finalize_group(g, kind));
+        }
         let start = begin(out);
         encode_resource_metrics(res, &cols, default_time_ns, &mut scratch, out, &mut points);
         end(out, REQUEST_RESOURCE_METRICS, start);
     }
     Ok(points)
+}
+
+/// Remove the label prefix the scanner adds to labels that collide with its
+/// own columns. Other labels that happen to start with `label:` are kept.
+fn unprefixed_label(key: &str) -> &str {
+    match key.strip_prefix(RESERVED_LABEL_PREFIX) {
+        Some(rest)
+            if matches!(rest, VALUE_COL | TS_COL | TYPE_COL | SERIES_ID_COL)
+                || rest.starts_with(RESERVED_LABEL_PREFIX) =>
+        {
+            rest
+        }
+        _ => key,
+    }
 }
 
 fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> {
@@ -245,8 +332,7 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
             "instance" => instance = StrCol::new(arr),
             other => {
                 if let Some(col) = StrCol::new(arr) {
-                    let key = other.strip_prefix(RESERVED_LABEL_PREFIX).unwrap_or(other);
-                    labels.push((key, col));
+                    labels.push((unprefixed_label(other), col));
                 }
             }
         }
@@ -266,11 +352,11 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
     })
 }
 
-fn classify<'a>(name: &'a str, ty: &str) -> (&'a str, Kind, Role) {
+fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
     let strip = |suffix: &str| name.strip_suffix(suffix).filter(|f| !f.is_empty());
     match ty {
-        "counter" => (name, Kind::Counter, Role::Point),
-        "histogram" => {
+        TypeTag::Counter => (name, Kind::Counter, Role::Point),
+        TypeTag::Histogram => {
             if let Some(f) = strip("_bucket") {
                 (f, Kind::Histogram, Role::Bucket)
             } else if let Some(f) = strip("_sum") {
@@ -283,7 +369,10 @@ fn classify<'a>(name: &'a str, ty: &str) -> (&'a str, Kind, Role) {
                 (name, Kind::Gauge, Role::Point)
             }
         }
-        "summary" => {
+        // A quantile sample keeps its name even when it ends in `_sum` or
+        // `_count` (family `rpc_sum` has samples `rpc_sum{quantile=..}`).
+        TypeTag::Summary if has_quantile => (name, Kind::Summary, Role::Quantile),
+        TypeTag::Summary => {
             if let Some(f) = strip("_sum") {
                 (f, Kind::Summary, Role::Sum)
             } else if let Some(f) = strip("_count") {
@@ -291,38 +380,46 @@ fn classify<'a>(name: &'a str, ty: &str) -> (&'a str, Kind, Role) {
             } else if let Some(f) = strip("_created") {
                 (f, Kind::Summary, Role::Skip)
             } else {
-                (name, Kind::Summary, Role::Quantile)
+                (name, Kind::Gauge, Role::Point)
             }
         }
-        _ => (name, Kind::Gauge, Role::Point),
+        TypeTag::Other => (name, Kind::Gauge, Role::Point),
     }
 }
 
-/// Hash of a row's labels, leaving out `le` and `quantile`.
-fn series_hash(cols: &Columns<'_>, row: usize) -> u64 {
+/// Hash of a row's labels and timestamp, leaving out the `skip` label.
+fn series_hash(cols: &Columns<'_>, row: usize, skip: Option<usize>) -> u64 {
+    const PRIME: u64 = 0x0100_0000_01b3;
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for (i, (_, col)) in cols.labels.iter().enumerate() {
-        if Some(i) == cols.le || Some(i) == cols.quantile {
+        if Some(i) == skip {
             continue;
         }
         if let Some(v) = col.get(row) {
             h ^= i as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
+            h = h.wrapping_mul(PRIME);
             for b in v.bytes() {
                 h ^= u64::from(b);
-                h = h.wrapping_mul(0x0100_0000_01b3);
+                h = h.wrapping_mul(PRIME);
             }
             h ^= 0xff;
-            h = h.wrapping_mul(0x0100_0000_01b3);
+            h = h.wrapping_mul(PRIME);
         }
+    }
+    if let Some(t) = cols.time_ms(row) {
+        h ^= t as u64;
+        h = h.wrapping_mul(PRIME);
     }
     h
 }
 
-fn same_series(cols: &Columns<'_>, a: usize, b: usize) -> bool {
-    cols.labels.iter().enumerate().all(|(i, (_, col))| {
-        Some(i) == cols.le || Some(i) == cols.quantile || col.get(a) == col.get(b)
-    })
+fn same_series(cols: &Columns<'_>, a: usize, b: usize, skip: Option<usize>) -> bool {
+    cols.time_ms(a) == cols.time_ms(b)
+        && cols
+            .labels
+            .iter()
+            .enumerate()
+            .all(|(i, (_, col))| Some(i) == skip || col.get(a) == col.get(b))
 }
 
 fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
@@ -335,8 +432,10 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         if cols.values.is_null(row) {
             continue;
         }
-        let ty = cols.ty.as_ref().and_then(|c| c.get(row)).unwrap_or("");
-        let (family_name, kind, role) = classify(name, ty);
+        let has_quantile = cols
+            .quantile
+            .is_some_and(|i| cols.labels[i].1.get(row).is_some());
+        let (family_name, kind, role) = classify(name, cols.type_tag(row), has_quantile);
         if matches!(role, Role::Skip) {
             continue;
         }
@@ -367,60 +466,113 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
             });
         let fam = &mut res.families[fi];
         let value = cols.values.value(row);
-        let time_ms = cols
-            .ts
-            .and_then(|t| t.is_valid(row).then(|| t.value(row)))
-            .unwrap_or(i64::MIN);
+        if matches!(role, Role::Point) {
+            fam.points.push(row);
+            continue;
+        }
+        let skip = cols.folded_label(kind);
+        let candidates = fam
+            .group_index
+            .entry(series_hash(cols, row, skip))
+            .or_default();
+        let gi = match candidates
+            .iter()
+            .copied()
+            .find(|&g| same_series(cols, fam.groups[g].rep, row, skip))
+        {
+            Some(g) => g,
+            None => {
+                fam.groups.push(Group {
+                    rep: row,
+                    time_ms: cols.time_ms(row),
+                    entries: Vec::new(),
+                    sum: None,
+                    count: None,
+                });
+                candidates.push(fam.groups.len() - 1);
+                fam.groups.len() - 1
+            }
+        };
+        let g = &mut fam.groups[gi];
+        let bound = skip
+            .and_then(|i| cols.labels[i].1.get(row))
+            .and_then(|s| parse_prom_value(s.as_bytes()));
         match role {
-            Role::Point => fam.points.push(row),
-            Role::Bucket | Role::Sum | Role::Count | Role::Quantile => {
-                let h = series_hash(cols, row);
-                let candidates = fam.group_index.entry(h).or_default();
-                let gi = match candidates
-                    .iter()
-                    .copied()
-                    .find(|&g| same_series(cols, fam.groups[g].rep, row))
-                {
-                    Some(g) => g,
-                    None => {
-                        fam.groups.push(Group {
-                            rep: row,
-                            time_ms,
-                            buckets: Vec::new(),
-                            quantiles: Vec::new(),
-                            sum: None,
-                            count: None,
-                        });
-                        candidates.push(fam.groups.len() - 1);
-                        fam.groups.len() - 1
-                    }
-                };
-                let g = &mut fam.groups[gi];
-                g.time_ms = g.time_ms.max(time_ms);
-                let bound = |idx: Option<usize>| {
-                    idx.and_then(|i| cols.labels[i].1.get(row))
-                        .and_then(|s| parse_prom_value(s.as_bytes()))
-                };
-                match role {
-                    Role::Bucket => {
-                        if let Some(le) = bound(cols.le) {
-                            g.buckets.push((le, value));
-                        }
-                    }
-                    Role::Quantile => {
-                        if let Some(q) = bound(cols.quantile) {
-                            g.quantiles.push((q, value));
-                        }
-                    }
-                    Role::Sum => g.sum = Some(value),
-                    Role::Count => g.count = Some(value),
-                    Role::Point | Role::Skip => {}
+            Role::Bucket | Role::Quantile => {
+                if let Some(b) = bound {
+                    g.entries.push((b, value));
                 }
             }
-            Role::Skip => {}
+            Role::Sum => g.sum = Some(value),
+            Role::Count => g.count = Some(value),
+            Role::Point | Role::Skip => {}
         }
     }
     resources
+}
+
+/// OpenMetrics exposes a counter `foo` as `foo_total` plus `foo_created`.
+/// The `_created` sample is a start time, not a second counter, so drop it
+/// when its `_total` sibling is present.
+fn drop_openmetrics_created(res: &mut Resource<'_>) {
+    let created: Vec<usize> = res
+        .families
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            f.kind == Kind::Counter
+                && f.name.strip_suffix("_created").is_some_and(|base| {
+                    res.families.iter().any(|t| {
+                        t.kind == Kind::Counter && t.name.strip_suffix("_total") == Some(base)
+                    })
+                })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for i in created.into_iter().rev() {
+        res.families.remove(i);
+    }
+}
+
+/// Sort a reassembled group and check it is complete. Returns false for a
+/// group that can't be encoded faithfully, which is then dropped:
+/// - a histogram without a count (neither `_count` nor a `+Inf` bucket),
+///   with decreasing cumulative bucket counts, or whose `+Inf` bucket
+///   disagrees with `_count`;
+/// - a summary without `_count`.
+fn finalize_group(g: &mut Group, kind: Kind) -> bool {
+    g.entries.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    match kind {
+        Kind::Histogram => {
+            if g.entries
+                .iter()
+                .any(|(le, c)| le.is_nan() || !c.is_finite())
+            {
+                return false;
+            }
+            if g.entries.windows(2).any(|w| w[1].1 < w[0].1) {
+                return false;
+            }
+            let inf = g
+                .entries
+                .last()
+                .filter(|(le, _)| *le == f64::INFINITY)
+                .map(|&(_, c)| c);
+            let last = g.entries.last().map_or(0.0, |&(_, c)| c);
+            match (g.count, inf) {
+                (Some(count), Some(inf)) if float_count(count) != float_count(inf) => false,
+                (Some(count), None) if count < last => false,
+                (None, None) => false,
+                (None, Some(inf)) => {
+                    g.count = Some(inf);
+                    true
+                }
+                _ => true,
+            }
+        }
+        Kind::Summary => g.count.is_some(),
+        Kind::Gauge | Kind::Counter => true,
+    }
 }
 
 #[derive(Default)]
@@ -429,11 +581,13 @@ struct Scratch {
     counts: Vec<u64>,
 }
 
-fn time_ns(time_ms: i64, default_ns: u64) -> u64 {
-    if time_ms == i64::MIN {
-        return default_ns;
-    }
-    u64::try_from(time_ms).map_or(0, |ms| ms.saturating_mul(1_000_000))
+/// Nanoseconds for a millisecond timestamp, or `default_ns` when the row has
+/// none or it doesn't fit (negative or past year 2554).
+fn time_ns(time_ms: Option<i64>, default_ns: u64) -> u64 {
+    time_ms
+        .and_then(|ms| u64::try_from(ms).ok())
+        .and_then(|ms| ms.checked_mul(1_000_000))
+        .unwrap_or(default_ns)
 }
 
 fn encode_resource_metrics(
@@ -459,6 +613,9 @@ fn encode_resource_metrics(
     encode_str(out, SCOPE_VERSION_FIELD, SCOPE_VERSION);
     end(out, SCOPE_METRICS_SCOPE, scope);
     for fam in &res.families {
+        if fam.points.is_empty() && fam.groups.is_empty() {
+            continue;
+        }
         let metric = begin(out);
         encode_str(out, METRIC_NAME, fam.name.as_bytes());
         match fam.kind {
@@ -466,13 +623,9 @@ fn encode_resource_metrics(
                 let data = begin(out);
                 for &row in &fam.points {
                     let dp = begin(out);
-                    let ms = cols
-                        .ts
-                        .and_then(|t| t.is_valid(row).then(|| t.value(row)))
-                        .unwrap_or(i64::MIN);
-                    encode_fixed64(out, NDP_TIME, time_ns(ms, default_ns));
+                    encode_fixed64(out, NDP_TIME, time_ns(cols.time_ms(row), default_ns));
                     encode_fixed64(out, NDP_AS_DOUBLE, cols.values.value(row).to_bits());
-                    encode_attributes(out, NDP_ATTRIBUTES, cols, row);
+                    encode_attributes(out, NDP_ATTRIBUTES, cols, row, None);
                     end(out, DATA_POINTS, dp);
                     *points += 1;
                 }
@@ -500,15 +653,13 @@ fn encode_resource_metrics(
                     encode_fixed64(out, SDP_TIME, time_ns(g.time_ms, default_ns));
                     encode_fixed64(out, SDP_COUNT, float_count(g.count.unwrap_or(0.0)));
                     encode_fixed64(out, SDP_SUM, g.sum.unwrap_or(0.0).to_bits());
-                    let mut quantiles = g.quantiles.clone();
-                    quantiles.sort_by(|a, b| a.0.total_cmp(&b.0));
-                    for (q, v) in quantiles {
+                    for &(q, v) in &g.entries {
                         let vaq = begin(out);
                         encode_fixed64(out, VAQ_QUANTILE, q.to_bits());
                         encode_fixed64(out, VAQ_VALUE, v.to_bits());
                         end(out, SDP_QUANTILE_VALUES, vaq);
                     }
-                    encode_attributes(out, SDP_ATTRIBUTES, cols, g.rep);
+                    encode_attributes(out, SDP_ATTRIBUTES, cols, g.rep, cols.quantile);
                     end(out, DATA_POINTS, dp);
                     *points += 1;
                 }
@@ -528,6 +679,8 @@ fn float_count(v: f64) -> u64 {
     }
 }
 
+/// Encode a histogram group that passed [`finalize_group`]: entries are
+/// sorted, cumulative counts never decrease, and `count` is set.
 fn encode_histogram_point(
     out: &mut Vec<u8>,
     g: &Group,
@@ -535,17 +688,14 @@ fn encode_histogram_point(
     default_ns: u64,
     scratch: &mut Scratch,
 ) {
-    let mut buckets = g.buckets.clone();
-    buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
     scratch.bounds.clear();
     scratch.counts.clear();
     let mut prev = 0.0f64;
     let mut has_inf = false;
-    for &(le, cum) in &buckets {
-        let delta = float_count(cum - prev);
-        prev = prev.max(cum);
-        scratch.counts.push(delta);
-        if le.is_infinite() && le > 0.0 {
+    for &(le, cum) in &g.entries {
+        scratch.counts.push(float_count(cum - prev));
+        prev = cum;
+        if le == f64::INFINITY {
             has_inf = true;
         } else {
             scratch.bounds.push(le);
@@ -577,30 +727,27 @@ fn encode_histogram_point(
             out.extend_from_slice(&b.to_bits().to_le_bytes());
         }
     }
-    encode_attributes(out, HDP_ATTRIBUTES, cols, g.rep);
+    encode_attributes(out, HDP_ATTRIBUTES, cols, g.rep, cols.le);
     end(out, DATA_POINTS, dp);
 }
 
-fn encode_attributes(out: &mut Vec<u8>, field: u32, cols: &Columns<'_>, row: usize) {
+/// Encode a row's labels as attributes, leaving out the `skip` label (the
+/// `le` or `quantile` folded into a histogram or summary point).
+fn encode_attributes(
+    out: &mut Vec<u8>,
+    field: u32,
+    cols: &Columns<'_>,
+    row: usize,
+    skip: Option<usize>,
+) {
     for (i, (key, col)) in cols.labels.iter().enumerate() {
-        if Some(i) == cols.le || Some(i) == cols.quantile {
-            // `le` / `quantile` are folded into the point; for gauge rows
-            // that carry them (untyped histograms), keep them as attributes.
-            if cols.ty.is_some() && is_folded_row(cols, row) {
-                continue;
-            }
+        if Some(i) == skip {
+            continue;
         }
         if let Some(v) = col.get(row) {
             encode_kv(out, field, key, v);
         }
     }
-}
-
-/// True when the row's `le`/`quantile` label was folded into a histogram or
-/// summary point.
-fn is_folded_row(cols: &Columns<'_>, row: usize) -> bool {
-    let ty = cols.ty.as_ref().and_then(|c| c.get(row)).unwrap_or("");
-    matches!(ty, "histogram" | "summary")
 }
 
 fn encode_kv(out: &mut Vec<u8>, field: u32, key: &str, value: &str) {
@@ -730,6 +877,10 @@ mod tests {
         assert_eq!(
             metrics_endpoint_for("http://c:9000/ingest", OtlpProtocol::Http),
             "http://c:9000/ingest"
+        );
+        assert_eq!(
+            metrics_endpoint_for("http://c:4318/v1/logs?tenant=a", OtlpProtocol::Http),
+            "http://c:4318/v1/metrics?tenant=a"
         );
         assert_eq!(
             metrics_endpoint_for("http://c:4317", OtlpProtocol::Grpc),
@@ -934,5 +1085,220 @@ mod tests {
             panic!("expected gauge")
         };
         assert_eq!(attr(&g.data_points[0].attributes, "__value__"), "x");
+    }
+
+    fn metric_names(req: &ExportMetricsServiceRequest) -> Vec<String> {
+        req.resource_metrics
+            .iter()
+            .flat_map(|rm| &rm.scope_metrics)
+            .flat_map(|sm| &sm.metrics)
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn types_are_matched_case_insensitively() {
+        let b = batch(&[("reqs_total", 1.0, None, Some("COUNTER"), &[])]);
+        let req = decode(&b);
+        let m = &req.resource_metrics[0].scope_metrics[0].metrics[0];
+        assert!(matches!(m.data, Some(Data::Sum(_))));
+    }
+
+    #[test]
+    fn le_and_quantile_stay_attributes_outside_their_kind() {
+        let b = batch(&[
+            ("g", 1.0, None, Some("gauge"), &[("le", "1")]),
+            (
+                "c_total",
+                2.0,
+                None,
+                Some("counter"),
+                &[("quantile", "0.5")],
+            ),
+            (
+                "h_count",
+                1.0,
+                None,
+                Some("histogram"),
+                &[("quantile", "x")],
+            ),
+            (
+                "h_bucket",
+                1.0,
+                None,
+                Some("histogram"),
+                &[("le", "+Inf"), ("quantile", "x")],
+            ),
+        ]);
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let Some(Data::Gauge(g)) = &metrics[0].data else {
+            panic!("expected gauge")
+        };
+        assert_eq!(attr(&g.data_points[0].attributes, "le"), "1");
+        let Some(Data::Sum(c)) = &metrics[1].data else {
+            panic!("expected sum")
+        };
+        assert_eq!(attr(&c.data_points[0].attributes, "quantile"), "0.5");
+        let Some(Data::Histogram(h)) = &metrics[2].data else {
+            panic!("expected histogram")
+        };
+        // `quantile` is an ordinary label on a histogram.
+        assert_eq!(h.data_points.len(), 1);
+        assert_eq!(attr(&h.data_points[0].attributes, "quantile"), "x");
+        assert!(h.data_points[0].attributes.iter().all(|kv| kv.key != "le"));
+    }
+
+    #[test]
+    fn samples_at_different_timestamps_are_separate_points() {
+        let h = Some("histogram");
+        let b = batch(&[
+            ("lat_bucket", 1.0, Some(1), h, &[("le", "+Inf")]),
+            ("lat_count", 1.0, Some(1), h, &[]),
+            ("lat_bucket", 3.0, Some(2), h, &[("le", "+Inf")]),
+            ("lat_count", 3.0, Some(2), h, &[]),
+        ]);
+        let req = decode(&b);
+        let Some(Data::Histogram(hist)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected histogram")
+        };
+        let got: Vec<(u64, u64)> = hist
+            .data_points
+            .iter()
+            .map(|p| (p.time_unix_nano, p.count))
+            .collect();
+        assert_eq!(got, vec![(1_000_000, 1), (2_000_000, 3)]);
+    }
+
+    #[test]
+    fn incomplete_or_inconsistent_composites_are_dropped() {
+        let h = Some("histogram");
+        let s = Some("summary");
+        let b = batch(&[
+            // No count and no +Inf bucket.
+            ("a_bucket", 1.0, None, h, &[("le", "1")]),
+            // +Inf bucket disagrees with _count.
+            ("b_bucket", 2.0, None, h, &[("le", "+Inf")]),
+            ("b_count", 3.0, None, h, &[]),
+            // Decreasing cumulative counts.
+            ("c_bucket", 5.0, None, h, &[("le", "1")]),
+            ("c_bucket", 4.0, None, h, &[("le", "+Inf")]),
+            ("c_count", 4.0, None, h, &[]),
+            // Summary without _count.
+            ("d", 0.1, None, s, &[("quantile", "0.5")]),
+            // Complete histogram: count taken from the +Inf bucket.
+            ("ok_bucket", 2.0, None, h, &[("le", "+Inf")]),
+        ]);
+        let req = decode(&b);
+        assert_eq!(metric_names(&req), vec!["ok".to_string()]);
+    }
+
+    #[test]
+    fn summary_family_named_like_a_suffix_keeps_quantiles() {
+        let s = Some("summary");
+        let b = batch(&[
+            ("rpc_sum", 0.2, None, s, &[("quantile", "0.5")]),
+            ("rpc_sum_sum", 4.0, None, s, &[]),
+            ("rpc_sum_count", 8.0, None, s, &[]),
+        ]);
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, "rpc_sum");
+        let Some(Data::Summary(sum)) = &metrics[0].data else {
+            panic!("expected summary")
+        };
+        let p = &sum.data_points[0];
+        assert_eq!((p.count, p.sum, p.quantile_values.len()), (8, 4.0, 1));
+    }
+
+    #[test]
+    fn openmetrics_created_sample_is_dropped_next_to_total() {
+        let c = Some("counter");
+        let b = batch(&[
+            ("jobs_total", 3.0, None, c, &[]),
+            ("jobs_created", 1.7e9, None, c, &[]),
+            ("widgets_created", 4.0, None, c, &[]),
+        ]);
+        let req = decode(&b);
+        assert_eq!(
+            metric_names(&req),
+            vec!["jobs_total".to_string(), "widgets_created".to_string()]
+        );
+    }
+
+    #[test]
+    fn only_scanner_added_label_prefixes_are_stripped() {
+        let b = batch(&[(
+            "up",
+            1.0,
+            None,
+            None,
+            &[("label:__type__", "a"), ("label:zone", "b")],
+        )]);
+        let req = decode(&b);
+        let Some(Data::Gauge(g)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data else {
+            panic!("expected gauge")
+        };
+        let attrs = &g.data_points[0].attributes;
+        assert_eq!(attr(attrs, "__type__"), "a");
+        assert_eq!(attr(attrs, "label:zone"), "b");
+    }
+
+    #[test]
+    fn non_numeric_value_column_is_rejected() {
+        let b = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(NAME_COL, DataType::Utf8, true),
+                Field::new(VALUE_COL, DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["up"])),
+                Arc::new(StringArray::from(vec!["1"])),
+            ],
+        )
+        .expect("batch");
+        let mut out = Vec::new();
+        let err = encode_metrics_batch(&b, 0, &mut out).expect_err("string value");
+        assert!(err.contains("numeric __value__"), "{err}");
+    }
+
+    #[test]
+    fn struct_columns_are_skipped() {
+        use arrow::array::StructArray;
+        let inner: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let st = StructArray::from(vec![(
+            Arc::new(Field::new("x", DataType::Int64, true)),
+            inner,
+        )]);
+        let b = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(NAME_COL, DataType::Utf8, true),
+                Field::new(VALUE_COL, DataType::Float64, true),
+                Field::new("nested", st.data_type().clone(), true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["up"])),
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(st),
+            ],
+        )
+        .expect("batch");
+        let req = decode(&b);
+        let Some(Data::Gauge(g)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data else {
+            panic!("expected gauge")
+        };
+        assert!(g.data_points[0].attributes.is_empty());
+    }
+
+    #[test]
+    fn negative_timestamp_falls_back_to_default() {
+        let b = batch(&[("up", 1.0, Some(-5), None, &[])]);
+        let req = decode(&b);
+        let Some(Data::Gauge(g)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data else {
+            panic!("expected gauge")
+        };
+        assert_eq!(g.data_points[0].time_unix_nano, 99);
     }
 }
