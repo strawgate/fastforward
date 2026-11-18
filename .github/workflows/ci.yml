@@ -423,9 +423,13 @@ jobs:
           - { crate: ffwd-arrow, shard: 4, of: 4, lib: true }
           - { crate: ffwd-types, shard: 1, of: 2 }
           - { crate: ffwd-types, shard: 2, of: 2 }
-          - { crate: ffwd-runtime, shard: 1, of: 3 }
-          - { crate: ffwd-runtime, shard: 2, of: 3 }
-          - { crate: ffwd-runtime, shard: 3, of: 3 }
+          # Lifecycle/registry/reload state-machine proofs take minutes each.
+          - { crate: ffwd-runtime, shard: 1, of: 6 }
+          - { crate: ffwd-runtime, shard: 2, of: 6 }
+          - { crate: ffwd-runtime, shard: 3, of: 6 }
+          - { crate: ffwd-runtime, shard: 4, of: 6 }
+          - { crate: ffwd-runtime, shard: 5, of: 6 }
+          - { crate: ffwd-runtime, shard: 6, of: 6 }
           - { crate: ffwd-io, shard: 1, of: 2 }
           - { crate: ffwd-io, shard: 2, of: 2 }
           - { crate: ffwd-output, shard: 1, of: 2 }
