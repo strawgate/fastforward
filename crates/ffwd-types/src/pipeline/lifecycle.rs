@@ -7,7 +7,7 @@
 //! The checkpoint type `C` is opaque — the pipeline stores and forwards
 //! checkpoints without interpreting them.
 
-use alloc::collections::BTreeMap;
+use super::ord_map::OrdMap;
 use core::marker::PhantomData;
 
 use super::{AckReceipt, BatchId, BatchTicket, Queued, Sending, SourceId};
@@ -38,11 +38,11 @@ pub struct PipelineMachine<S, C> {
     /// Monotonically increasing batch ID counter.
     next_batch_id: u64,
     /// Per-source committed checkpoint (from the highest contiguously-acked batch).
-    committed: BTreeMap<SourceId, C>,
+    committed: OrdMap<SourceId, C>,
     /// Per-source in-flight batches awaiting ACK (batch_id → checkpoint).
-    in_flight: BTreeMap<SourceId, BTreeMap<BatchId, C>>,
+    in_flight: OrdMap<SourceId, OrdMap<BatchId, C>>,
     /// Per-source pending ACKs received out of order (batch_id → checkpoint).
-    pending_acks: BTreeMap<SourceId, BTreeMap<BatchId, C>>,
+    pending_acks: OrdMap<SourceId, OrdMap<BatchId, C>>,
     /// TRUE if `force_stop()` was used to bypass the drain guard.
     /// Models TLA+ `forced` variable. When true, `DrainCompleteness`
     /// does not hold: in-flight batches may exist at Stopped.
@@ -71,9 +71,9 @@ impl<C> PipelineMachine<Starting, C> {
     pub fn new() -> Self {
         PipelineMachine {
             next_batch_id: 0,
-            committed: BTreeMap::new(),
-            in_flight: BTreeMap::new(),
-            pending_acks: BTreeMap::new(),
+            committed: OrdMap::new(),
+            in_flight: OrdMap::new(),
+            pending_acks: OrdMap::new(),
             forced: false,
             _state: PhantomData,
         }
@@ -169,7 +169,7 @@ impl<C: Clone> PipelineMachine<Running, C> {
     /// a successful `AckReceipt`. Use this for backpressure (e.g. limit
     /// concurrent sends) but note that retrying batches are counted.
     pub fn in_flight_count(&self) -> usize {
-        self.in_flight.values().map(BTreeMap::len).sum()
+        self.in_flight.values().map(OrdMap::len).sum()
     }
 
     /// Committed checkpoint for a source, or `None` if no batch for this
@@ -185,9 +185,9 @@ impl<C: Clone> PipelineMachine<Running, C> {
 
 /// Record an ack receipt: remove from in-flight, add to pending, try advance.
 fn record_ack_and_advance<C: Clone>(
-    committed: &mut BTreeMap<SourceId, C>,
-    in_flight: &mut BTreeMap<SourceId, BTreeMap<BatchId, C>>,
-    pending_acks: &mut BTreeMap<SourceId, BTreeMap<BatchId, C>>,
+    committed: &mut OrdMap<SourceId, C>,
+    in_flight: &mut OrdMap<SourceId, OrdMap<BatchId, C>>,
+    pending_acks: &mut OrdMap<SourceId, OrdMap<BatchId, C>>,
     receipt: AckReceipt<C>,
 ) -> CheckpointAdvance<C> {
     let source = receipt.source;
@@ -240,10 +240,10 @@ fn record_ack_and_advance<C: Clone>(
 
     // Clean up empty inner maps to avoid unbounded accumulation
     // with many ephemeral sources (short-lived file tails, etc.).
-    if in_flight.get(&source).is_some_and(BTreeMap::is_empty) {
+    if in_flight.get(&source).is_some_and(OrdMap::is_empty) {
         in_flight.remove(&source);
     }
-    if pending_acks.get(&source).is_some_and(BTreeMap::is_empty) {
+    if pending_acks.get(&source).is_some_and(OrdMap::is_empty) {
         pending_acks.remove(&source);
     }
 
@@ -271,8 +271,8 @@ impl<C: Clone> PipelineMachine<Draining, C> {
 
     /// Check if all in-flight batches have been acked.
     pub fn is_drained(&self) -> bool {
-        self.in_flight.values().all(BTreeMap::is_empty)
-            && self.pending_acks.values().all(BTreeMap::is_empty)
+        self.in_flight.values().all(OrdMap::is_empty)
+            && self.pending_acks.values().all(OrdMap::is_empty)
     }
 
     /// All batches drained — transition to Stopped.
@@ -313,7 +313,7 @@ impl<C: Clone> PipelineMachine<Draining, C> {
 
     /// Number of in-flight batches across all sources.
     pub fn in_flight_count(&self) -> usize {
-        self.in_flight.values().map(BTreeMap::len).sum()
+        self.in_flight.values().map(OrdMap::len).sum()
     }
 
     /// Committed checkpoint for a source, or `None` if never committed.
@@ -328,7 +328,7 @@ impl<C: Clone> PipelineMachine<Draining, C> {
 
 impl<C> PipelineMachine<Stopped, C> {
     /// Final committed checkpoints for all sources.
-    pub fn final_checkpoints(&self) -> &BTreeMap<SourceId, C> {
+    pub fn final_checkpoints(&self) -> &OrdMap<SourceId, C> {
         &self.committed
     }
 
@@ -344,7 +344,7 @@ impl<C> PipelineMachine<Stopped, C> {
     /// Number of in-flight batches that were abandoned by force_stop.
     /// Zero when `was_forced()` is false.
     pub fn abandoned_count(&self) -> usize {
-        self.in_flight.values().map(BTreeMap::len).sum()
+        self.in_flight.values().map(OrdMap::len).sum()
     }
 }
 
@@ -774,6 +774,29 @@ mod verification {
     // ACK/reject advance, drain, or checkpoint ordering.
     type Cp = u8;
 
+    /// Ack the in-flight batches `sent` in the order `perm`, returning each
+    /// ack's checkpoint advance and the in-flight count right after it.
+    ///
+    /// Proofs call this from one `match` arm per permutation, each with a
+    /// constant `perm`. Picking the order with a symbolic index into the
+    /// receipts instead made every batch id symbolic, and CBMC ran out of
+    /// memory searching the maps with them.
+    fn ack_in_order<const N: usize>(
+        running: &mut PipelineMachine<Running, Cp>,
+        sent: [BatchTicket<Sending, Cp>; N],
+        perm: [usize; N],
+    ) -> [(CheckpointAdvance<Cp>, usize); N] {
+        let mut sent = sent.map(Some);
+        core::array::from_fn(|i| {
+            let ticket = sent
+                .get_mut(perm.get(i).copied().unwrap_or(i))
+                .and_then(Option::take)
+                .expect("perm is a permutation of 0..N");
+            let advance = running.apply_ack(ticket.ack());
+            (advance, running.in_flight_count())
+        })
+    }
+
     /// Ordered ACK: after all batches acked, committed checkpoint equals the last batch's.
     #[kani::proof]
     #[kani::unwind(4)]
@@ -805,27 +828,27 @@ mod verification {
         let t2 = running.create_batch(src, cp2);
         let t3 = running.create_batch(src, cp3);
 
-        let s1 = running.begin_send(t1);
-        let s2 = running.begin_send(t2);
-        let s3 = running.begin_send(t3);
+        let sent = [
+            running.begin_send(t1),
+            running.begin_send(t2),
+            running.begin_send(t3),
+        ];
 
         // Ack in arbitrary order (all 6 permutations)
         let order: u8 = kani::any_where(|&o: &u8| o < 6);
-        let (r_a, r_b, r_c) = match order {
-            0 => (s1.ack(), s2.ack(), s3.ack()),
-            1 => (s1.ack(), s3.ack(), s2.ack()),
-            2 => (s2.ack(), s1.ack(), s3.ack()),
-            3 => (s2.ack(), s3.ack(), s1.ack()),
-            4 => (s3.ack(), s1.ack(), s2.ack()),
-            _ => (s3.ack(), s2.ack(), s1.ack()),
+        let acks = match order {
+            0 => ack_in_order(&mut running, sent, [0, 1, 2]),
+            1 => ack_in_order(&mut running, sent, [0, 2, 1]),
+            2 => ack_in_order(&mut running, sent, [1, 0, 2]),
+            3 => ack_in_order(&mut running, sent, [1, 2, 0]),
+            4 => ack_in_order(&mut running, sent, [2, 0, 1]),
+            _ => ack_in_order(&mut running, sent, [2, 1, 0]),
         };
-
-        running.apply_ack(r_a);
-        running.apply_ack(r_b);
-        let a3 = running.apply_ack(r_c);
+        let a3 = &acks[2].0;
 
         // After all 3 acked, checkpoint must be cp3 (last batch's checkpoint)
         assert_eq!(a3.checkpoint, Some(cp3));
+        assert_eq!(acks[2].1, 0);
         assert_eq!(running.in_flight_count(), 0);
     }
 
@@ -964,59 +987,55 @@ mod verification {
         let t3 = running.create_batch(src, cp3);
         let t4 = running.create_batch(src, cp4);
 
-        let s1 = running.begin_send(t1);
-        let s2 = running.begin_send(t2);
-        let s3 = running.begin_send(t3);
-        let s4 = running.begin_send(t4);
+        let sent = [
+            running.begin_send(t1),
+            running.begin_send(t2),
+            running.begin_send(t3),
+            running.begin_send(t4),
+        ];
 
-        // Symbolically explore all 24 orderings (s2n-quic pattern)
+        // Explore all 24 orderings, one constant permutation per arm.
         let order: u8 = kani::any_where(|&o: &u8| o < 24);
-        let (r_a, r_b, r_c, r_d) = match order {
-            0 => (s1.ack(), s2.ack(), s3.ack(), s4.ack()),
-            1 => (s1.ack(), s2.ack(), s4.ack(), s3.ack()),
-            2 => (s1.ack(), s3.ack(), s2.ack(), s4.ack()),
-            3 => (s1.ack(), s3.ack(), s4.ack(), s2.ack()),
-            4 => (s1.ack(), s4.ack(), s2.ack(), s3.ack()),
-            5 => (s1.ack(), s4.ack(), s3.ack(), s2.ack()),
-            6 => (s2.ack(), s1.ack(), s3.ack(), s4.ack()),
-            7 => (s2.ack(), s1.ack(), s4.ack(), s3.ack()),
-            8 => (s2.ack(), s3.ack(), s1.ack(), s4.ack()),
-            9 => (s2.ack(), s3.ack(), s4.ack(), s1.ack()),
-            10 => (s2.ack(), s4.ack(), s1.ack(), s3.ack()),
-            11 => (s2.ack(), s4.ack(), s3.ack(), s1.ack()),
-            12 => (s3.ack(), s1.ack(), s2.ack(), s4.ack()),
-            13 => (s3.ack(), s1.ack(), s4.ack(), s2.ack()),
-            14 => (s3.ack(), s2.ack(), s1.ack(), s4.ack()),
-            15 => (s3.ack(), s2.ack(), s4.ack(), s1.ack()),
-            16 => (s3.ack(), s4.ack(), s1.ack(), s2.ack()),
-            17 => (s3.ack(), s4.ack(), s2.ack(), s1.ack()),
-            18 => (s4.ack(), s1.ack(), s2.ack(), s3.ack()),
-            19 => (s4.ack(), s1.ack(), s3.ack(), s2.ack()),
-            20 => (s4.ack(), s2.ack(), s1.ack(), s3.ack()),
-            21 => (s4.ack(), s2.ack(), s3.ack(), s1.ack()),
-            22 => (s4.ack(), s3.ack(), s1.ack(), s2.ack()),
-            _ => (s4.ack(), s3.ack(), s2.ack(), s1.ack()),
+        let [(a1, n1), (_, n2), (_, n3), (a4, n4)] = match order {
+            0 => ack_in_order(&mut running, sent, [0, 1, 2, 3]),
+            1 => ack_in_order(&mut running, sent, [0, 1, 3, 2]),
+            2 => ack_in_order(&mut running, sent, [0, 2, 1, 3]),
+            3 => ack_in_order(&mut running, sent, [0, 2, 3, 1]),
+            4 => ack_in_order(&mut running, sent, [0, 3, 1, 2]),
+            5 => ack_in_order(&mut running, sent, [0, 3, 2, 1]),
+            6 => ack_in_order(&mut running, sent, [1, 0, 2, 3]),
+            7 => ack_in_order(&mut running, sent, [1, 0, 3, 2]),
+            8 => ack_in_order(&mut running, sent, [1, 2, 0, 3]),
+            9 => ack_in_order(&mut running, sent, [1, 2, 3, 0]),
+            10 => ack_in_order(&mut running, sent, [1, 3, 0, 2]),
+            11 => ack_in_order(&mut running, sent, [1, 3, 2, 0]),
+            12 => ack_in_order(&mut running, sent, [2, 0, 1, 3]),
+            13 => ack_in_order(&mut running, sent, [2, 0, 3, 1]),
+            14 => ack_in_order(&mut running, sent, [2, 1, 0, 3]),
+            15 => ack_in_order(&mut running, sent, [2, 1, 3, 0]),
+            16 => ack_in_order(&mut running, sent, [2, 3, 0, 1]),
+            17 => ack_in_order(&mut running, sent, [2, 3, 1, 0]),
+            18 => ack_in_order(&mut running, sent, [3, 0, 1, 2]),
+            19 => ack_in_order(&mut running, sent, [3, 0, 2, 1]),
+            20 => ack_in_order(&mut running, sent, [3, 1, 0, 2]),
+            21 => ack_in_order(&mut running, sent, [3, 1, 2, 0]),
+            22 => ack_in_order(&mut running, sent, [3, 2, 0, 1]),
+            _ => ack_in_order(&mut running, sent, [3, 2, 1, 0]),
         };
 
         // Assert progression after each ACK: advanced flag, checkpoint, and in_flight_count.
-        // With symbolic ordering, intermediate checkpoint depends on which batch was acked.
-        let a1 = running.apply_ack(r_a);
-        assert_eq!(running.in_flight_count(), 3);
+        assert_eq!(n1, 3);
         // First ack only advances if batch 1 (the oldest) was acked
         if a1.advanced {
             assert!(a1.checkpoint.is_some(), "advanced but no checkpoint");
         }
+        assert_eq!(n2, 2);
+        assert_eq!(n3, 1);
 
-        let _a2 = running.apply_ack(r_b);
-        assert_eq!(running.in_flight_count(), 2);
-
-        let _a3 = running.apply_ack(r_c);
-        assert_eq!(running.in_flight_count(), 1);
-
-        let a4 = running.apply_ack(r_d);
         // After all 4 acked in any order, checkpoint must be cp4
         assert!(a4.advanced, "final ack must advance checkpoint");
         assert_eq!(a4.checkpoint, Some(cp4));
+        assert_eq!(n4, 0);
         assert_eq!(running.in_flight_count(), 0);
 
         // Verify interesting orderings are reachable
@@ -1046,31 +1065,33 @@ mod verification {
         kani::assume(cp1 <= 8);
         kani::assume(cp2 <= 8);
         kani::assume(cp3 <= 8);
+        // The machine treats checkpoints as opaque and commits each batch's
+        // own value, so it is monotonic only if checkpoints are created in
+        // nondecreasing order, as file offsets are. The TLA+ model assumes
+        // the same: there a batch's checkpoint is its sequence number.
+        // Without this, Kani finds acks of (cp1=1, cp2=0) "regressing".
+        kani::assume(cp1 <= cp2 && cp2 <= cp3);
 
         let t1 = running.create_batch(src, cp1);
         let t2 = running.create_batch(src, cp2);
         let t3 = running.create_batch(src, cp3);
-        let s1 = running.begin_send(t1);
-        let s2 = running.begin_send(t2);
-        let s3 = running.begin_send(t3);
+        let sent = [
+            running.begin_send(t1),
+            running.begin_send(t2),
+            running.begin_send(t3),
+        ];
 
         let order: u8 = kani::any_where(|&o: &u8| o < 6);
-        let (r_a, r_b, r_c) = match order {
-            0 => (s1.ack(), s2.ack(), s3.ack()),
-            1 => (s1.ack(), s3.ack(), s2.ack()),
-            2 => (s2.ack(), s1.ack(), s3.ack()),
-            3 => (s2.ack(), s3.ack(), s1.ack()),
-            4 => (s3.ack(), s1.ack(), s2.ack()),
-            _ => (s3.ack(), s2.ack(), s1.ack()),
+        let [(adv_a, _), (adv_b, _), (adv_c, _)] = match order {
+            0 => ack_in_order(&mut running, sent, [0, 1, 2]),
+            1 => ack_in_order(&mut running, sent, [0, 2, 1]),
+            2 => ack_in_order(&mut running, sent, [1, 0, 2]),
+            3 => ack_in_order(&mut running, sent, [1, 2, 0]),
+            4 => ack_in_order(&mut running, sent, [2, 0, 1]),
+            _ => ack_in_order(&mut running, sent, [2, 1, 0]),
         };
-
-        let adv_a = running.apply_ack(r_a);
         let cp_after_a = adv_a.checkpoint;
-
-        let adv_b = running.apply_ack(r_b);
         let cp_after_b = adv_b.checkpoint;
-
-        let adv_c = running.apply_ack(r_c);
         let cp_after_c = adv_c.checkpoint;
 
         // Checkpoint must not regress between consecutive acks
@@ -1394,7 +1415,7 @@ mod proptests {
         fn in_flight_consistent(actions in proptest::collection::vec(action_strategy(), 1..50)) {
             let mut running: PipelineMachine<Running, u64> =
                 PipelineMachine::<Starting, u64>::new().start();
-            let mut sending: BTreeMap<u32, Vec<BatchTicket<Sending, u64>>> = BTreeMap::new();
+            let mut sending: OrdMap<u32, Vec<BatchTicket<Sending, u64>>> = OrdMap::new();
 
             for action in actions {
                 match action {
@@ -1466,7 +1487,7 @@ mod proptests {
                 indices.swap(i, j);
             }
 
-            let mut ticket_map: BTreeMap<usize, BatchTicket<Sending, u64>> = BTreeMap::new();
+            let mut ticket_map: OrdMap<usize, BatchTicket<Sending, u64>> = OrdMap::new();
             for (i, t) in tickets.into_iter().enumerate() {
                 ticket_map.insert(i, t);
             }
@@ -1528,8 +1549,8 @@ mod proptests {
             let mut running: PipelineMachine<Running, u64> =
                 PipelineMachine::<Starting, u64>::new().start();
 
-            let mut expected_checkpoints: BTreeMap<u32, u64> = BTreeMap::new();
-            let mut sending_queues: BTreeMap<u32, Vec<BatchTicket<Sending, u64>>> = BTreeMap::new();
+            let mut expected_checkpoints: OrdMap<u32, u64> = OrdMap::new();
+            let mut sending_queues: OrdMap<u32, Vec<BatchTicket<Sending, u64>>> = OrdMap::new();
 
             let n = batches_per_source.min(checkpoints.len() / num_sources.max(1));
             if n == 0 { return Ok(()); }
@@ -1600,16 +1621,16 @@ mod proptests {
         ) {
             let mut running: PipelineMachine<Running, u64> =
                 PipelineMachine::<Starting, u64>::new().start();
-            let mut sending: BTreeMap<
+            let mut sending: OrdMap<
                 u32,
                 Vec<BatchTicket<Sending, u64>>,
-            > = BTreeMap::new();
+            > = OrdMap::new();
             // Monotonically increasing counter per source (simulates advancing byte offset).
-            let mut next_checkpoint: BTreeMap<u32, u64> =
-                BTreeMap::new();
+            let mut next_checkpoint: OrdMap<u32, u64> =
+                OrdMap::new();
             // Maximum committed value seen per source — must never decrease.
-            let mut max_committed: BTreeMap<u64, u64> =
-                BTreeMap::new();
+            let mut max_committed: OrdMap<u64, u64> =
+                OrdMap::new();
 
             for action in actions {
                 match action {
@@ -1709,10 +1730,10 @@ mod proptests {
                 indices.swap(i, j);
             }
 
-            let mut ticket_map: BTreeMap<
+            let mut ticket_map: OrdMap<
                 usize,
                 BatchTicket<Sending, u64>,
-            > = BTreeMap::new();
+            > = OrdMap::new();
             for (i, t) in tickets.into_iter().enumerate() {
                 ticket_map.insert(i, t);
             }
