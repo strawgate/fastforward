@@ -799,6 +799,7 @@ mod verification {
 
     /// Ordered ACK: after all batches acked, committed checkpoint equals the last batch's.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(4)]
     fn verify_ordered_ack() {
         let mut running: PipelineMachine<Running, Cp> =
@@ -964,6 +965,7 @@ mod verification {
     /// the BTreeMap-based pending-ACK queue handles arbitrary depth
     /// and ordering correctly.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(5)]
     fn verify_symbolic_order_ack_4_batches() {
         let mut running: PipelineMachine<Running, Cp> =
@@ -1052,6 +1054,7 @@ mod verification {
     /// Checks all 6 ACK orderings for 3 batches — if any ordering caused a
     /// regression Kani would find the violating permutation.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(4)]
     fn verify_committed_monotonic() {
         let mut running: PipelineMachine<Running, Cp> =

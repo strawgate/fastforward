@@ -404,6 +404,7 @@ mod verification {
 
     /// Kept ranges are in bounds, non-empty, ascending, and never contain ESC.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(10)]
     fn verify_kept_ranges_exclude_escapes() {
         let bytes: [u8; 8] = kani::any();
@@ -420,10 +421,15 @@ mod verification {
             prev_end = end;
         });
         kani::cover!(len == 8 && bytes[0] == 0x1b, "escape at the start");
+        kani::cover!(
+            len == 8 && bytes[0] == 0x1b && bytes[1] == b']' && bytes[7] == b'x',
+            "OSC sequence followed by kept text"
+        );
     }
 
     /// Input without ESC is kept whole, as a single range.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(10)]
     fn verify_kept_ranges_without_escape_keep_everything() {
         let bytes: [u8; 8] = kani::any();
@@ -440,6 +446,8 @@ mod verification {
             calls += 1;
         });
         assert!(calls == usize::from(len > 0));
+        kani::cover!(len == 0, "empty input");
+        kani::cover!(len == 8, "full buffer");
     }
 }
 

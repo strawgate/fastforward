@@ -955,6 +955,7 @@ mod kani_proofs {
     // ── Property 4: Rebuild attempts never exceed MAX ──
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(5)]
     fn verify_rebuild_attempts_bounded() {
@@ -1048,6 +1049,7 @@ mod kani_proofs {
     }
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(12)]
     fn verify_has_pending_invariant_from_draining() {
@@ -1055,6 +1057,7 @@ mod kani_proofs {
     }
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(12)]
     fn verify_has_pending_invariant_from_validating() {
@@ -1062,6 +1065,7 @@ mod kani_proofs {
     }
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(12)]
     fn verify_has_pending_invariant_from_building() {
@@ -1122,6 +1126,7 @@ mod kani_proofs {
     }
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(12)]
     fn verify_drain_only_from_running_from_validating() {
@@ -1129,6 +1134,7 @@ mod kani_proofs {
     }
 
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(12)]
     fn verify_drain_only_from_running_from_building() {

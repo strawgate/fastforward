@@ -276,6 +276,7 @@ mod verification {
     /// State transitions are monotonic: Active → Draining → Committed.
     /// No backwards transitions except via upsert (re-activation).
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn state_transitions_monotonic() {
         let mut reg = SourceRegistry::<u64, u64>::new();
@@ -307,6 +308,7 @@ mod verification {
 
     /// prune_committed never removes Active or Draining entries.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn prune_never_removes_active_or_draining() {
         let mut reg = SourceRegistry::<u64, u64>::new();
@@ -333,6 +335,7 @@ mod verification {
 
     /// upsert on an existing Committed entry re-activates it.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn upsert_reactivates_committed() {
         let mut reg = SourceRegistry::<u64, u64>::new();
@@ -349,6 +352,7 @@ mod verification {
 
     /// prune_committed respects generation — only prunes old entries.
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof
     #[kani::unwind(5)] // ArrayMap loops run at most KANI_MAP_CAPACITY (4) times
     fn prune_respects_generation() {
         let mut reg = SourceRegistry::<u64, u64>::new();
