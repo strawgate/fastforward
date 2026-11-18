@@ -1140,9 +1140,13 @@ mod verification {
     /// the message body is not a JSON object, the plain text is preserved in
     /// the `body` field rather than being silently discarded.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(11)] // memcmp in starts_with walks the 9-byte prefix
+    #[kani::solver(kissat)] // ~60s
     fn verify_non_json_msg_uses_body_key() {
-        let msg: [u8; 4] = kani::any();
+        // Two symbolic bytes reach every branch (leading whitespace, then a
+        // non-'{' byte through each escape arm). Four bytes ran CBMC out of
+        // memory (>14 GB) on the CI runner.
+        let msg: [u8; 2] = kani::any();
         let mut i = 0usize;
         while i < msg.len() && is_json_whitespace(msg[i]) {
             i += 1;
