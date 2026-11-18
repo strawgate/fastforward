@@ -74,14 +74,15 @@ jobs:
       - name: Verify nightly-only harnesses
         run: |
           status=0
-          for crate in $(grep -v '^\s*#' scripts/kani_nightly_only.txt | awk 'NF {print $1}' | sort -u); do
-            lib=""
-            if [ "$crate" = "ffwd-arrow" ]; then lib="--lib"; fi
+          while read -r crate; do
+            extra=()
+            if [ "$crate" = "ffwd-arrow" ]; then extra=(--lib); fi
+            # </dev/null: cargo must not read the crate list from stdin.
             python3 scripts/kani_shard.py --crate "$crate" \
-              --shard ${{ matrix.shard }} --of 4 \
+              --shard "${{ matrix.shard }}" --of 4 \
               --jobs 2 --memory-limit-gb 7 --harness-timeout 30m \
-              --nightly-only $lib || status=1
-          done
+              --nightly-only "${extra[@]}" </dev/null || status=1
+          done < <(awk '!/^[[:space:]]*#/ && NF {print $1}' scripts/kani_nightly_only.txt | sort -u)
           exit $status
 
   tla-pipeline-nightly-thorough:
