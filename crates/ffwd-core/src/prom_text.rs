@@ -1874,6 +1874,7 @@ mod verification {
     /// SIMD classifier agrees with the scalar specification on every block.
     #[kani::proof]
     #[kani::unwind(65)]
+    #[kani::solver(kissat)] // >10 s on the default solver (VERIFICATION.md)
     pub(super) fn verify_prom_structural_mask_simd_eq_scalar() {
         let block: [u8; 64] = kani::any();
         let simd = prom_structural_mask(&block);
@@ -1890,6 +1891,7 @@ mod verification {
     #[kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)]
     #[kani::proof]
     #[kani::unwind(6)]
+    #[kani::solver(kissat)] // >10 s on the default solver (VERIFICATION.md)
     pub(super) fn verify_parse_prom_value_integers() {
         let n: u16 = kani::any();
         let mut buf = [0u8; 5];
@@ -1916,6 +1918,7 @@ mod verification {
     #[kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)]
     #[kani::proof]
     #[kani::unwind(8)]
+    #[kani::solver(kissat)] // >10 s on the default solver (VERIFICATION.md)
     pub(super) fn verify_parse_prom_value_signed_decimal_exact() {
         let n: u8 = kani::any();
         let sign: u8 = kani::any();
@@ -2067,6 +2070,7 @@ mod verification {
         feature = "kani-slow",
         kani::proof,
         kani::unwind(10),
+        kani::solver(kissat),
         kani::stub(prom_structural_mask, prom_structural_mask_stub),
         kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
     )]
@@ -2101,6 +2105,7 @@ mod verification {
         feature = "kani-slow",
         kani::proof,
         kani::unwind(10),
+        kani::solver(kissat),
         kani::stub(prom_structural_mask, prom_structural_mask_stub),
         kani::stub(parse_prom_value_fallback, parse_prom_value_fallback_stub)
     )]
