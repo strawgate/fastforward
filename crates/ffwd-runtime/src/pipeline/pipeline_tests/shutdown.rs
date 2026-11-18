@@ -187,6 +187,9 @@ impl Sink for GatedCountingSink {
 ///    shutdown is cancelled and only then is the sink released.
 ///
 /// Every line must reach the sink. With the bug, the queued batches are lost.
+// `serial` keeps this test from overlapping the `#[serial]` failpoint tests:
+// the process-wide `skip_channel_drain` failpoint would drop queued batches.
+#[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn drain_ingress_then_shutdown_delivers_queued_batches() {
     const LINES: u64 = 12;
