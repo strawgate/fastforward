@@ -170,12 +170,8 @@ pub(crate) fn validate_generated_config_read_only(
 fn typed_probe_columns(
     input: &ffwd_config::InputTypeConfig,
 ) -> &'static [(&'static str, arrow::datatypes::DataType)] {
-    use arrow::datatypes::DataType;
     match input {
-        ffwd_config::InputTypeConfig::PrometheusScrape(_) => &[
-            ("__value__", DataType::Float64),
-            ("__timestamp_ms__", DataType::Int64),
-        ],
+        ffwd_config::InputTypeConfig::PrometheusScrape(_) => &ffwd_arrow::prom::PROM_TYPED_COLUMNS,
         _ => &[],
     }
 }
@@ -956,6 +952,18 @@ mod tests {
             read_only.is_err(),
             "effective-config validation should reject duplicate aliases"
         );
+    }
+
+    #[test]
+    fn full_validation_accepts_prometheus_select_star_with_typed_where() {
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [http://localhost:9100/metrics]",
+            "SELECT *, __value__ + 1 AS next FROM logs WHERE __name__ = 'up' AND __value__ > 0",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        assert!(runtime.is_ok(), "full validation failed: {runtime:?}");
     }
 
     #[test]

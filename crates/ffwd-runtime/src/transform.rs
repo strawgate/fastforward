@@ -122,6 +122,11 @@ impl ConfiguredSqlTransform {
             .map_err(TransformError::from_df_error)
     }
 
+    /// Declare column types the input always produces, for `validate_plan`.
+    pub fn set_probe_column_types(&mut self, types: Vec<(String, arrow::datatypes::DataType)>) {
+        self.inner.set_probe_column_types(types);
+    }
+
     /// Set the geo-IP database for the `geo_lookup()` UDF.
     pub fn set_geo_database(&mut self, db: std::sync::Arc<dyn enrichment::GeoDatabase>) {
         self.inner.set_geo_database(db);

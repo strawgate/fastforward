@@ -49,6 +49,9 @@ pub struct SqlTransform {
     /// Logical plan for `user_sql`, reused while the registered providers
     /// stay the same. Cleared whenever a provider is replaced.
     pub(crate) plan: Option<LogicalPlan>,
+    /// Column types the input is known to produce, used by `validate_plan`'s
+    /// probe batch. Columns not listed here are probed as Utf8.
+    probe_column_types: Vec<(String, DataType)>,
 }
 
 impl SqlTransform {
@@ -66,7 +69,15 @@ impl SqlTransform {
             logs_table: None,
             enrichment_slots: Vec::new(),
             plan: None,
+            probe_column_types: Vec::new(),
         })
+    }
+
+    /// Declare column types the input always produces (for example
+    /// Float64 `__value__` from a Prometheus scrape), so `validate_plan`
+    /// probes them with the right type.
+    pub fn set_probe_column_types(&mut self, types: Vec<(String, DataType)>) {
+        self.probe_column_types = types;
     }
 
     /// Set the geo-IP database for the `geo_lookup()` UDF.
@@ -332,8 +343,15 @@ impl SqlTransform {
     /// duplicate aliases, validate window specs, etc.) at validation time
     /// rather than waiting for the first real batch at runtime.
     pub fn validate_plan(&mut self) -> Result<(), TransformError> {
-        use arrow::array::{ArrayRef, StringArray};
+        use arrow::array::{ArrayRef, new_null_array};
         use arrow::datatypes::{Field, Schema};
+
+        let probe_type = |name: &str| {
+            self.probe_column_types
+                .iter()
+                .find(|(typed, _)| typed == name)
+                .map_or(DataType::Utf8, |(_, ty)| ty.clone())
+        };
 
         // Build a schema from the scanner-facing field names, not raw SQL
         // identifier spelling. DataFusion normalizes unquoted identifiers
@@ -341,24 +359,39 @@ impl SqlTransform {
         let scan_config = self.analyzer.scan_config();
         let fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty()
         {
-            // SELECT * — provide a minimal representative schema.
-            vec![
+            // SELECT * — a minimal representative schema, the input's typed
+            // columns, and every column the query names elsewhere
+            // (`WHERE __name__ = 'up'`).
+            let mut fields = vec![
                 Field::new(field_names::BODY, DataType::Utf8, true),
                 Field::new("level", DataType::Utf8, true),
                 Field::new("msg", DataType::Utf8, true),
-            ]
+            ];
+            fields.extend(
+                self.probe_column_types
+                    .iter()
+                    .map(|(name, ty)| Field::new(name.as_str(), ty.clone(), true)),
+            );
+            let mut referenced: Vec<&String> = self.analyzer.referenced_columns.iter().collect();
+            referenced.sort();
+            for name in referenced {
+                if !fields.iter().any(|f| f.name() == name) {
+                    fields.push(Field::new(name.as_str(), probe_type(name), true));
+                }
+            }
+            fields
         } else {
             scan_config
                 .wanted_fields
                 .iter()
-                .map(|field| Field::new(field.name.as_str(), DataType::Utf8, true))
+                .map(|field| Field::new(field.name.as_str(), probe_type(&field.name), true))
                 .collect()
         };
 
         let schema = Arc::new(Schema::new(fields.clone()));
         let arrays: Vec<ArrayRef> = fields
             .iter()
-            .map(|_| Arc::new(StringArray::from(vec![Option::<&str>::None])) as ArrayRef)
+            .map(|field| new_null_array(field.data_type(), 1))
             .collect();
 
         let batch = RecordBatch::try_new(schema, arrays)
