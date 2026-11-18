@@ -612,6 +612,22 @@ jobs:
         source = 'SHARDS: dict[str, int] = {"ffwd-core": 0, "ffwd-arrow": 2}\n'
         self.assertEqual(extract_kani_plan_crates(source), {"ffwd-arrow"})
 
+    def test_kani_plan_selects_crates_from_changed_paths(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("kani_plan", ROOT / "scripts" / "kani_plan.py")
+        assert spec and spec.loader
+        kani_plan = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(kani_plan)
+        plan = kani_plan.affected_kani_crates
+        self.assertEqual(plan(["README.md"]), set())
+        self.assertEqual(
+            plan(["dev-docs/verification/kani-boundary-contract.toml"]), set(kani_plan.SHARDS)
+        )
+        # Nested workspace member, reached through ffwd-io's dependencies.
+        nested = "crates/ffwd-ebpf-proto/sensor-ebpf/sensor-ebpf-common/src/lib.rs"
+        self.assertIn("ffwd-io", plan([nested]))
+
     def test_extract_kani_args_crates_uses_kani_action_step(self) -> None:
         ci_text = """
 jobs:

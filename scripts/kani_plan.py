@@ -63,11 +63,24 @@ GLOBAL_INPUTS = {
 MAX_LISTED_FILES = 3000
 
 
+def workspace_manifests() -> list[Path]:
+    """Manifests of the root workspace members (globs expanded, excludes dropped)."""
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    excluded = {(ROOT / path).resolve() for path in workspace.get("exclude", [])}
+    manifests: set[Path] = set()
+    for pattern in workspace.get("members", []):
+        for member in ROOT.glob(pattern):
+            manifest = member / "Cargo.toml"
+            if manifest.is_file() and member.resolve() not in excluded:
+                manifests.add(manifest)
+    return sorted(manifests)
+
+
 def workspace_crates() -> dict[str, tuple[str, set[str]]]:
     """Map crate name -> (crate dir relative to ROOT, workspace deps)."""
     crates: dict[str, tuple[str, set[str]]] = {}
     raw: dict[str, tuple[str, dict]] = {}
-    for manifest in sorted(ROOT.glob("crates/*/Cargo.toml")):
+    for manifest in workspace_manifests():
         data = tomllib.loads(manifest.read_text(encoding="utf-8"))
         name = data.get("package", {}).get("name")
         if name:
