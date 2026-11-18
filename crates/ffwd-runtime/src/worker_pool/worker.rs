@@ -462,6 +462,7 @@ pub(super) async fn process_item(
 mod tests {
     use std::collections::BTreeSet;
     use std::future::Future;
+    use std::io;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::time::Duration;
@@ -525,7 +526,7 @@ mod tests {
             Box::pin(async { SendResult::Ok })
         }
 
-        fn flush(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -533,7 +534,7 @@ mod tests {
             "ok-sink"
         }
 
-        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -549,7 +550,7 @@ mod tests {
             Box::pin(std::future::pending())
         }
 
-        fn flush(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -557,7 +558,43 @@ mod tests {
             "hanging-sink"
         }
 
-        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct WouldBlockThenOkSink {
+        calls: usize,
+    }
+
+    impl Sink for WouldBlockThenOkSink {
+        fn send_batch<'a>(
+            &'a mut self,
+            _batch: &'a RecordBatch,
+            _metadata: &'a BatchMetadata,
+        ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+            let result = if self.calls == 0 {
+                self.calls += 1;
+                SendResult::IoError(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "buffer pool exhausted",
+                ))
+            } else {
+                self.calls += 1;
+                SendResult::Ok
+            };
+            Box::pin(async move { result })
+        }
+
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn name(&self) -> &str {
+            "would-block-then-ok"
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -645,6 +682,36 @@ mod tests {
 
         assert_eq!(outcome, DeliveryOutcome::PoolClosed);
         assert_eq!(retries, 0);
+    }
+
+    #[tokio::test]
+    async fn process_item_treats_would_block_as_transient_backpressure() {
+        let cancel = CancellationToken::new();
+        let mut sink = WouldBlockThenOkSink { calls: 0 };
+        let output_health = Arc::new(OutputHealthTracker::new(vec![]));
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::default(),
+            observed_time_ns: 0,
+        };
+
+        let (outcome, _send_latency_ns, retries) = process_item(
+            ProcessItemContext {
+                worker_id: 0,
+                sink: &mut sink,
+                output_health: &output_health,
+                metadata: &metadata,
+                max_retry_delay: Duration::from_millis(1),
+                cancel: &cancel,
+                #[cfg(feature = "turmoil")]
+                batch_id: 0, // test only
+            },
+            make_batch(),
+        )
+        .await;
+
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+        assert_eq!(retries, 1);
+        assert_eq!(sink.calls, 2);
     }
 
     #[test]

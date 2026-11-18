@@ -1,7 +1,7 @@
 //! Pipelined sink: separates serialization (CPU) from transport (I/O).
 //!
-//! The pipeline uses a dedicated OS thread for I/O, overlapping serialization
-//! of batch N+1 with writing of batch N. A triple-buffered pool avoids
+//! The pipeline uses a dedicated OS thread for I/O and a small buffer pool to
+//! keep blocking file writes off the caller's serialization path without
 //! allocation churn.
 //!
 //! # Architecture
@@ -26,7 +26,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self as std_mpsc, SyncSender};
 use std::thread::{self, JoinHandle};
 
 use arrow::record_batch::RecordBatch;
@@ -110,15 +110,15 @@ impl Default for PipelineConfig {
 
 enum WriterMsg {
     /// A filled buffer ready to be written.
-    Data(Vec<u8>),
+    Data {
+        buf: Vec<u8>,
+        ack: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// Flush request with a one-shot ack channel.
     Flush(SyncSender<io::Result<()>>),
     /// Shutdown request — writer should flush, sync, then exit.
     Shutdown(SyncSender<io::Result<()>>),
 }
-
-/// Sent from writer thread to signal a write failure.
-struct WriteError(io::Error);
 
 // ---------------------------------------------------------------------------
 // PipelinedSink
@@ -134,11 +134,10 @@ pub struct PipelinedSink<S: BatchSerializer> {
     filled_tx: Option<SyncSender<WriterMsg>>,
 
     /// Channel to receive empty (recycled) buffers back from the writer.
-    empty_rx: mpsc::Receiver<Vec<u8>>,
+    empty_rx: std_mpsc::Receiver<Vec<u8>>,
 
-    /// Channel to receive write errors from the writer thread.
-    /// Non-blocking: checked before each send_batch to surface I/O failures.
-    error_rx: mpsc::Receiver<WriteError>,
+    /// Caller-owned spare buffer for serialization failures.
+    spare_buf: Option<Vec<u8>>,
 
     /// Handle to the writer thread (for join on shutdown).
     writer_handle: Option<JoinHandle<()>>,
@@ -162,9 +161,8 @@ impl<S: BatchSerializer> PipelinedSink<S> {
             ));
         }
 
-        let (filled_tx, filled_rx) = mpsc::sync_channel::<WriterMsg>(config.num_buffers);
-        let (empty_tx, empty_rx) = mpsc::sync_channel::<Vec<u8>>(config.num_buffers);
-        let (error_tx, error_rx) = mpsc::sync_channel::<WriteError>(config.num_buffers);
+        let (filled_tx, filled_rx) = std_mpsc::sync_channel::<WriterMsg>(config.num_buffers);
+        let (empty_tx, empty_rx) = std_mpsc::sync_channel::<Vec<u8>>(config.num_buffers);
 
         // Seed the empty buffer pool.
         for _ in 0..config.num_buffers {
@@ -174,7 +172,7 @@ impl<S: BatchSerializer> PipelinedSink<S> {
         let writer_handle = thread::Builder::new()
             .name(format!("ffwd-writer-{}", serializer.name()))
             .spawn(move || {
-                writer_thread_loop(writer, filled_rx, empty_tx, error_tx);
+                writer_thread_loop(writer, filled_rx, empty_tx);
             })
             .map_err(io::Error::other)?;
 
@@ -183,48 +181,50 @@ impl<S: BatchSerializer> PipelinedSink<S> {
             stats,
             filled_tx: Some(filled_tx),
             empty_rx,
-            error_rx,
+            spare_buf: None,
             writer_handle: Some(writer_handle),
         })
     }
 
-    /// Check for write errors from the writer thread (non-blocking).
-    ///
-    /// Returns the first queued error, if any. This surfaces I/O failures
-    /// from previous batches — a write error on batch N is reported during
-    /// `send_batch` for batch N+1.
-    fn check_writer_error(&self) -> io::Result<()> {
-        match self.error_rx.try_recv() {
-            Ok(WriteError(e)) => Err(e),
-            Err(_) => Ok(()),
+    /// Try to get an empty buffer from the pool without blocking the async
+    /// worker thread.
+    fn acquire_buffer(&mut self) -> io::Result<Vec<u8>> {
+        if let Some(buf) = self.spare_buf.take() {
+            return Ok(buf);
+        }
+
+        match self.empty_rx.try_recv() {
+            Ok(buf) => Ok(buf),
+            Err(std_mpsc::TryRecvError::Empty) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "pipelined writer has no available buffer",
+            )),
+            Err(std_mpsc::TryRecvError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "writer thread exited unexpectedly",
+            )),
         }
     }
 
-    /// Get an empty buffer from the pool, blocking until one is available.
-    fn acquire_buffer(&self) -> io::Result<Vec<u8>> {
-        self.empty_rx.recv().map_err(|_recv| {
+    /// Clone the writer-thread sender before awaiting an acknowledgement.
+    fn filled_sender(&self) -> io::Result<SyncSender<WriterMsg>> {
+        self.filled_tx
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "sink already shut down"))
+    }
+
+    /// Send a filled buffer to the writer thread and wait for it to be written.
+    async fn write_filled(tx: SyncSender<WriterMsg>, buf: Vec<u8>) -> io::Result<()> {
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(WriterMsg::Data { buf, ack }).map_err(|_send| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "writer thread exited unexpectedly",
             )
-        })
-    }
-
-    /// Send a filled buffer to the writer thread.
-    fn send_filled(&self, buf: Vec<u8>) -> io::Result<()> {
-        if let Some(ref tx) = self.filled_tx {
-            tx.send(WriterMsg::Data(buf)).map_err(|_send| {
-                io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "writer thread exited unexpectedly",
-                )
-            })
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "sink already shut down",
-            ))
-        }
+        })?;
+        ack_rx.await.map_err(|_recv| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "writer thread exited before ack")
+        })?
     }
 
     /// Send a control message and wait for the ack.
@@ -232,7 +232,7 @@ impl<S: BatchSerializer> PipelinedSink<S> {
     where
         F: FnOnce(SyncSender<io::Result<()>>) -> WriterMsg,
     {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        let (ack_tx, ack_rx) = std_mpsc::sync_channel(1);
         if let Some(ref tx) = self.filled_tx {
             tx.send(make_msg(ack_tx)).map_err(|_send| {
                 io::Error::new(
@@ -259,12 +259,10 @@ impl<S: BatchSerializer> Sink for PipelinedSink<S> {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
-            // Check for write errors from previous batches before accepting new work.
-            if let Err(e) = self.check_writer_error() {
-                return SendResult::from_io_error(e);
-            }
-
-            // Acquire an empty buffer from the pool (blocks if writer is behind).
+            // Acquire an empty buffer from the pool without blocking the Tokio
+            // worker thread. If all buffers are still owned by in-flight
+            // timed-out writes, surface WouldBlock so the worker pool applies
+            // its normal transient-error backoff.
             let mut buf = match self.acquire_buffer() {
                 Ok(b) => b,
                 Err(e) => return SendResult::from_io_error(e),
@@ -275,19 +273,23 @@ impl<S: BatchSerializer> Sink for PipelinedSink<S> {
             let rows = match self.serializer.serialize(batch, metadata, &mut buf) {
                 Ok(n) => n,
                 Err(e) => {
-                    // Return buffer to pool to avoid exhaustion on repeated errors.
-                    // Send it through the writer thread as empty data — the writer
-                    // will write zero bytes (no-op) and recycle the buffer.
+                    // Keep the caller-owned buffer available without depending
+                    // on the writer thread, which may already be unhealthy.
                     buf.clear();
-                    let _ = self.send_filled(buf);
+                    self.spare_buf = Some(buf);
                     return SendResult::from_io_error(e);
                 }
             };
 
             let bytes = buf.len() as u64;
 
-            // Hand off the filled buffer to the writer thread.
-            if let Err(e) = self.send_filled(buf) {
+            // Hand off the filled buffer and wait for the writer to report the
+            // OS write result before acknowledging delivery to the worker pool.
+            let filled_tx = match self.filled_sender() {
+                Ok(tx) => tx,
+                Err(e) => return SendResult::from_io_error(e),
+            };
+            if let Err(e) = Self::write_filled(filled_tx, buf).await {
                 return SendResult::from_io_error(e);
             }
 
@@ -339,23 +341,23 @@ impl<S: BatchSerializer> Drop for PipelinedSink<S> {
 
 fn writer_thread_loop(
     mut writer: impl BatchWriter,
-    filled_rx: mpsc::Receiver<WriterMsg>,
+    filled_rx: std_mpsc::Receiver<WriterMsg>,
     empty_tx: SyncSender<Vec<u8>>,
-    error_tx: SyncSender<WriteError>,
 ) {
     while let Ok(msg) = filled_rx.recv() {
         match msg {
-            WriterMsg::Data(buf) => {
-                if let Err(e) = writer.write(&buf) {
+            WriterMsg::Data { buf, ack } => {
+                let result = writer.write(&buf);
+                if let Err(e) = &result {
                     tracing::error!(error = %e, "pipelined writer: write failed");
-                    // Notify the caller about the write failure.
-                    let _ = error_tx.try_send(WriteError(e));
                 }
                 // Recycle the buffer back to the pool.
                 let mut recycled = buf;
                 recycled.clear();
-                // If send fails, the sink is being dropped — just let the buffer go.
-                let _ = empty_tx.try_send(recycled);
+                // Preserve the fixed-size pool. If send fails, the sink is
+                // being dropped, so letting the buffer go is fine.
+                let _ = empty_tx.send(recycled);
+                let _ = ack.send(result);
             }
             WriterMsg::Flush(ack) => {
                 let result = writer.flush();
@@ -378,10 +380,11 @@ fn writer_thread_loop(
 
 /// Pre-allocation chunk size: 64 MB.
 ///
-/// When the file is opened (or needs more space), we ask the OS to reserve
-/// this much contiguous space.  This avoids per-write metadata updates on
-/// ext4/xfs/APFS that slow down sequential extending writes.
-const PREALLOC_BYTES: i64 = 64 * 1024 * 1024;
+/// On Linux/macOS, when the file is opened, we ask the OS to reserve this much
+/// space up front. This reduces per-write metadata updates on filesystems such
+/// as ext4, XFS, and APFS during sequential extending writes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PREALLOC_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A [`BatchWriter`] that writes to a file using blocking std::fs I/O.
 ///
@@ -389,7 +392,7 @@ const PREALLOC_BYTES: i64 = 64 * 1024 * 1024;
 ///
 /// | Platform | Optimization |
 /// |----------|-------------|
-/// | Linux | `fallocate` pre-allocation, `POSIX_FADV_DONTNEED` after writes |
+/// | Linux | `fallocate` pre-allocation, `POSIX_FADV_DONTNEED` after writes via `rustix` |
 /// | macOS | `F_PREALLOCATE`, `F_NOCACHE` (bypass UBC for written pages) |
 /// | Windows | (standard `write_all` — no extra APIs yet) |
 pub struct FileWriter {
@@ -407,7 +410,7 @@ impl FileWriter {
         // Initialize bytes_written to the current file position so that
         // FADV_DONTNEED offsets are correct when appending to existing files.
         #[cfg(target_os = "linux")]
-        let bytes_written = file.metadata().map_or(0, |m| m.len());
+        let bytes_written = file.metadata().map_or_else(|_| 0, |m| m.len());
 
         Self {
             file,
@@ -422,63 +425,52 @@ impl FileWriter {
         Self::apply_linux_hints(file);
         #[cfg(target_os = "macos")]
         Self::apply_macos_hints(file);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = file;
     }
 
     /// Linux: pre-allocate space with `fallocate` and set sequential advice.
     #[cfg(target_os = "linux")]
     fn apply_linux_hints(file: &std::fs::File) {
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
+        use rustix::fs::{Advice, FallocateFlags, fadvise, fallocate};
 
         // Pre-allocate disk space to avoid metadata updates on every
         // extending write.  KEEP_SIZE means the visible file size is not
         // changed — only the underlying blocks are reserved.
-        // SAFETY: fd is valid (owned by `file`), flags and offsets are correct.
-        // fallocate failure is benign (returns -1, we ignore).
-        unsafe {
-            let _ = libc::fallocate(fd, libc::FALLOC_FL_KEEP_SIZE, 0, PREALLOC_BYTES);
-        }
+        let _ = fallocate(file, FallocateFlags::KEEP_SIZE, 0, PREALLOC_BYTES);
 
         // Tell the kernel we're doing sequential writes so it can optimize
         // read-ahead and page cache management.
-        // SAFETY: fd is valid (owned by `file`), POSIX_FADV_SEQUENTIAL is an
-        // advisory hint that cannot cause UB regardless of return value.
-        unsafe {
-            let _ = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
+        let _ = fadvise(file, 0, None, Advice::Sequential);
     }
 
     /// macOS: set `F_NOCACHE` and pre-allocate with `F_PREALLOCATE`.
     #[cfg(target_os = "macos")]
     fn apply_macos_hints(file: &std::fs::File) {
         use std::os::unix::io::AsRawFd;
+
         let fd = file.as_raw_fd();
 
-        // F_NOCACHE: bypass the Unified Buffer Cache for this fd.
-        // Written pages won't linger in memory — good for a forwarder that
-        // produces write-only data consumers won't re-read via this fd.
-        // SAFETY: fd is valid (owned by `file`), F_NOCACHE with arg=1 is a
-        // hint that cannot cause UB regardless of return value.
+        // F_NOCACHE bypasses the Unified Buffer Cache for this descriptor so
+        // write-only log data does not linger in process-visible cache.
+        // SAFETY: `fd` is owned by `file`, and F_NOCACHE with arg=1 is an
+        // advisory descriptor hint that is safe to ignore on failure.
         unsafe {
             let _ = libc::fcntl(fd, libc::F_NOCACHE, 1i32);
         }
 
-        // F_PREALLOCATE: reserve contiguous disk space.
-        // This is macOS's equivalent of Linux fallocate — it avoids
-        // fragmentation and repeated metadata updates during sequential
-        // extending writes.
-        // SAFETY: fd is valid (owned by `file`), fstore_t is zero-initialized
-        // then fully populated.  fcntl(F_PREALLOCATE) reads the struct by
-        // pointer and never writes through it.
+        // F_PREALLOCATE is macOS's fallocate equivalent. It reserves space
+        // without changing the visible file length.
+        // SAFETY: `fd` is owned by `file`; `store` is fully initialized before
+        // the kernel reads it, and fcntl does not retain the pointer.
         unsafe {
             let mut store: libc::fstore_t = std::mem::zeroed();
             store.fst_flags = libc::F_ALLOCATECONTIG;
             store.fst_posmode = libc::F_PEOFPOSMODE;
             store.fst_offset = 0;
-            store.fst_length = PREALLOC_BYTES;
+            store.fst_length = PREALLOC_BYTES as libc::off_t;
             let ret = libc::fcntl(fd, libc::F_PREALLOCATE, &store);
             if ret == -1 {
-                // Contiguous allocation failed — retry allowing fragments.
                 store.fst_flags = libc::F_ALLOCATEALL;
                 let _ = libc::fcntl(fd, libc::F_PREALLOCATE, &store);
             }
@@ -491,18 +483,14 @@ impl FileWriter {
     /// write-only log data that will never be re-read by this process.
     #[cfg(target_os = "linux")]
     fn advise_dontneed(&self, offset: u64, len: u64) {
-        use std::os::unix::io::AsRawFd;
-        let fd = self.file.as_raw_fd();
-        // SAFETY: fd is valid (owned by `self.file`), offset and len describe
-        // already-written data, POSIX_FADV_DONTNEED is an advisory hint.
-        unsafe {
-            let _ = libc::posix_fadvise(
-                fd,
-                offset as libc::off_t,
-                len as libc::off_t,
-                libc::POSIX_FADV_DONTNEED,
-            );
-        }
+        use std::num::NonZeroU64;
+
+        use rustix::fs::{Advice, fadvise};
+
+        let Some(len) = NonZeroU64::new(len) else {
+            return;
+        };
+        let _ = fadvise(&self.file, offset, Some(len), Advice::DontNeed);
     }
 }
 
@@ -576,5 +564,477 @@ impl BatchSerializer for JsonBatchSerializer {
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use arrow::datatypes::Schema;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+
+    use super::*;
+
+    struct FixedSerializer {
+        rows: u64,
+        payload: &'static [u8],
+    }
+
+    impl BatchSerializer for FixedSerializer {
+        fn serialize(
+            &mut self,
+            _batch: &RecordBatch,
+            _metadata: &BatchMetadata,
+            buf: &mut Vec<u8>,
+        ) -> io::Result<u64> {
+            buf.extend_from_slice(self.payload);
+            Ok(self.rows)
+        }
+
+        fn name(&self) -> &str {
+            "fixed"
+        }
+    }
+
+    struct FailsOnceSerializer {
+        failed_once: bool,
+        rows: u64,
+        payload: &'static [u8],
+    }
+
+    impl BatchSerializer for FailsOnceSerializer {
+        fn serialize(
+            &mut self,
+            _batch: &RecordBatch,
+            _metadata: &BatchMetadata,
+            buf: &mut Vec<u8>,
+        ) -> io::Result<u64> {
+            if self.failed_once {
+                buf.extend_from_slice(self.payload);
+                Ok(self.rows)
+            } else {
+                self.failed_once = true;
+                Err(io::Error::other("encode failed"))
+            }
+        }
+
+        fn name(&self) -> &str {
+            "fails-once"
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ScriptStep {
+        serialize_ok: bool,
+        write_ok: bool,
+        rows: u64,
+        payload: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug)]
+    enum ScriptOp {
+        Send(ScriptStep),
+        Flush,
+    }
+
+    type SharedWritePlan = Arc<Mutex<VecDeque<ScriptStep>>>;
+
+    struct ScriptedSerializer {
+        steps: VecDeque<ScriptStep>,
+        write_plan: SharedWritePlan,
+    }
+
+    impl BatchSerializer for ScriptedSerializer {
+        fn serialize(
+            &mut self,
+            _batch: &RecordBatch,
+            _metadata: &BatchMetadata,
+            buf: &mut Vec<u8>,
+        ) -> io::Result<u64> {
+            let step = self
+                .steps
+                .pop_front()
+                .ok_or_else(|| io::Error::other("missing scripted serialize step"))?;
+            if !step.serialize_ok {
+                return Err(io::Error::other("scripted encode failure"));
+            }
+            buf.extend_from_slice(&step.payload);
+            self.write_plan
+                .lock()
+                .expect("scripted write plan mutex")
+                .push_back(step.clone());
+            Ok(step.rows)
+        }
+
+        fn name(&self) -> &str {
+            "scripted"
+        }
+    }
+
+    struct RecordingWriter {
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl BatchWriter for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<()> {
+            self.writes
+                .lock()
+                .expect("recording writer mutex")
+                .push(buf.to_vec());
+            Ok(())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ScriptedWriter {
+        write_plan: SharedWritePlan,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl BatchWriter for ScriptedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<()> {
+            let step = self
+                .write_plan
+                .lock()
+                .expect("scripted write plan mutex")
+                .pop_front()
+                .ok_or_else(|| io::Error::other("missing scripted write step"))?;
+            if buf != step.payload.as_slice() {
+                return Err(io::Error::other("scripted payload mismatch"));
+            }
+            if step.write_ok {
+                self.writes
+                    .lock()
+                    .expect("scripted writes mutex")
+                    .push(buf.to_vec());
+                Ok(())
+            } else {
+                Err(io::Error::other("scripted write failure"))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingWriter;
+
+    impl BatchWriter for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<()> {
+            Err(io::Error::other("disk full"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct DelayedThenFailWriter {
+        release_first: std_mpsc::Receiver<()>,
+        writes: usize,
+    }
+
+    impl BatchWriter for DelayedThenFailWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<()> {
+            self.writes += 1;
+            if self.writes == 1 {
+                self.release_first
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+                Ok(())
+            } else {
+                Err(io::Error::other("second write failed"))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn empty_batch() -> RecordBatch {
+        RecordBatch::new_empty(Arc::new(Schema::empty()))
+    }
+
+    fn metadata() -> BatchMetadata {
+        BatchMetadata {
+            resource_attrs: Arc::default(),
+            observed_time_ns: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_batch_returns_only_after_writer_success() {
+        let stats = Arc::new(ComponentStats::new());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = PipelinedSink::new(
+            FixedSerializer {
+                rows: 2,
+                payload: b"ok\n",
+            },
+            RecordingWriter {
+                writes: Arc::clone(&writes),
+            },
+            Arc::clone(&stats),
+            PipelineConfig {
+                num_buffers: 1,
+                buf_capacity: 16,
+            },
+        )
+        .expect("sink");
+
+        let batch = empty_batch();
+        let result = sink.send_batch(&batch, &metadata()).await;
+
+        assert!(result.is_ok(), "result: {result:?}");
+        assert_eq!(
+            writes.lock().expect("recording writer mutex").as_slice(),
+            &[b"ok\n".to_vec()]
+        );
+        assert_eq!(stats.lines_total.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.bytes_total.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn send_batch_reports_writer_error_without_success_counters() {
+        let stats = Arc::new(ComponentStats::new());
+        let mut sink = PipelinedSink::new(
+            FixedSerializer {
+                rows: 2,
+                payload: b"lost\n",
+            },
+            FailingWriter,
+            Arc::clone(&stats),
+            PipelineConfig {
+                num_buffers: 1,
+                buf_capacity: 16,
+            },
+        )
+        .expect("sink");
+
+        let batch = empty_batch();
+        let result = sink.send_batch(&batch, &metadata()).await;
+
+        assert!(
+            matches!(result, SendResult::IoError(_)),
+            "result: {result:?}"
+        );
+        assert_eq!(stats.lines_total.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.bytes_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn serialization_error_keeps_buffer_available_for_retry() {
+        let stats = Arc::new(ComponentStats::new());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = PipelinedSink::new(
+            FailsOnceSerializer {
+                failed_once: false,
+                rows: 1,
+                payload: b"retry\n",
+            },
+            RecordingWriter {
+                writes: Arc::clone(&writes),
+            },
+            Arc::clone(&stats),
+            PipelineConfig {
+                num_buffers: 1,
+                buf_capacity: 16,
+            },
+        )
+        .expect("sink");
+
+        let batch = empty_batch();
+        let first = sink.send_batch(&batch, &metadata()).await;
+        assert!(matches!(first, SendResult::IoError(_)), "result: {first:?}");
+
+        let second = sink.send_batch(&batch, &metadata()).await;
+        assert!(second.is_ok(), "result: {second:?}");
+        assert_eq!(
+            writes.lock().expect("recording writer mutex").as_slice(),
+            &[b"retry\n".to_vec()]
+        );
+        assert_eq!(stats.lines_total.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.bytes_total.load(Ordering::Relaxed), 6);
+    }
+
+    #[tokio::test]
+    async fn timed_out_send_does_not_satisfy_next_batch_ack() {
+        let stats = Arc::new(ComponentStats::new());
+        let (release_first_tx, release_first_rx) = std_mpsc::channel();
+        let mut sink = PipelinedSink::new(
+            FixedSerializer {
+                rows: 1,
+                payload: b"batch\n",
+            },
+            DelayedThenFailWriter {
+                release_first: release_first_rx,
+                writes: 0,
+            },
+            Arc::clone(&stats),
+            PipelineConfig {
+                num_buffers: 1,
+                buf_capacity: 16,
+            },
+        )
+        .expect("sink");
+
+        let batch = empty_batch();
+        let first = tokio::time::timeout(
+            Duration::from_millis(10),
+            sink.send_batch(&batch, &metadata()),
+        )
+        .await;
+        assert!(first.is_err(), "first send should time out");
+
+        let second =
+            tokio::time::timeout(Duration::from_secs(1), sink.send_batch(&batch, &metadata()))
+                .await
+                .expect("buffer acquisition should not block the Tokio worker");
+        assert!(
+            matches!(second, SendResult::IoError(ref error) if error.kind() == io::ErrorKind::WouldBlock),
+            "second send should report buffer backpressure, got {second:?}"
+        );
+
+        release_first_tx.send(()).expect("release first write");
+        let third = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let result = sink.send_batch(&batch, &metadata()).await;
+                if !matches!(result, SendResult::IoError(ref error) if error.kind() == io::ErrorKind::WouldBlock)
+                {
+                    break result;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("writer should recycle the first timed-out buffer");
+        assert!(
+            matches!(third, SendResult::IoError(_)),
+            "third send must receive its own write failure, got {third:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(1), sink.shutdown())
+            .await
+            .expect("shutdown should not hang")
+            .expect("shutdown");
+        assert_eq!(stats.lines_total.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.bytes_total.load(Ordering::Relaxed), 0);
+    }
+
+    fn script_step_strategy() -> impl Strategy<Value = ScriptStep> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            0u64..8,
+            prop::collection::vec(any::<u8>(), 0..64),
+        )
+            .prop_map(|(serialize_ok, write_ok, rows, payload)| ScriptStep {
+                serialize_ok,
+                write_ok,
+                rows,
+                payload,
+            })
+    }
+
+    fn script_op_strategy() -> impl Strategy<Value = ScriptOp> {
+        prop_oneof![
+            script_step_strategy().prop_map(ScriptOp::Send),
+            Just(ScriptOp::Flush),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_send_and_flush_sequences_count_only_acked_writes(
+            ops in prop::collection::vec(script_op_strategy(), 1..32)
+        ) {
+            let send_steps = ops
+                .iter()
+                .filter_map(|op| match op {
+                    ScriptOp::Send(step) => Some(step.clone()),
+                    ScriptOp::Flush => None,
+                })
+                .collect();
+            let write_plan = Arc::new(Mutex::new(VecDeque::new()));
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let stats = Arc::new(ComponentStats::new());
+            let mut sink = PipelinedSink::new(
+                ScriptedSerializer {
+                    steps: send_steps,
+                    write_plan: Arc::clone(&write_plan),
+                },
+                ScriptedWriter {
+                    write_plan,
+                    writes: Arc::clone(&writes),
+                },
+                Arc::clone(&stats),
+                PipelineConfig {
+                    num_buffers: 1,
+                    buf_capacity: 64,
+                },
+            )
+            .expect("sink");
+            let batch = empty_batch();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let (expected_writes, expected_rows, expected_bytes) = runtime.block_on(async {
+                let mut expected_writes = Vec::new();
+                let mut expected_rows = 0u64;
+                let mut expected_bytes = 0u64;
+
+                for op in &ops {
+                    match op {
+                        ScriptOp::Send(step) => {
+                            let result = sink.send_batch(&batch, &metadata()).await;
+                            let should_succeed = step.serialize_ok && step.write_ok;
+                            prop_assert_eq!(result.is_ok(), should_succeed);
+                            if should_succeed {
+                                expected_rows += step.rows;
+                                expected_bytes += step.payload.len() as u64;
+                                expected_writes.push(step.payload.clone());
+                            }
+                        }
+                        ScriptOp::Flush => {
+                            sink.flush().await.expect("flush");
+                        }
+                    }
+                }
+
+                sink.shutdown().await.expect("shutdown");
+                Ok::<_, TestCaseError>((expected_writes, expected_rows, expected_bytes))
+            })?;
+
+            let actual_writes = writes.lock().expect("scripted writes mutex").clone();
+            prop_assert_eq!(actual_writes, expected_writes);
+            prop_assert_eq!(stats.lines_total.load(Ordering::Relaxed), expected_rows);
+            prop_assert_eq!(stats.bytes_total.load(Ordering::Relaxed), expected_bytes);
+        }
     }
 }
