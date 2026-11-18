@@ -472,6 +472,21 @@ mod tests {
     }
 
     #[test]
+    fn label_named_like_value_column_is_kept_as_string() {
+        let batch = scan("m{__value__=\"raw\"} 2\n");
+        let label = batch
+            .column_by_name("label:__value__")
+            .expect("prefixed label column")
+            .as_string_view();
+        assert_eq!(label.value(0), "raw");
+        let values = batch
+            .column_by_name("__value__")
+            .expect("value")
+            .as_primitive::<Float64Type>();
+        assert_eq!(values.value(0), 2.0);
+    }
+
+    #[test]
     fn rejects_malformed_and_recovers_for_next_scrape() {
         let mut b = PromBatchBuilder::default();
         assert!(matches!(

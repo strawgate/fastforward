@@ -40,6 +40,16 @@ pub const PROM_TIMESTAMP_FIELD: &[u8] = b"__timestamp_ms__";
 /// Column holding the metric family type from `# TYPE` (e.g. `counter`).
 pub const PROM_TYPE_FIELD: &[u8] = b"__type__";
 
+/// Prefix for labels whose name collides with a synthetic column
+/// (`__value__`, `__timestamp_ms__`, `__type__`). Such labels are invalid in
+/// Prometheus (the `__` prefix is reserved) but are kept rather than dropped.
+pub const PROM_RESERVED_LABEL_PREFIX: &[u8] = b"label:";
+
+#[inline(always)]
+fn is_reserved_column(key: &[u8]) -> bool {
+    key == PROM_VALUE_FIELD || key == PROM_TIMESTAMP_FIELD || key == PROM_TYPE_FIELD
+}
+
 /// Builder extension used by the Prometheus scanner for pre-parsed numbers.
 ///
 /// The JSON scanner hands numbers to builders as raw ASCII. Prometheus values
@@ -435,9 +445,34 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         idx
     }
 
+    /// Resolve a label key that cannot be used as-is: escaped keys are
+    /// decoded, and keys equal to a synthetic column name are prefixed with
+    /// [`PROM_RESERVED_LABEL_PREFIX`] so they never overwrite or get dropped
+    /// by `__value__` / `__timestamp_ms__` / `__type__`.
+    fn resolve_owned_key(&mut self, start: usize, end: usize, escaped: bool) -> usize {
+        let mut k = core::mem::take(&mut self.scratch.decoded);
+        let raw = &self.buf[start..end];
+        if escaped {
+            unescape_into(raw, &mut k);
+        } else {
+            k.clear();
+            k.extend_from_slice(raw);
+        }
+        if is_reserved_column(&k) {
+            k.splice(0..0, PROM_RESERVED_LABEL_PREFIX.iter().copied());
+        }
+        let idx = self.builder.resolve_field(&k);
+        self.scratch.decoded = k;
+        idx
+    }
+
     /// Parse `{...}` starting just after `{`. Returns position after `}` and,
     /// for the UTF-8 quoted-name syntax (`{"my.metric", a="b"}`), the name.
-    fn labels(&mut self, mut pos: usize) -> Result<(usize, Option<Quoted>), PromParseError> {
+    fn labels(
+        &mut self,
+        mut pos: usize,
+        has_name: bool,
+    ) -> Result<(usize, Option<Quoted>), PromParseError> {
         let mut quoted_name: Option<Quoted> = None;
         let mut slot = 0usize;
         loop {
@@ -465,12 +500,25 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
                         return Err(self.err(pos, PromErrorKind::InvalidLabels));
                     }
                     let (val, after) = self.read_quoted(pos + 1)?;
-                    let idx = if key_escaped {
-                        unescape_into(&self.buf[key.0..key.1], &mut self.scratch.decoded);
-                        let k = core::mem::take(&mut self.scratch.decoded);
-                        let idx = self.builder.resolve_field(&k);
-                        self.scratch.decoded = k;
-                        idx
+                    let raw_key = &self.buf[key.0..key.1];
+                    if !key_escaped && raw_key == PROM_NAME_FIELD {
+                        // `{__name__="m"}` names the metric (Prometheus 3 form).
+                        if has_name || quoted_name.is_some() {
+                            return Err(self.err(key.0, PromErrorKind::InvalidLabels));
+                        }
+                        quoted_name = Some(val);
+                        pos = skip_blanks(self.buf, after);
+                        match self.byte(pos) {
+                            Some(b',') => {
+                                pos += 1;
+                                continue;
+                            }
+                            Some(b'}') => return Ok((pos + 1, quoted_name)),
+                            _ => return Err(self.err(pos, PromErrorKind::InvalidLabels)),
+                        }
+                    }
+                    let idx = if key_escaped || is_reserved_column(raw_key) {
+                        self.resolve_owned_key(key.0, key.1, key_escaped)
                     } else {
                         self.resolve_key(slot, key.0, key.1)
                     };
@@ -547,7 +595,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         };
         p = skip_blanks(self.buf, p);
         if self.byte(p) == Some(b'{') {
-            let (after, quoted) = self.labels(p + 1)?;
+            let (after, quoted) = self.labels(p + 1, name.is_some())?;
             if name.is_none() {
                 name = quoted;
             }
@@ -848,6 +896,37 @@ mod tests {
                 ("__value__", "1.0"),
             ])]
         );
+    }
+
+    #[test]
+    fn labels_named_like_synthetic_columns_are_kept_under_prefix() {
+        let rows = scan("m{__value__=\"raw\",__type__=\"t\",__timestamp_ms__=\"x\"} 1\n")
+            .expect("should succeed");
+        assert_eq!(
+            rows,
+            vec![row(&[
+                ("label:__value__", "raw"),
+                ("label:__type__", "t"),
+                ("label:__timestamp_ms__", "x"),
+                ("__name__", "m"),
+                ("__value__", "1.0"),
+            ])]
+        );
+    }
+
+    #[test]
+    fn name_label_sets_metric_name_and_rejects_duplicates() {
+        let rows = scan("{__name__=\"my.metric\",a=\"b\"} 1\n").expect("should succeed");
+        assert_eq!(
+            rows,
+            vec![row(&[
+                ("a", "b"),
+                ("__name__", "my.metric"),
+                ("__value__", "1.0")
+            ])]
+        );
+        let err = scan("foo{__name__=\"bar\"} 1\n").expect_err("duplicate name");
+        assert_eq!(err.kind, PromErrorKind::InvalidLabels);
     }
 
     #[test]
