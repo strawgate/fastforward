@@ -400,9 +400,9 @@ The `body` column can store the full input line and is often larger than all par
 
 CI runs `cargo clippy --workspace -- -D warnings` (all warnings are errors) on the Rust version pinned in `rust-toolchain.toml`. Bare `cargo clippy` only shows warnings, and `just clippy` skips the non-default members (`ffwd-transform`, `ffwd`), so code that looks clean locally can fail in CI. Use `just clippy-all` or `scripts/ci-local.sh pre-push` (which the pre-push hook runs). Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
 
-### CI tracks stable Rust, so a new toolchain can turn main red
+### The Rust toolchain is pinned; bump it on purpose
 
-`rust-toolchain.toml` pins `channel = "stable"`, so CI picks up each new Rust release (and its new clippy lints) without any commit. Rust 1.100 added several lints and changed cargo's build-dir layout. If Lint suddenly fails on code nobody touched, check the toolchain version in the job log first.
+CI used to track `stable`, so each new Rust release (and its new clippy lints) could turn main red without any commit. Rust 1.100 did exactly that: it added several lints and changed cargo's build-dir layout. `rust-toolchain.toml` now pins an exact version, and CI's setup-rust action installs that version. To upgrade, bump the pin in its own PR and fix whatever new lints it brings in that same PR.
 
 ### Locate the `ff` binary with `CARGO_BIN_EXE_ff` in integration tests
 
