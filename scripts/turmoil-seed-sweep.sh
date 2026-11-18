@@ -10,6 +10,9 @@
 #                              (default 3000). Unrun seeds are recorded in
 #                              <out-dir>/skipped_seeds.txt instead of the job
 #                              being cancelled by the runner timeout.
+#   TURMOIL_SWEEP_START_EPOCH  Unix time the budget is measured from (default:
+#                              when this script starts). CI passes the job
+#                              start so setup/build time counts too.
 #   TURMOIL_SEED_TIMEOUT_SECS  Per-seed wall-clock limit (default 600). A seed
 #                              that exceeds it is recorded as a TIMEOUT failure.
 #   TURMOIL_SIM_BIN            Prebuilt turmoil_sim test binary. When unset the
@@ -70,7 +73,7 @@ fi
 echo "Test binary: $BIN"
 echo "Shard ${SHARD_INDEX}/${SHARD_COUNT}: seeds where ((seed-1) % ${SHARD_COUNT}) == ${SHARD_INDEX}"
 
-start=$(date +%s)
+start=${TURMOIL_SWEEP_START_EPOCH:-$(date +%s)}
 run=0
 failed=0
 skipped=0

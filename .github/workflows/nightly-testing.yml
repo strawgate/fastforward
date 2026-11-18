@@ -143,6 +143,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
+      - name: Record job start for the sweep time budget
+        run: echo "TURMOIL_SWEEP_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-rust
       - name: Set up Go
@@ -153,11 +155,12 @@ jobs:
         run: cargo test -p ffwd --no-default-features --features turmoil --test turmoil_sim --no-run
       - name: Run turmoil tests with shard-assigned seeds
         env:
-          # Stop starting new seeds well before the 75-minute job timeout so
-          # results are always uploaded. Budget: ~10 min setup/build + 50 min
-          # of seeds + one last seed (<= 5 min + 30 s kill grace) + upload.
-          # Healthy seeds take 5-20 s, so the per-seed cap only catches hangs.
-          TURMOIL_SWEEP_BUDGET_SECS: "3000"
+          # Budget is measured from job start (setup and build included):
+          # stop starting seeds at 62 min, leaving 13 min for one last seed
+          # (<= 5 min + 30 s kill grace) and the upload within the 75-minute
+          # job timeout. Healthy seeds take 5-20 s, so the per-seed cap only
+          # catches hangs.
+          TURMOIL_SWEEP_BUDGET_SECS: "3720"
           TURMOIL_SEED_TIMEOUT_SECS: "300"
         run: |
           scripts/turmoil-seed-sweep.sh "${{ matrix.shard_index }}" 8 1000 \
