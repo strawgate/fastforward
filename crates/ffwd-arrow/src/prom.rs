@@ -1,6 +1,6 @@
 //! Prometheus text exposition → Arrow `RecordBatch`.
 //!
-//! [`PromBatchBuilder`] drives [`ffwd_core::prom_text::scan_prom_text`] into a
+//! [`PromBatchBuilder`](crate::prom::PromBatchBuilder) drives [`ffwd_core::prom_text::scan_prom_text`] into a
 //! purpose-built dense column builder (`PromColumns`). The scanner validates
 //! the whole scrape body as UTF-8 once up front, so every metric name, label
 //! value and `# TYPE` token becomes a zero-copy `Utf8View` that points into
