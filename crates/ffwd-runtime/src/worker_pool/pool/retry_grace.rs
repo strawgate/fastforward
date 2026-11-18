@@ -21,7 +21,9 @@ pub const DEFAULT_SHUTDOWN_RETRY_GRACE: Duration = Duration::from_secs(10);
 /// their normal backoff for `grace`, so a brief output blip during a
 /// restart still delivers. When the window closes, the stop token fires:
 /// a worker that is backing off gives up at once, and later failures are
-/// not retried. Those batches resolve as [`DeliveryOutcome::PoolClosed`],
+/// not retried. Stopping is cooperative: a retry can start at or just after
+/// expiry and is abandoned when the worker next polls it. Those batches
+/// resolve as [`DeliveryOutcome::PoolClosed`],
 /// so their checkpoints are held and they replay on the next start.
 ///
 /// Clones share state, so a task that does not hold the pool (for example

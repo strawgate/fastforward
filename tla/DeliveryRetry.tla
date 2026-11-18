@@ -259,7 +259,11 @@ AbortBackoff ==
 
 \* AbortRetrySend: the retry window closes while a retry (not a batch's
 \* first attempt) is mid-send. Maps to the stop_retrying.cancelled() arm
-\* guarded by is_retry in process_item's send select!.
+\* guarded by is_retry in process_item's send select!. Stopping is
+\* cooperative: in Rust the token can fire just after the pre-send check,
+\* so a retry can start at expiry. Send's ~stopRetrying guard is atomic
+\* here, but StopRetrying may fire in the very next step, which covers that
+\* race: the retry then ends via AbortRetrySend or a sink response.
 AbortRetrySend ==
     /\ state = "Sending"
     /\ retryCount > 0

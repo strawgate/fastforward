@@ -306,9 +306,11 @@ The file path is:
   capped by the pool drain timeout), so a brief output blip still delivers.
   When the window closes, a worker in backoff gives up at once and later
   transient failures are not retried: the batch resolves as `PoolClosed` (held,
-  checkpoint not advanced). A retry that is mid-send when the window closes is
-  abandoned (the batch is held, so a send that did land is replayed:
-  at-least-once). A batch's first attempt is not cut short: it runs until it
+  checkpoint not advanced). Stopping is cooperative, not a hard barrier: a
+  retry can start at or just after the window closes, and a retry that is
+  mid-send is abandoned the next time the worker polls it. Either way the
+  batch is held, so a send that did land is replayed (at-least-once). A
+  batch's first attempt is not cut short: it runs until it
   completes, hits the per-batch send timeout, or the pool drain timeout
   cancels the worker.
   For an output that refuses connections or returns errors, shutdown therefore

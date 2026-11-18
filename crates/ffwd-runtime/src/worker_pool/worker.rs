@@ -299,10 +299,12 @@ pub(super) async fn process_item(
     let mut retries_count = 0;
 
     loop {
-        // The retry window can close between the backoff sleep finishing and
-        // this retry starting. A new batch still gets its first attempt, but
-        // a retry after the window closed must not start. A retry that is
-        // already sending when the window closes is abandoned below.
+        // Stopping retries is cooperative, not a hard barrier. This check
+        // skips a retry when the window has already closed. The window can
+        // still close just after it, so a retry may be invoked at or after
+        // expiry; the `select!` below then abandons it at its next poll. In
+        // both cases the batch is held (at-least-once). A batch's first
+        // attempt is never skipped or cut short by the window.
         let is_retry = retries_count > 0;
         if is_retry && stop_retrying.is_cancelled() {
             tracing::info!(
@@ -321,9 +323,10 @@ pub(super) async fn process_item(
                 send_latency_ns += send_start.elapsed().as_nanos() as u64;
                 return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
             }
-            // Retries are bounded by the shutdown retry window, including one
-            // that is mid-send when the window closes. The batch is held, so
-            // if the abandoned send did reach the output it is replayed
+            // Cooperative cancellation of a retry send: observed when this
+            // future is next polled after the window closes, so the sink may
+            // already have started the request. The batch is held, so if the
+            // abandoned send did reach the output it is replayed
             // (at-least-once). A batch's first attempt is not cut short.
             () = stop_retrying.cancelled(), if is_retry => {
                 tracing::info!(
