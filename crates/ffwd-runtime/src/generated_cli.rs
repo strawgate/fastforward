@@ -193,32 +193,33 @@ pub fn render_blast_yaml(
 
 /// Render the devour-generated YAML.
 pub fn render_devour_yaml(mode: DevourModeSpec, listen: &str, diagnostics_addr: &str) -> String {
+    // Each input renders as a sequence item under `pipelines.devour.inputs`.
     let input = match mode {
         DevourModeSpec::Otlp => format!(
-            "input:\n  type: otlp\n  listen: {}\n  format: json\n",
+            "      - type: otlp\n        listen: {}\n        format: json\n",
             yaml_quote(listen)
         ),
         DevourModeSpec::Http => format!(
-            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/'\n    strict_path: false\n    method: POST\n    response_code: 204\n",
+            "      - type: http\n        listen: {}\n        format: json\n        http:\n          path: '/'\n          strict_path: false\n          method: POST\n          response_code: 204\n",
             yaml_quote(listen)
         ),
         DevourModeSpec::ElasticsearchBulk => format!(
-            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/_bulk'\n    strict_path: false\n    method: POST\n    response_code: 200\n    response_body: {}\n",
+            "      - type: http\n        listen: {}\n        format: json\n        http:\n          path: '/_bulk'\n          strict_path: false\n          method: POST\n          response_code: 200\n          response_body: {}\n",
             yaml_quote(listen),
             yaml_quote("{\"took\":0,\"errors\":false,\"items\":[]}")
         ),
         DevourModeSpec::Tcp => format!(
-            "input:\n  type: tcp\n  listen: {}\n  format: json\n",
+            "      - type: tcp\n        listen: {}\n        format: json\n",
             yaml_quote(listen)
         ),
         DevourModeSpec::Udp => format!(
-            "input:\n  type: udp\n  listen: {}\n  format: json\n",
+            "      - type: udp\n        listen: {}\n        format: json\n",
             yaml_quote(listen)
         ),
     };
 
     format!(
-        "{input}output:\n  type: \"null\"\nserver:\n  diagnostics: {}\n",
+        "pipelines:\n  devour:\n    inputs:\n{input}    outputs:\n      - type: \"null\"\nserver:\n  diagnostics: {}\n",
         yaml_quote(diagnostics_addr),
     )
 }
@@ -331,5 +332,20 @@ mod tests {
 
         assert!(yaml.contains("      - type: \"null\""));
         Config::load_str(&yaml).expect("quoted null blast YAML should parse");
+    }
+
+    #[test]
+    fn devour_config_loads_for_every_mode() {
+        for mode in [
+            DevourModeSpec::Otlp,
+            DevourModeSpec::Http,
+            DevourModeSpec::ElasticsearchBulk,
+            DevourModeSpec::Tcp,
+            DevourModeSpec::Udp,
+        ] {
+            let generated = build_devour_generated_config(mode, "127.0.0.1:4318", "127.0.0.1:0")
+                .unwrap_or_else(|err| panic!("devour {mode:?} config should load: {err}"));
+            assert_eq!(generated.config.pipelines.len(), 1);
+        }
     }
 }
