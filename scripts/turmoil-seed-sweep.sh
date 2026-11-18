@@ -104,14 +104,15 @@ for seed in $(seq 1 "$TOTAL_SEEDS"); do
 
     # libtest ends with a "failures:" block listing one test per indented
     # line just before "test result:". Captured test output can also contain
-    # "failures:" lines, so keep only the last block seen before the summary.
+    # "failures:" or "test result:" lines, so keep the block that precedes
+    # the last "test result:" line.
     tests=$(awk '
       /^failures:$/ { list = ""; inblock = 1; next }
-      /^test result:/ { exit }
+      /^test result:/ { final = list; list = ""; inblock = 0; next }
       inblock && /^    [^ ]/ { sub(/^    /, ""); list = list $0 "\n"; next }
       inblock && /^$/ { next }
       inblock { inblock = 0; list = "" }
-      END { printf "%s", list }
+      END { printf "%s", final }
     ' "$seed_out")
     if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
       tests="TIMEOUT after ${SEED_TIMEOUT_SECS}s"
