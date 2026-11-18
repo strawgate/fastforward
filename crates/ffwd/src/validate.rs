@@ -241,23 +241,44 @@ fn validate_transform_probe_read_only(
         })
         .collect();
 
+    // Metadata columns replace a same-named column the query referenced
+    // (`WHERE __source_id = 2`), so the probe never holds a duplicate.
+    let mut set_column = |field: Field, array: ArrayRef| {
+        if let Some(i) = fields.iter().position(|f| f.name() == field.name()) {
+            fields[i] = field;
+            arrays[i] = array;
+        } else {
+            fields.push(field);
+            arrays.push(array);
+        }
+    };
+
     if source_metadata == SourceMetadataStyle::Fastforward {
-        fields.push(Field::new(SOURCE_ID, DataType::UInt64, true));
-        arrays.push(Arc::new(UInt64Array::from(vec![Some(1u64)])) as ArrayRef);
+        set_column(
+            Field::new(SOURCE_ID, DataType::UInt64, true),
+            Arc::new(UInt64Array::from(vec![Some(1u64)])) as ArrayRef,
+        );
     }
 
+    let file_path = || Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef;
     match source_metadata {
         SourceMetadataStyle::Ecs => {
-            fields.push(Field::new(ECS_FILE_PATH, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(ECS_FILE_PATH, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::Otel => {
-            fields.push(Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::Vector => {
-            fields.push(Field::new(VECTOR_FILE, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(VECTOR_FILE, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::None | SourceMetadataStyle::Fastforward => {}
         _ => {}
@@ -952,6 +973,35 @@ mod tests {
             read_only.is_err(),
             "effective-config validation should reject duplicate aliases"
         );
+    }
+
+    #[test]
+    fn select_star_probe_does_not_duplicate_referenced_metadata_column() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/logs.json
+        format: json
+        source_metadata: fastforward
+    transform: SELECT * FROM logs WHERE __source_id = 2
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
     }
 
     #[test]
