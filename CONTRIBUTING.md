@@ -12,27 +12,18 @@
 
 ## Pre-Commit Checklist
 
-We use [pre-commit](https://pre-commit.com/) to automatically run fast checks (formatting and linting) before every commit. 
-
-To set it up:
-1. Install pre-commit: `pip install pre-commit` (or your preferred manager)
-2. Install the hooks: `pre-commit install`
-
-If you prefer manual checks, run these before every commit:
+Install the git hooks once per clone (works without `just` or the pre-commit framework):
 
 ```bash
-# Format code
-just fmt
-
-# Run clippy (zero warnings required)
-just clippy
-
-# Run tests
-just test
-
-# Or run everything at once:
-just ci
+scripts/install-hooks.sh     # or: just install-hooks
 ```
+
+- **pre-commit** runs `scripts/ci-local.sh pre-commit`: `cargo fmt --check`, taplo, typos, and the python guardrails. It takes seconds.
+- **pre-push** runs `scripts/ci-local.sh pre-push`: everything in CI's Lint job, including `cargo clippy --workspace -- -D warnings` on the pinned toolchain, rustdoc, `cargo deny`, and `cargo machete`.
+
+If you use the [pre-commit](https://pre-commit.com/) framework, `pre-commit install` installs the same two hooks from `.pre-commit-config.yaml`.
+
+Run `just fmt` (or `cargo fmt`) to fix formatting, and `just test` before opening a PR. See "Keeping CI green" in `AGENTS.md` for common CI failures.
 
 ## Pre-Push Checklist
 
