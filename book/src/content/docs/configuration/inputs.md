@@ -271,13 +271,18 @@ with one row per sample: `__name__`, `__value__`, `__timestamp_ms__`,
 Send it to an `otlp` output to export OTLP metrics.
 
 ```yaml
-input:
-  type: prometheus_scrape
-  job: node
-  targets:
-    - http://localhost:9100/metrics
-  scrape_interval_ms: 15000
-  compression: none   # none (default) | gzip
+pipelines:
+  default:
+    inputs:
+      - type: prometheus_scrape
+        job: node
+        targets:
+          - http://localhost:9100/metrics
+        scrape_interval_ms: 15000
+        compression: none   # none (default) | gzip
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4318
 ```
 
 See the [configuration reference](/configuration/reference/#prometheus_scrape-input)
