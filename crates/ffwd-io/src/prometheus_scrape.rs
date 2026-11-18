@@ -20,7 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, ArrayRef, AsArray, Int64Array, StringViewArray, UInt32Array};
-use arrow::datatypes::{DataType, Field, Int64Type, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Int64Type, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use bytes::{Bytes, BytesMut};
 use ffwd_arrow::prom::{PromBatchBuilder, PromToArrowError, append_series_id};
@@ -37,7 +37,7 @@ pub const DEFAULT_SCRAPE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default response size limit.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Default limit on distinct label columns in one scrape.
-pub const DEFAULT_MAX_LABEL_COLUMNS: usize = 1000;
+pub const DEFAULT_MAX_LABEL_COLUMNS: usize = ffwd_arrow::prom::DEFAULT_MAX_LABEL_COLUMNS;
 
 /// Batches buffered between the scrape tasks and the pipeline. A full
 /// channel delays the next scrape (backpressure) rather than dropping data.
@@ -132,14 +132,15 @@ impl PrometheusScrapeInput {
             ));
         }
         let mut targets = Vec::with_capacity(settings.targets.len());
-        for url in &settings.targets {
+        for (i, url) in settings.targets.iter().enumerate() {
+            // Errors name the target by index: the URL may carry credentials.
             let parsed = reqwest::Url::parse(url).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("target '{url}': {e}"))
+                io::Error::new(io::ErrorKind::InvalidInput, format!("targets[{i}]: {e}"))
             })?;
             let host = parsed.host_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("target '{url}' has no host"),
+                    format!("targets[{i}] has no host"),
                 )
             })?;
             let instance = match parsed.port_or_known_default() {
@@ -147,16 +148,13 @@ impl PrometheusScrapeInput {
                 None => host.to_string(),
             };
             targets.push(Target {
+                display: redact_url(url),
                 url: parsed,
                 instance,
             });
         }
 
-        let client = reqwest::Client::builder()
-            .no_gzip()
-            .user_agent(concat!("ffwd/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(io::Error::other)?;
+        let client = build_client(&settings).map_err(io::Error::other)?;
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -266,7 +264,62 @@ impl InputSource for PrometheusScrapeInput {
 
 struct Target {
     url: reqwest::Url,
+    /// `url` without credentials or query string, for logs.
+    display: String,
     instance: String,
+}
+
+/// A target URL safe to log: scheme, host, port and path only. User info,
+/// query string and fragment are dropped since they can carry secrets.
+/// Unparseable input is replaced by a placeholder.
+pub fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("");
+            match u.port() {
+                Some(port) => format!("{}://{host}:{port}{}", u.scheme(), u.path()),
+                None => format!("{}://{host}{}", u.scheme(), u.path()),
+            }
+        }
+        Err(_) => "<invalid url>".to_string(),
+    }
+}
+
+fn is_same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Most redirects followed for one scrape (reqwest's default).
+const MAX_REDIRECTS: usize = 10;
+
+/// HTTP client for all targets of one input.
+///
+/// When custom headers are configured (often credentials), redirects are
+/// followed only within the original scheme, host and port so the headers
+/// never reach another server; a cross-origin redirect fails the scrape.
+fn build_client(settings: &PrometheusScrapeSettings) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .no_gzip()
+        .user_agent(concat!("ffwd/", env!("CARGO_PKG_VERSION")));
+    if !settings.headers.is_empty() {
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let previous = attempt.previous();
+            if previous.len() > MAX_REDIRECTS {
+                return attempt.error("too many redirects");
+            }
+            let same = previous
+                .first()
+                .is_some_and(|first| is_same_origin(first, attempt.url()));
+            if same {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }));
+    }
+    builder.build()
 }
 
 /// Stable start offset in `[0, interval)` for a target, so a fleet of
@@ -306,13 +359,17 @@ async fn run_target(
             _ = ticker.tick() => {}
             _ = shutdown.changed() => return,
         }
-        let result = scrape_once(&client, &target, &settings, &mut builder).await;
+        // A scrape can take up to the timeout; don't hold up shutdown for it.
+        let result = tokio::select! {
+            r = scrape_once(&client, &target, &settings, &mut builder) => r,
+            _ = shutdown.changed() => return,
+        };
         match result {
             Ok(scraped) => {
                 if failing {
                     failing = false;
                     shared.failing.fetch_sub(1, Ordering::Relaxed);
-                    tracing::info!(input = %input, target = %target.url, "prometheus_scrape: target recovered");
+                    tracing::info!(input = %input, target = %target.display, "prometheus_scrape: target recovered");
                 }
                 let sent = tokio::select! {
                     r = tx.send(scraped) => r.is_ok(),
@@ -332,7 +389,7 @@ async fn run_target(
                 if last_error_log.is_none_or(|t| now.duration_since(t) >= ERROR_LOG_INTERVAL) {
                     tracing::warn!(
                         input = %input,
-                        target = %target.url,
+                        target = %target.display,
                         error = %e,
                         suppressed,
                         "prometheus_scrape: scrape failed"
@@ -371,6 +428,11 @@ impl std::fmt::Display for ScrapeError {
     }
 }
 
+/// reqwest errors embed the request URL, which may carry credentials.
+fn http_error(e: reqwest::Error) -> ScrapeError {
+    ScrapeError::Http(e.without_url())
+}
+
 /// True for `application/openmetrics-text` (any parameters).
 fn is_openmetrics_content_type(value: &[u8]) -> bool {
     let media = value.split(|&b| b == b';').next().unwrap_or_default();
@@ -403,7 +465,7 @@ async fn scrape_once(
     for (k, v) in &settings.headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let mut resp = req.send().await.map_err(ScrapeError::Http)?;
+    let mut resp = req.send().await.map_err(http_error)?;
     let status = resp.status();
     if !status.is_success() {
         return Err(ScrapeError::Status(status.as_u16()));
@@ -423,7 +485,7 @@ async fn scrape_once(
     let mut buf = BytesMut::with_capacity(resp.content_length().map_or(64 * 1024, |n| {
         usize::try_from(n).unwrap_or(limit).min(limit)
     }));
-    while let Some(chunk) = resp.chunk().await.map_err(ScrapeError::Http)? {
+    while let Some(chunk) = resp.chunk().await.map_err(http_error)? {
         if buf.len() + chunk.len() > limit {
             return Err(ScrapeError::TooLarge(limit));
         }
@@ -461,9 +523,10 @@ async fn scrape_once(
 
 fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
     let mut out = Vec::with_capacity(input.len().saturating_mul(4).min(limit));
-    let decoder = flate2::read::GzDecoder::new(input);
+    // Multi-member: concatenated gzip streams are valid and decode in full.
+    let decoder = flate2::read::MultiGzDecoder::new(input);
     let read = decoder
-        .take(limit as u64 + 1)
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(ScrapeError::Gzip)?;
     if read > limit {
@@ -476,6 +539,8 @@ fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
 ///
 /// - Exposition labels named `job` / `instance` are renamed to
 ///   `exported_job` / `exported_instance` (Prometheus `honor_labels: false`).
+///   If that name is taken too, `exported_` is prepended again until it is
+///   free, as Prometheus does.
 /// - `job` and `instance` columns are appended for every row.
 /// - Samples without a timestamp get the scrape time; with
 ///   `honor_timestamps = false`, every sample does.
@@ -488,14 +553,18 @@ pub fn finish_batch(
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
     let num_rows = batch.num_rows();
     let schema = batch.schema();
-    let mut fields: Vec<Field> = Vec::with_capacity(schema.fields().len() + 2);
+    let mut fields: Vec<FieldRef> = Vec::with_capacity(schema.fields().len() + 2);
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len() + 2);
     let mut has_ts = false;
     for (field, col) in schema.fields().iter().zip(batch.columns()) {
         let name = field.name().as_str();
         match name {
             "job" | "instance" => {
-                fields.push(field.as_ref().clone().with_name(format!("exported_{name}")));
+                let mut renamed = format!("exported_{name}");
+                while schema.field_with_name(&renamed).is_ok() {
+                    renamed.insert_str(0, "exported_");
+                }
+                fields.push(Arc::new(field.as_ref().clone().with_name(renamed)));
                 arrays.push(Arc::clone(col));
             }
             _ if name.as_bytes() == PROM_TIMESTAMP_FIELD => {
@@ -510,29 +579,30 @@ pub fn finish_batch(
                 } else {
                     Int64Array::from_value(scrape_ms, num_rows)
                 };
-                fields.push(Field::new(name, DataType::Int64, false));
+                fields.push(Arc::new(Field::new(name, DataType::Int64, false)));
                 arrays.push(Arc::new(filled));
             }
             _ => {
-                fields.push(field.as_ref().clone());
+                fields.push(Arc::clone(field));
                 arrays.push(Arc::clone(col));
             }
         }
     }
     if !has_ts {
-        fields.push(Field::new(
+        fields.push(Arc::new(Field::new(
             String::from_utf8_lossy(PROM_TIMESTAMP_FIELD).into_owned(),
             DataType::Int64,
             false,
-        ));
+        )));
         arrays.push(Arc::new(Int64Array::from_value(scrape_ms, num_rows)));
     }
     for (label, value) in [("job", job), ("instance", instance)] {
-        fields.push(Field::new(label, DataType::Utf8View, false));
+        fields.push(Arc::new(Field::new(label, DataType::Utf8View, false)));
         arrays.push(constant_string(value, num_rows)?);
     }
     let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
-    RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &opts)
+    let schema = Schema::new_with_metadata(fields, schema.metadata().clone());
+    RecordBatch::try_new_with_options(Arc::new(schema), arrays, &opts)
 }
 
 /// A `Utf8View` column repeating `value`; all rows share one data buffer.
@@ -545,7 +615,7 @@ fn constant_string(value: &str, num_rows: usize) -> Result<ArrayRef, arrow::erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::net::TcpListener;
 
     fn scan(text: &'static str) -> RecordBatch {
@@ -711,7 +781,7 @@ mod tests {
         let ts = batch
             .column_by_name(std::str::from_utf8(PROM_TIMESTAMP_FIELD).expect("ascii"))
             .expect("timestamp")
-            .as_primitive::<arrow::datatypes::Int64Type>();
+            .as_primitive::<Int64Type>();
         assert_eq!(ts.value(0), 1_520_879_607_789);
     }
 
@@ -731,18 +801,128 @@ mod tests {
         assert!(stats.errors() > 0);
     }
 
+    /// Run one scrape of `settings.targets[0]` on a fresh runtime.
+    fn scrape_direct(settings: &PrometheusScrapeSettings) -> Result<Scraped, ScrapeError> {
+        let client = build_client(settings).expect("client");
+        let raw = &settings.targets[0];
+        let target = Target {
+            url: reqwest::Url::parse(raw).expect("url"),
+            display: redact_url(raw),
+            instance: "t:1".into(),
+        };
+        let mut builder = PromBatchBuilder::new(PromScanConfig::default())
+            .with_max_label_columns(settings.max_label_columns);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(scrape_once(&client, &target, settings, &mut builder))
+    }
+
+    /// Serve a redirect from `/metrics` to `location` (a path or URL), and
+    /// `body` on any other path.
+    fn serve_redirect(location: Option<String>, body: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut req = [0u8; 4096];
+                let n = stream.read(&mut req).unwrap_or(0);
+                let is_metrics = req[..n].starts_with(b"GET /metrics ");
+                let head = match (&location, is_metrics) {
+                    (Some(loc), true) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    _ => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    ),
+                };
+                let _ = stream.write_all(head.as_bytes());
+                if !head.starts_with("HTTP/1.1 302") {
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+        format!("http://{addr}/metrics")
+    }
+
     #[test]
     fn rejects_scrape_with_too_many_label_columns() {
         let url = serve(b"m{a=\"1\",b=\"2\",c=\"3\"} 1\n".to_vec(), "");
         let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
-        settings.interval = Duration::from_millis(20);
         settings.max_label_columns = 2;
-        let input = PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
-            .expect("input");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while input.health() != ComponentHealth::Degraded {
-            assert!(Instant::now() < deadline, "health never degraded");
-            std::thread::sleep(Duration::from_millis(10));
+        assert!(matches!(
+            scrape_direct(&settings),
+            Err(ScrapeError::Parse(PromToArrowError::TooManyLabelColumns {
+                limit: 2
+            }))
+        ));
+    }
+
+    #[test]
+    fn headers_are_not_sent_across_origins_on_redirect() {
+        let other = serve_redirect(None, b"up 1\n");
+        let url = serve_redirect(Some(other), b"");
+        let mut settings = PrometheusScrapeSettings::new(vec![url.clone()], "test".into());
+        settings.headers = vec![("Authorization".into(), "Bearer secret".into())];
+        assert!(matches!(
+            scrape_direct(&settings),
+            Err(ScrapeError::Status(302))
+        ));
+        // Without custom headers the redirect is followed.
+        settings.headers.clear();
+        let scraped = scrape_direct(&settings).expect("followed");
+        assert_eq!(scraped.batch.num_rows(), 1);
+    }
+
+    #[test]
+    fn same_origin_redirect_is_followed_with_headers() {
+        let url = serve_redirect(Some("/real".into()), b"up 1\n");
+        let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
+        settings.headers = vec![("Authorization".into(), "Bearer secret".into())];
+        let scraped = scrape_direct(&settings).expect("followed");
+        assert_eq!(scraped.batch.num_rows(), 1);
+    }
+
+    #[test]
+    fn urls_are_redacted_for_logs() {
+        assert_eq!(
+            redact_url("https://user:pw@h:9100/metrics?token=x#f"),
+            "https://h:9100/metrics"
+        );
+        assert_eq!(redact_url("http://h/metrics"), "http://h/metrics");
+        assert_eq!(redact_url("not a url"), "<invalid url>");
+    }
+
+    #[test]
+    fn gunzip_reads_every_member() {
+        let mut body = Vec::new();
+        for part in [&b"a 1\n"[..], b"b 2\n"] {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(part).expect("write");
+            body.extend(enc.finish().expect("finish"));
         }
+        assert_eq!(
+            gunzip_limited(&body, 1024).expect("gunzip").as_ref(),
+            b"a 1\nb 2\n"
+        );
+    }
+
+    #[test]
+    fn exported_label_names_do_not_collide() {
+        let batch = scan("a{job=\"x\",exported_job=\"y\"} 1\n");
+        let out = finish_batch(&batch, "node", "h:1", 0, true).expect("finish");
+        let col = |n: &str| {
+            out.column_by_name(n)
+                .unwrap_or_else(|| panic!("{n}"))
+                .as_string_view()
+                .value(0)
+                .to_string()
+        };
+        assert_eq!(col("job"), "node");
+        assert_eq!(col("exported_job"), "y");
+        assert_eq!(col("exported_exported_job"), "x");
     }
 }
