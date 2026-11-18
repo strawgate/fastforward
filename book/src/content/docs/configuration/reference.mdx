@@ -411,12 +411,12 @@ sample. This input is Arrow-native and does not support `format`.
 | `targets` | array[string] | Yes | `http://` or `https://` URLs, e.g. `http://localhost:9100/metrics`. |
 | `job` | string | No | Value of the `job` column. Defaults to the input name. |
 | `scrape_interval_ms` | integer | No | Scrape cadence per target. Defaults to `15000`. |
-| `scrape_timeout_ms` | integer | No | Timeout for one scrape, connect through end of body. Defaults to `10000`, or to the interval when that is shorter. Setting it above `scrape_interval_ms` is a validation error. |
+| `scrape_timeout_ms` | integer | No | Timeout for one scrape, connect through end of body. Defaults to `10000`, or to the interval when that is shorter. Setting it above `scrape_interval_ms` (or its 15000 default) is a validation error. |
 | `compression` | enum | No | `none` (default) asks for an uncompressed body; `gzip` asks for gzip. Decompressing gzip costs about as much CPU as parsing, so use it only for remote or bandwidth-limited targets. |
 | `honor_timestamps` | boolean | No | Keep timestamps written in the exposition. Defaults to `true`. When `false`, every sample gets the scrape time. |
 | `headers` | map[string,string] | No | Extra request headers, e.g. `Authorization`. |
 | `max_body_bytes` | integer | No | Largest accepted response body. Defaults to `67108864` (64 MiB). |
-| `max_label_columns` | integer | No | Largest number of distinct label columns one scrape may produce. Defaults to `1000`. A scrape over the limit is rejected. |
+| `max_label_columns` | integer | No | Largest number of distinct exposition labels one scrape may have, counted before `job`, `instance` and the `exported_` renames are added. Defaults to `1000`. A scrape over the limit is rejected. |
 | `series_id` | boolean | No | Add the `__series_id__` column. Defaults to `true`. |
 
 Columns:
@@ -433,8 +433,9 @@ Columns:
 
 Behavior:
 - A malformed exposition rejects the whole scrape, as Prometheus does. An
-  OpenMetrics response without its final `# EOF` line counts as malformed,
-  since it may be truncated. The
+  OpenMetrics response without its final `# EOF` line, or with content after
+  it, counts as malformed, since it may be truncated; so does a sample that
+  repeats a label name. The
   failure is logged (at most once a minute per target), counted as an input
   error, and the input reports `degraded` health until the target scrapes
   cleanly again.
@@ -541,7 +542,8 @@ Metrics are sent to the endpoint with `/v1/logs` replaced by `/v1/metrics`
 given. Mapping: `job` and `instance` become the resource attributes
 `service.name` and `service.instance.id`; counters become monotonic cumulative
 sums; histograms and summaries are rebuilt from their `_bucket`/`quantile`,
-`_sum` and `_count` samples; gauges, untyped and other samples become gauges;
+`_sum` and `_count` samples (inconsistent ones are dropped); gaugehistograms
+are dropped; gauges, untyped and other samples become gauges;
 other labels become data point attributes and `__`-prefixed columns are not
 exported. A SQL transform can turn logs into metrics by producing `__name__`
 and `__value__` columns.

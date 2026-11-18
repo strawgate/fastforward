@@ -128,12 +128,12 @@ const GRPC_METRICS_PATH: &str = "/opentelemetry.proto.collector.metrics.v1.Metri
 ///
 /// gRPC: the service path is replaced with `MetricsService/Export`.
 /// HTTP: a path ending in `/v1/logs` becomes `/v1/metrics`, keeping any
-/// query string; any other URL is used as configured, so a dedicated metrics
+/// query string or fragment; any other URL is used as configured, so a dedicated metrics
 /// output can point anywhere.
 pub(super) fn metrics_endpoint_for(endpoint: &str, protocol: OtlpProtocol) -> String {
     if protocol == OtlpProtocol::Http {
         let (path, query) = endpoint
-            .find('?')
+            .find(['?', '#'])
             .map_or((endpoint, ""), |i| endpoint.split_at(i));
         return match path.trim_end_matches('/').strip_suffix("/v1/logs") {
             Some(base) => format!("{base}/v1/metrics{query}"),

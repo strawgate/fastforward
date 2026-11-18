@@ -876,14 +876,33 @@ fn validate_prometheus_scrape(
     {
         return err("'job' must not be blank".to_string());
     }
-    if let (Some(interval), Some(timeout)) = (p.scrape_interval_ms, p.scrape_timeout_ms)
-        && timeout.get() > interval.get()
-    {
-        return err(format!(
-            "scrape_timeout_ms ({}) must not exceed scrape_interval_ms ({})",
-            timeout.get(),
-            interval.get()
-        ));
+    // An explicit timeout is checked against the interval actually used. An
+    // omitted timeout is capped to the interval at runtime, so a short
+    // interval with the default timeout stays valid.
+    if let Some(timeout) = p.scrape_timeout_ms {
+        let interval = p.scrape_interval_ms.map_or(
+            DEFAULT_SCRAPE_INTERVAL_MS,
+            crate::serde_helpers::PositiveMillis::get,
+        );
+        if timeout.get() > interval {
+            return err(format!(
+                "scrape_timeout_ms ({}) must not exceed scrape_interval_ms ({interval})",
+                timeout.get()
+            ));
+        }
+    }
+    // Values are never echoed: they often hold credentials.
+    for (name, value) in p.headers.iter().flatten() {
+        if !is_http_header_name(name) {
+            return err(format!(
+                "header name {name:?} is not a valid HTTP header name"
+            ));
+        }
+        if !is_http_header_value(value) {
+            return err(format!(
+                "header {name:?} has an invalid value (control characters are not allowed)"
+            ));
+        }
     }
     if p.max_body_bytes == Some(0) {
         return err("'max_body_bytes' must be at least 1".to_string());
@@ -898,6 +917,26 @@ fn validate_prometheus_scrape(
         );
     }
     Ok(())
+}
+
+/// Default `prometheus_scrape` interval; matches
+/// `ffwd_io::prometheus_scrape::DEFAULT_SCRAPE_INTERVAL`.
+const DEFAULT_SCRAPE_INTERVAL_MS: u64 = 15_000;
+
+/// An HTTP field name: a non-empty RFC 9110 token.
+fn is_http_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// An HTTP field value as the client accepts it: no control bytes other
+/// than horizontal tab.
+fn is_http_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
 fn validate_pipeline_enrichment(

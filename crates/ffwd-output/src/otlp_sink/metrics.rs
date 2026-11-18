@@ -11,16 +11,19 @@
 //! - `__type__ = counter` → monotonic cumulative `Sum`.
 //! - `__type__ = created` (OpenMetrics `_created` start-time samples) are
 //!   not exported.
-//! - `gauge`, `unknown`/untyped, `info`, `stateset`, `gaugehistogram` and
-//!   samples without a type → `Gauge`.
+//! - `__type__ = gaugehistogram` samples are dropped, as the OpenTelemetry
+//!   Prometheus compatibility spec requires.
+//! - `gauge`, `unknown`/untyped, `info`, `stateset` and samples without a
+//!   type → `Gauge`.
 //! - `histogram` → cumulative `Histogram`, rebuilt from the `_bucket`
 //!   (`le`), `_sum` and `_count` samples of each series.
 //! - `summary` → `Summary`, rebuilt from the `quantile`, `_sum` and `_count`
 //!   samples of each series.
 //!   Samples are grouped per label set *and* timestamp. A histogram without
-//!   a count (no `_count` and no `+Inf` bucket), with decreasing buckets, or
-//!   whose `+Inf` bucket disagrees with `_count` is dropped, as is a summary
-//!   without `_count`.
+//!   a count (no `_count` and no `+Inf` bucket), with decreasing buckets, a
+//!   repeated bound, or a `+Inf` bucket that differs from `_count` is
+//!   dropped, as is a summary without `_count` or with a quantile outside
+//!   `[0, 1]` or repeated. Counts are rounded to integers only when written.
 //! - Other label columns become data point attributes; `le` is folded only
 //!   into histogram points and `quantile` only into summary points, so on any
 //!   other metric they stay attributes. Columns whose names start with `__`
@@ -158,6 +161,7 @@ enum TypeTag {
     Summary,
     /// An OpenMetrics `_created` (start-time) sample.
     Created,
+    GaugeHistogram,
     Other,
 }
 
@@ -171,6 +175,8 @@ impl TypeTag {
             Self::Summary
         } else if ty.eq_ignore_ascii_case("created") {
             Self::Created
+        } else if ty.eq_ignore_ascii_case("gaugehistogram") {
+            Self::GaugeHistogram
         } else {
             Self::Other
         }
@@ -400,9 +406,9 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
                 (f, Kind::Histogram, Role::Sum)
             } else if let Some(f) = strip("_count") {
                 (f, Kind::Histogram, Role::Count)
-            } else if let Some(f) = strip("_created") {
-                (f, Kind::Histogram, Role::Skip)
             } else {
+                // Includes `_created`: start times arrive as `__type__ =
+                // created`, so a histogram-typed `_created` row is data.
                 (name, Kind::Gauge, Role::Point)
             }
         }
@@ -414,14 +420,14 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
                 (f, Kind::Summary, Role::Sum)
             } else if let Some(f) = strip("_count") {
                 (f, Kind::Summary, Role::Count)
-            } else if let Some(f) = strip("_created") {
-                (f, Kind::Summary, Role::Skip)
             } else {
                 (name, Kind::Gauge, Role::Point)
             }
         }
         // Start times aren't exported as points (no start-time support yet).
         TypeTag::Created => (name, Kind::Gauge, Role::Skip),
+        // No faithful OTLP form; the compatibility spec says to drop it.
+        TypeTag::GaugeHistogram => (name, Kind::Gauge, Role::Skip),
         TypeTag::Other => (name, Kind::Gauge, Role::Point),
     }
 }
@@ -465,9 +471,8 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         if cols.values.is_null(row) {
             continue;
         }
-        let has_quantile = cols
-            .quantile
-            .is_some_and(|i| cols.labels[i].1.get(row).is_some());
+        // An empty `quantile` is no label, like everywhere else.
+        let has_quantile = cols.quantile.is_some_and(|i| cols.label(i, row).is_some());
         let (family_name, kind, role) = classify(name, cols.type_tag(row), has_quantile);
         if matches!(role, Role::Skip) {
             continue;
@@ -547,9 +552,11 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
 /// Sort a reassembled group and check it is complete. Returns false for a
 /// group that can't be encoded faithfully, which is then dropped:
 /// - a histogram without a count (neither `_count` nor a `+Inf` bucket),
-///   with a negative or non-finite count, with decreasing cumulative bucket
-///   counts, or whose `+Inf` bucket disagrees with `_count`;
-/// - a summary without a usable `_count`.
+///   with a negative or non-finite count, with a repeated bound, with
+///   decreasing cumulative bucket counts, or whose `+Inf` bucket differs
+///   from `_count` (compared exactly, before any rounding);
+/// - a summary without a usable `_count`, or with a quantile outside
+///   `[0, 1]` or repeated (OTLP needs them strictly increasing).
 fn finalize_group(g: &mut Group, kind: Kind) -> bool {
     g.entries.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let is_count = |c: f64| c.is_finite() && c >= 0.0;
@@ -561,7 +568,10 @@ fn finalize_group(g: &mut Group, kind: Kind) -> bool {
             if g.entries.iter().any(|&(le, c)| le.is_nan() || !is_count(c)) {
                 return false;
             }
-            if g.entries.windows(2).any(|w| w[1].1 < w[0].1) {
+            if g.entries
+                .windows(2)
+                .any(|w| w[1].0 <= w[0].0 || w[1].1 < w[0].1)
+            {
                 return false;
             }
             let inf = g
@@ -571,7 +581,7 @@ fn finalize_group(g: &mut Group, kind: Kind) -> bool {
                 .map(|&(_, c)| c);
             let last = g.entries.last().map_or(0.0, |&(_, c)| c);
             match (g.count, inf) {
-                (Some(count), Some(inf)) if float_count(count) != float_count(inf) => false,
+                (Some(count), Some(inf)) if count.total_cmp(&inf).is_ne() => false,
                 (Some(count), None) if count < last => false,
                 (None, None) => false,
                 (None, Some(inf)) => {
@@ -581,7 +591,11 @@ fn finalize_group(g: &mut Group, kind: Kind) -> bool {
                 _ => true,
             }
         }
-        Kind::Summary => g.count.is_some(),
+        Kind::Summary => {
+            g.count.is_some()
+                && g.entries.iter().all(|&(q, _)| (0.0..=1.0).contains(&q))
+                && g.entries.windows(2).all(|w| w[0].0 < w[1].0)
+        }
         Kind::Gauge | Kind::Counter => true,
     }
 }
@@ -906,6 +920,10 @@ mod tests {
         assert_eq!(
             metrics_endpoint_for("http://c:4318/v1/logs?tenant=a", OtlpProtocol::Http),
             "http://c:4318/v1/metrics?tenant=a"
+        );
+        assert_eq!(
+            metrics_endpoint_for("http://c:4318/v1/logs#collector", OtlpProtocol::Http),
+            "http://c:4318/v1/metrics#collector"
         );
         assert_eq!(
             metrics_endpoint_for("http://c:4317", OtlpProtocol::Grpc),
@@ -1245,6 +1263,20 @@ mod tests {
             // Negative summary _count.
             ("f", 0.1, None, s, &[("quantile", "0.5")]),
             ("f_count", -1.0, None, s, &[]),
+            // The same bound twice (`1` and `1.0`).
+            ("g_bucket", 2.0, None, h, &[("le", "1")]),
+            ("g_bucket", 2.0, None, h, &[("le", "1.0")]),
+            ("g_bucket", 2.0, None, h, &[("le", "+Inf")]),
+            // +Inf bucket and _count differ only by a fraction.
+            ("i_bucket", 2.1, None, h, &[("le", "+Inf")]),
+            ("i_count", 2.2, None, h, &[]),
+            // Quantile above 1.
+            ("j", 0.1, None, s, &[("quantile", "1.1")]),
+            ("j_count", 1.0, None, s, &[]),
+            // The same quantile twice.
+            ("k", 0.1, None, s, &[("quantile", "0.5")]),
+            ("k", 0.2, None, s, &[("quantile", "0.50")]),
+            ("k_count", 1.0, None, s, &[]),
             // Complete histogram: count taken from the +Inf bucket.
             ("ok_bucket", 2.0, None, h, &[("le", "+Inf")]),
         ]);
@@ -1264,6 +1296,58 @@ mod tests {
         let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].name, "rpc_sum");
+        let Some(Data::Summary(sum)) = &metrics[0].data else {
+            panic!("expected summary")
+        };
+        let p = &sum.data_points[0];
+        assert_eq!((p.count, p.sum, p.quantile_values.len()), (8, 4.0, 1));
+    }
+
+    #[test]
+    fn created_rows_typed_as_their_family_are_kept() {
+        // Only `__type__ = created` marks a start time.
+        let b = batch(&[
+            ("foo_count", 1.0, None, Some("histogram"), &[]),
+            (
+                "foo_bucket",
+                1.0,
+                None,
+                Some("histogram"),
+                &[("le", "+Inf")],
+            ),
+            ("foo_created", 4.0, None, Some("histogram"), &[]),
+            ("bar_count", 1.0, None, Some("summary"), &[]),
+            ("bar_created", 5.0, None, Some("summary"), &[]),
+        ]);
+        let req = decode(&b);
+        let mut names = metric_names(&req);
+        names.sort();
+        assert_eq!(names, vec!["bar", "bar_created", "foo", "foo_created"]);
+    }
+
+    #[test]
+    fn gauge_histograms_are_dropped() {
+        let gh = Some("gaugehistogram");
+        let b = batch(&[
+            ("queue_bucket", 1.0, None, gh, &[("le", "+Inf")]),
+            ("queue_gcount", 1.0, None, gh, &[]),
+            ("queue_gsum", 3.0, None, gh, &[]),
+            ("depth", 2.0, None, Some("gauge"), &[]),
+        ]);
+        let req = decode(&b);
+        assert_eq!(metric_names(&req), vec!["depth".to_string()]);
+    }
+
+    #[test]
+    fn empty_quantile_label_is_no_quantile() {
+        let s = Some("summary");
+        let b = batch(&[
+            ("rpc", 0.2, None, s, &[("quantile", "0.5")]),
+            ("rpc_count", 8.0, None, s, &[("quantile", "")]),
+            ("rpc_sum", 4.0, None, s, &[("quantile", "")]),
+        ]);
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
         let Some(Data::Summary(sum)) = &metrics[0].data else {
             panic!("expected summary")
         };

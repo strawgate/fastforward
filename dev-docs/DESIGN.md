@@ -375,8 +375,11 @@ parse plus Arrow, and exporters are usually local. `gzip` is opt-in.
 `otlp` output rather than a processor or a new output type. `auto` sends batches
 with a string `__name__` and numeric `__value__` to the metrics endpoint, so SQL
 that produces those columns is log-to-metric for free. Histograms and summaries
-are rebuilt from their component samples; incomplete or inconsistent ones are
-dropped rather than guessed. OpenMetrics `<family>_created` samples (start
+are rebuilt from their component samples; incomplete or inconsistent ones
+(missing count, decreasing or repeated buckets, a `+Inf` bucket that is not
+exactly `_count`, quantiles outside `[0, 1]`) are dropped rather than guessed.
+Counts are rounded to integers only when written. GaugeHistograms are dropped,
+as the OpenTelemetry Prometheus compatibility spec requires. OpenMetrics `<family>_created` samples (start
 times) keep their row with `__type__ = created` and are not exported as points
 until start-time tracking exists.
 

@@ -131,6 +131,12 @@ impl PrometheusScrapeInput {
                 "prometheus_scrape requires at least one target",
             ));
         }
+        if settings.interval.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prometheus_scrape interval must be positive",
+            ));
+        }
         let mut targets = Vec::with_capacity(settings.targets.len());
         for (i, url) in settings.targets.iter().enumerate() {
             // Trimmed the same way config validation trims it.
@@ -900,6 +906,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_interval_is_rejected() {
+        let mut settings = PrometheusScrapeSettings::new(vec!["http://h/m".into()], "t".into());
+        settings.interval = Duration::ZERO;
+        let err = PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
+            .err()
+            .expect("zero interval");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn malformed_scrape_degrades_health_and_counts_error() {
         let url = serve(b"broken{\n".to_vec(), "");
         let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
@@ -940,6 +956,16 @@ mod tests {
     /// Serve a redirect from `/metrics` to `location` (a path or URL), and
     /// `body` on any other path.
     fn serve_redirect(location: Option<String>, body: &'static [u8]) -> String {
+        serve_redirect_requiring(location, body, None)
+    }
+
+    /// Like [`serve_redirect`], but any other path answers 401 unless the
+    /// request carries the header line `required` (matched case-insensitively).
+    fn serve_redirect_requiring(
+        location: Option<String>,
+        body: &'static [u8],
+        required: Option<&'static str>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
@@ -948,17 +974,24 @@ mod tests {
                 let mut req = [0u8; 4096];
                 let n = stream.read(&mut req).unwrap_or(0);
                 let is_metrics = req[..n].starts_with(b"GET /metrics ");
+                let request = String::from_utf8_lossy(&req[..n]).to_ascii_lowercase();
+                let is_authorized =
+                    required.is_none_or(|h| request.contains(&h.to_ascii_lowercase()));
                 let head = match (&location, is_metrics) {
                     (Some(loc), true) => format!(
                         "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     ),
+                    _ if !is_authorized => {
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
                     _ => format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     ),
                 };
                 let _ = stream.write_all(head.as_bytes());
-                if !head.starts_with("HTTP/1.1 302") {
+                if head.starts_with("HTTP/1.1 200") {
                     let _ = stream.write_all(body);
                 }
             }
@@ -997,11 +1030,21 @@ mod tests {
 
     #[test]
     fn same_origin_redirect_is_followed_with_headers() {
-        let url = serve_redirect(Some("/real".into()), b"up 1\n");
+        // `/real` answers 401 unless the header survived the redirect.
+        let url = serve_redirect_requiring(
+            Some("/real".into()),
+            b"up 1\n",
+            Some("authorization: Bearer secret"),
+        );
         let mut settings = PrometheusScrapeSettings::new(vec![url], "test".into());
         settings.headers = vec![("Authorization".into(), "Bearer secret".into())];
-        let scraped = scrape_direct(&settings).expect("followed");
+        let scraped = scrape_direct(&settings).expect("followed with the header");
         assert_eq!(scraped.batch.num_rows(), 1);
+        settings.headers.clear();
+        assert!(matches!(
+            scrape_direct(&settings),
+            Err(ScrapeError::Status(401))
+        ));
     }
 
     #[test]

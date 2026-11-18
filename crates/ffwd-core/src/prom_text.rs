@@ -103,11 +103,14 @@ impl FamilyKind {
 }
 
 /// True when `sample` is the family `family` itself or one of the component
-/// series its type allows (e.g. `_bucket` only for histograms).
+/// series its type allows (e.g. `_bucket` only for histograms). `_created`
+/// series exist only in OpenMetrics; in Prometheus text a `foo_created` next
+/// to `# TYPE foo histogram` is an unrelated series.
 #[inline]
-fn belongs_to_family(sample: &[u8], family: &[u8], kind: FamilyKind) -> bool {
+fn belongs_to_family(sample: &[u8], family: &[u8], kind: FamilyKind, openmetrics: bool) -> bool {
     match sample.strip_prefix(family) {
         Some([]) => true,
+        Some(b"_created") if !openmetrics => false,
         Some(rest) => kind.suffixes().contains(&rest),
         None => false,
     }
@@ -210,6 +213,8 @@ pub enum PromErrorKind {
     /// An OpenMetrics exposition ended without its `# EOF` line, so it may
     /// be truncated.
     MissingEof,
+    /// An OpenMetrics exposition has content after its `# EOF` line.
+    DataAfterEof,
 }
 
 /// A scan failure with its 1-based line number and byte offset.
@@ -937,7 +942,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
             } else {
                 raw
             };
-            if belongs_to_family(decoded, &self.scratch.family_name, kind) {
+            if belongs_to_family(decoded, &self.scratch.family_name, kind, self.openmetrics) {
                 let is_created = self.openmetrics
                     && matches!(
                         kind,
@@ -1103,6 +1108,14 @@ pub fn scan_prom_text<B: PromBuilder>(
             Some(b'#') => match w.comment(pos)? {
                 Some(next) => pos = next,
                 None => {
+                    // `# EOF` must be the last line; only blank space may
+                    // follow it.
+                    let line_end =
+                        crate::byte_search::find_byte(buf, b'\n', pos).unwrap_or(buf.len());
+                    let rest = buf.get(line_end..).unwrap_or_default();
+                    if let Some(off) = rest.iter().position(|&b| !is_blank(b) && b != b'\n') {
+                        return Err(w.err(line_end + off, PromErrorKind::DataAfterEof));
+                    }
                     saw_eof = true;
                     break;
                 }
@@ -1340,12 +1353,20 @@ mod tests {
 
     #[test]
     fn openmetrics_eof_and_exemplar() {
-        let rows = scan_om(
-            "foo_bucket{le=\"1\"} 3 # {trace_id=\"abc\"} 0.5 123\nbar 1\n# EOF\nignored garbage {\n",
-        )
-        .expect("should succeed");
+        let rows = scan_om("foo_bucket{le=\"1\"} 3 # {trace_id=\"abc\"} 0.5 123\nbar 1\n# EOF\n")
+            .expect("should succeed");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][2], ("__value__".into(), "3.0".into()));
+        // The final line feed is optional.
+        assert_eq!(scan_om("bar 1\n# EOF").expect("no final newline").len(), 1);
+    }
+
+    #[test]
+    fn openmetrics_data_after_eof_is_rejected() {
+        let err = scan_om("m 1\n# EOF\nn 2\n").expect_err("data after EOF");
+        assert_eq!(err.kind, PromErrorKind::DataAfterEof);
+        // Trailing blank lines are tolerated.
+        assert_eq!(scan_om("m 1\n# EOF\n\n").expect("blank tail").len(), 1);
     }
 
     #[test]
@@ -1477,7 +1498,7 @@ mod tests {
     fn eof_with_trailing_tokens_is_an_ordinary_comment() {
         let rows = scan_om("up 1\n# EOF pending\nother 2\n# EOF\n").expect("should parse");
         assert_eq!(rows.len(), 2);
-        let rows = scan_om("up 1\n#  EOF  \nother 2\n").expect("should parse");
+        let rows = scan_om("up 1\n#  EOF  \n").expect("padded EOF still ends the body");
         assert_eq!(rows.len(), 1);
     }
 
@@ -1589,6 +1610,16 @@ mod tests {
         let rows =
             scan("# TYPE foo_total counter\nfoo_total 3\nfoo_created 4\n").expect("should parse");
         assert_eq!(rows.len(), 2);
+        // Prometheus text has no `_created` component: these are untyped.
+        for body in [
+            "# TYPE foo histogram\nfoo_count 1\nfoo_created 4\n",
+            "# TYPE foo summary\nfoo_count 1\nfoo_created 4\n",
+            "# TYPE foo counter\nfoo 1\nfoo_created 4\n",
+        ] {
+            let rows = scan(body).expect("should parse");
+            assert_eq!(rows.len(), 2);
+            assert_eq!(type_of(&rows[1]), None, "{body}: foo_created is untyped");
+        }
     }
 
     #[test]
@@ -1837,6 +1868,7 @@ mod verification {
             assert_eq!((scalar >> i) & 1 == 1, is_prom_structural(b));
         }
         kani::cover!(scalar != 0, "some structural byte");
+        kani::cover!(scalar == 0, "no structural bytes");
     }
 
     /// Short integer values take the fast path and are exact.

@@ -138,6 +138,8 @@ pub enum PromToArrowError {
         /// The configured limit.
         limit: usize,
     },
+    /// A sample repeats a label name (`m{a="1",a="2"}`).
+    DuplicateLabel,
     /// Sparse label columns would need more null padding than the limit,
     /// i.e. the dense output would be far larger than the body.
     TooManyPaddedCells {
@@ -155,12 +157,14 @@ impl std::fmt::Display for PromToArrowError {
         match self {
             Self::InvalidUtf8 => f.write_str("exposition is not valid UTF-8"),
             Self::TooLarge => f.write_str("exposition exceeds 4 GiB"),
+            Self::DuplicateLabel => f.write_str("a sample repeats a label name"),
             Self::TooManyLabelColumns { limit } => {
                 write!(f, "label columns exceed max_label_columns ({limit})")
             }
             Self::TooManyPaddedCells { limit } => write!(
                 f,
-                "sparse labels would pad more than {limit} null cells; \
+                "sparse columns (labels, timestamps or types present on only \
+                 some samples) would pad more than {limit} null cells; \
                  reduce label cardinality or split the target"
             ),
             Self::Parse(e) => write!(
@@ -320,6 +324,8 @@ struct PromColumns {
     /// Slot that swallows writes once `max_labels` is exceeded, so a
     /// label-heavy body stops allocating new columns.
     drop_slot: Option<usize>,
+    /// Set when a sample wrote the same label column twice.
+    has_duplicate: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -345,6 +351,7 @@ impl PromColumns {
             pad: PadBudget::new(DEFAULT_MAX_PADDED_CELLS),
             labels: 0,
             drop_slot: None,
+            has_duplicate: false,
         }
     }
 
@@ -363,6 +370,7 @@ impl PromColumns {
         self.row = 0;
         self.labels = 0;
         self.drop_slot = None;
+        self.has_duplicate = false;
         self.pad.reset();
     }
 
@@ -396,7 +404,9 @@ impl PromColumns {
 
     fn finish(&mut self) -> Result<RecordBatch, ArrowError> {
         let num_rows = self.row;
-        let original = Buffer::from(self.buf.clone());
+        // Hand the body to the arrays: the builder keeps no reference, so a
+        // large response is freed as soon as the batch is dropped.
+        let original = Buffer::from(std::mem::take(&mut self.buf));
         let decoded = Buffer::from_vec(std::mem::take(&mut self.decoded));
         let blocks: Arc<[Buffer]> = Arc::from([original.clone(), decoded.clone()]);
         let mut fields = Vec::with_capacity(self.slots.len());
@@ -528,6 +538,10 @@ impl ScanBuilder for PromColumns {
         if kind != Kind::Str {
             return;
         }
+        if self.strs[i].values.len() > self.row {
+            self.has_duplicate = true;
+            return;
+        }
         // `value` is a subslice of `buf` (the scanner only hands out spans of
         // its input); the offset fits in u32 because `scan` rejects >4 GiB.
         let offset = (value.as_ptr() as usize).wrapping_sub(self.buf.as_ptr() as usize);
@@ -539,7 +553,11 @@ impl ScanBuilder for PromColumns {
     #[allow(clippy::indexing_slicing)]
     fn append_decoded_str_by_idx(&mut self, idx: usize, value: &[u8]) {
         let (kind, i) = self.slot(idx);
-        if kind != Kind::Str || self.strs[i].values.len() > self.row {
+        if kind != Kind::Str {
+            return;
+        }
+        if self.strs[i].values.len() > self.row {
+            self.has_duplicate = true;
             return;
         }
         let Ok(offset) = u32::try_from(self.decoded.len()) else {
@@ -608,10 +626,12 @@ impl PromBatchBuilder {
         self
     }
 
-    /// Reject bodies whose sparse label columns would need more than `limit`
-    /// null cells in the dense output (default
-    /// [`DEFAULT_MAX_PADDED_CELLS`]). Bounds memory for bodies with many
-    /// rarely-used labels, where rows × columns far exceeds the body size.
+    /// Reject bodies whose sparse columns would need more than `limit` null
+    /// cells in the dense output (default [`DEFAULT_MAX_PADDED_CELLS`]).
+    /// Bounds memory for bodies with many rarely-used labels, where rows ×
+    /// columns far exceeds the body size. Every sparse column counts: label
+    /// columns, and `__timestamp_ms__` / `__type__` when only some samples
+    /// carry them.
     #[must_use]
     pub fn with_max_padded_cells(mut self, limit: usize) -> Self {
         self.columns.pad = PadBudget::new(limit);
@@ -651,6 +671,9 @@ impl PromBatchBuilder {
                 PromErrorKind::InvalidUtf8 => PromToArrowError::InvalidUtf8,
                 _ => PromToArrowError::Parse(e),
             })?;
+        if self.columns.has_duplicate {
+            return Err(PromToArrowError::DuplicateLabel);
+        }
         if self.columns.is_over_limit() {
             return Err(PromToArrowError::TooManyLabelColumns {
                 limit: self.columns.max_labels,
@@ -815,6 +838,33 @@ mod tests {
             err,
             PromToArrowError::TooManyLabelColumns { limit: 2 }
         ));
+    }
+
+    #[test]
+    fn repeated_label_in_one_sample_is_rejected() {
+        let mut b = PromBatchBuilder::default();
+        assert!(matches!(
+            b.scan(Bytes::from_static(b"m{zone=\"a\",zone=\"b\"} 1\n")),
+            Err(PromToArrowError::DuplicateLabel)
+        ));
+        assert!(matches!(
+            b.scan(Bytes::from_static(b"m{\"zone\"=\"a\",zone=\"b\\n\"} 1\n")),
+            Err(PromToArrowError::DuplicateLabel)
+        ));
+        // The same label on consecutive samples is fine.
+        let (batch, _) = b
+            .scan(Bytes::from_static(b"m{zone=\"a\"} 1\nm{zone=\"b\"} 2\n"))
+            .expect("valid");
+        assert_eq!(batch.num_rows(), 2);
+    }
+
+    #[test]
+    fn builder_keeps_no_reference_to_the_body() {
+        let body = Bytes::from(b"m{zone=\"a-long-label-value\"} 1\n".to_vec());
+        let mut b = PromBatchBuilder::default();
+        let (batch, _) = b.scan(body.clone()).expect("valid");
+        drop(batch);
+        assert!(body.is_unique(), "the builder still holds the body");
     }
 
     #[test]

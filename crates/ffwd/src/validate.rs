@@ -165,11 +165,29 @@ pub(crate) fn validate_generated_config_read_only(
 // Per-pipeline validation
 // ---------------------------------------------------------------------------
 
+/// Columns an input produces with a non-string type. The probe batch types
+/// them the same way so arithmetic in SQL validates as it would run.
+fn typed_probe_columns(
+    input: &ffwd_config::InputTypeConfig,
+) -> &'static [(&'static str, arrow::datatypes::DataType)] {
+    use arrow::datatypes::DataType;
+    match input {
+        ffwd_config::InputTypeConfig::PrometheusScrape(_) => &[
+            ("__value__", DataType::Float64),
+            ("__timestamp_ms__", DataType::Int64),
+        ],
+        _ => &[],
+    }
+}
+
 fn validate_transform_probe_read_only(
     transform: &mut ffwd::transform::SqlTransform,
     source_metadata: ffwd_config::SourceMetadataStyle,
+    typed: &[(&str, arrow::datatypes::DataType)],
 ) -> Result<(), String> {
-    use arrow::array::{ArrayRef, StringArray, StringViewArray, UInt64Array};
+    use arrow::array::{
+        ArrayRef, Float64Array, Int64Array, StringArray, StringViewArray, UInt64Array,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use ffwd_config::SourceMetadataStyle;
@@ -188,13 +206,23 @@ fn validate_transform_probe_read_only(
         scan_config
             .wanted_fields
             .iter()
-            .map(|field| Field::new(field.name.as_str(), DataType::Utf8, true))
+            .map(|field| {
+                let ty = typed
+                    .iter()
+                    .find(|(name, _)| *name == field.name.as_str())
+                    .map_or(DataType::Utf8, |(_, ty)| ty.clone());
+                Field::new(field.name.as_str(), ty, true)
+            })
             .collect()
     };
 
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
-        .map(|_| Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef)
+        .map(|field| match field.data_type() {
+            DataType::Float64 => Arc::new(Float64Array::from(vec![Some(1.0)])) as ArrayRef,
+            DataType::Int64 => Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
+            _ => Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef,
+        })
         .collect();
 
     if source_metadata == SourceMetadataStyle::Fastforward {
@@ -644,8 +672,12 @@ fn validate_pipeline_read_only(
                     .map_err(|e| format!("input '{input_name}': enrichment error: {e}"))?;
             }
         }
-        validate_transform_probe_read_only(&mut transform, input_cfg.source_metadata)
-            .map_err(|e| format!("input '{input_name}': {e}"))?;
+        validate_transform_probe_read_only(
+            &mut transform,
+            input_cfg.source_metadata,
+            typed_probe_columns(&input_cfg.type_config),
+        )
+        .map_err(|e| format!("input '{input_name}': {e}"))?;
     }
 
     Ok(())
@@ -847,6 +879,18 @@ mod tests {
         let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
         validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
             .expect("sensor input without format should validate");
+    }
+
+    #[test]
+    fn prometheus_value_is_numeric_in_the_read_only_probe() {
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [\"http://127.0.0.1:9100/metrics\"]",
+            "SELECT __name__, __value__ * 2 + 1 AS doubled, __timestamp_ms__ / 1000 AS secs FROM logs",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
+            .expect("arithmetic on __value__ should validate");
     }
 
     #[test]

@@ -810,6 +810,18 @@ pipelines:
                 "targets: [\"http://a/m\"]\nscrape_interval_ms: 1000\nscrape_timeout_ms: 2000",
                 "must not exceed",
             ),
+            (
+                "targets: [\"http://a/m\"]\nscrape_timeout_ms: 20000",
+                "must not exceed scrape_interval_ms (15000)",
+            ),
+            (
+                "targets: [\"http://a/m\"]\nheaders:\n  Bad Header: secret",
+                "not a valid HTTP header name",
+            ),
+            (
+                "targets: [\"http://a/m\"]\nheaders:\n  X-Token: \"sec\\nret\"",
+                "has an invalid value",
+            ),
             ("targets: [\"http://a/m\"]\nformat: json", "format"),
             (
                 "targets: [\"http://a/m\"]\ncompression: zstd",
@@ -823,6 +835,15 @@ pipelines:
             assert!(err.contains(needle), "{extra:?}: {err}");
             assert!(!err.contains("secret"), "URL leaked into error: {err}");
         }
+    }
+
+    #[test]
+    fn prometheus_scrape_short_interval_without_timeout_is_valid() {
+        let yaml = single_pipeline_yaml(
+            "type: prometheus_scrape\ntargets: [\"http://a/m\"]\nscrape_interval_ms: 1000\nheaders:\n  Authorization: \"Bearer x\\ty\"",
+            "type: stdout",
+        );
+        Config::load_str(yaml).expect("default timeout is capped to the interval");
     }
 
     #[test]
