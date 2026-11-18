@@ -1091,10 +1091,10 @@ mod verification {
     /// required so that the
     /// downstream scanner can split on line boundaries.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(11)] // memcmp in starts_with walks the 9-byte prefix
     fn verify_write_cri_message_ends_with_newline() {
-        let msg: [u8; 4] = kani::any();
-        let mut out = Vec::new();
+        let msg: [u8; 2] = kani::any();
+        let mut out = Vec::with_capacity(32);
         write_cri_message(&msg, "body", &mut out);
         assert!(!out.is_empty(), "output must be non-empty");
         assert_eq!(*out.last().unwrap(), b'\n', "output must end with newline");
@@ -1107,10 +1107,10 @@ mod verification {
     /// Both the JSON pass-through path and the plain-text wrapper path open with
     /// '{' so the downstream scanner always sees a JSON object start.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(11)] // memcmp in starts_with walks the 9-byte prefix
     fn verify_write_cri_message_starts_with_brace() {
-        let msg: [u8; 4] = kani::any();
-        let mut out = Vec::new();
+        let msg: [u8; 2] = kani::any();
+        let mut out = Vec::with_capacity(32);
         write_cri_message(&msg, "body", &mut out);
         assert_eq!(out[0], b'{', "output must start with '{'");
         kani::cover!(msg[0] == b'{', "JSON path exercised");
@@ -1140,9 +1140,13 @@ mod verification {
     /// the message body is not a JSON object, the plain text is preserved in
     /// the `body` field rather than being silently discarded.
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(11)] // memcmp in starts_with walks the 9-byte prefix
+    #[kani::solver(kissat)] // ~60s
     fn verify_non_json_msg_uses_body_key() {
-        let msg: [u8; 4] = kani::any();
+        // Two symbolic bytes reach every branch (leading whitespace, then a
+        // non-'{' byte through each escape arm). Four bytes ran CBMC out of
+        // memory (>14 GB) on the CI runner.
+        let msg: [u8; 2] = kani::any();
         let mut i = 0usize;
         while i < msg.len() && is_json_whitespace(msg[i]) {
             i += 1;

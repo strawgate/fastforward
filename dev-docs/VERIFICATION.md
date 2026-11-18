@@ -202,32 +202,41 @@ just kani-boundary
 ```
 
 CI runs this check in the dedicated `Verification guardrail` job, and the
-required `CI conclusion` status depends on that guardrail passing. CI also runs
-`cargo kani` for the required proof-bearing crates (`ffwd-core`,
-`ffwd-arrow`, `ffwd-types`, `ffwd-io`, `ffwd-output`,
-`ffwd-runtime`, `ffwd-diagnostics`, and `ffwd`) under the following
-conditions (from the `kani` job in `.github/workflows/ci.yml`):
+required `CI conclusion` status depends on that guardrail passing.
 
-- **any push** to the repository, OR
-- a pull request carrying the **`ci:full` label**, OR
-- a **non-draft pull request** where the path-filter outputs
-  `kani_required == 'true'` — i.e. at least one changed file matches one of:
-  - `crates/ffwd-core/**`
-  - `crates/ffwd-arrow/**`
-  - `crates/ffwd-types/**`
-  - `crates/ffwd-io/**`
-  - `crates/ffwd-output/**`
-  - `crates/ffwd-runtime/**`
-  - `crates/ffwd-diagnostics/**`
-  - `crates/ffwd/**`
-  - `Cargo.toml`
-  - `Cargo.lock`
-  - `dev-docs/verification/kani-boundary-contract.toml`
-  - `scripts/verify_kani_boundary_contract.py`
-  - `.github/workflows/ci.yml`
+CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
+`ffwd-core`, `ffwd-arrow`, `ffwd-types`, `ffwd-io`, `ffwd-output`,
+`ffwd-runtime`, `ffwd-diagnostics`, and `ffwd`) in the sharded `kani` job of
+`.github/workflows/ci.yml`:
 
-A matching path change in a **draft** PR does not trigger the job; the PR must
-be marked ready for review first.
+- The `changes` job runs `scripts/kani_plan.py`, which builds the shard
+  matrix. A crate's shards run when a changed file is in that crate or in any
+  workspace crate it depends on (transitively). Changes to workspace-wide
+  inputs (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+  `.cargo/config.toml`, `.github/workflows/ci.yml`, the Kani plan/shard
+  scripts, and the Kani boundary contract and its checker) run every shard.
+  Other changes (docs, book, TLA+) run none.
+- **Pushes** and PRs labeled **`ci:full`** run every shard, including drafts
+  that already carry the label when the workflow runs (adding the label alone
+  does not start a run). Drafts without the label run no Kani shards; mark the
+  PR ready for review first.
+- Each shard runs `scripts/kani_shard.py`, which lists the crate's harnesses
+  with `cargo kani list`, takes every Nth one, and verifies them with
+  `--jobs 2` (more CBMC processes run the 16 GB runners out of memory). Shard
+  counts per crate live in the `SHARDS` table in `scripts/kani_plan.py`.
+- Each harness gets at most 6 GB of address space and 15 minutes. A harness
+  that needs more fails on its own ("CBMC failed with status 6") instead of
+  getting the runner killed and hiding the rest of the shard.
+- Harnesses listed in `scripts/kani_nightly_only.txt` do not fit that budget
+  yet. PR and push CI skip them and the nightly workflow runs them. The
+  script fails if a listed harness no longer exists. Shrink a harness (fewer
+  symbolic bytes, enumerated cases, `Vec::with_capacity`) and remove it from
+  the list rather than growing the list.
+- The `kani` job does not wait on `Lint`, so a lint failure does not hide
+  proof results.
+- Harnesses that exceed the per-harness CI budget are gated behind the
+  `kani-slow` feature in `ffwd-core` and `ffwd-kani`. They run in the nightly
+  workflow and on `ci:full` PRs.
 
 ### Verification guardrail checks
 
@@ -287,6 +296,10 @@ explosion to N independent proofs over slices of the call graph.
 **Prefer `kani::any_where()` over `any()` + `assume()`.** Keep constraints co-located
 with value generation. Use `assume()` only when constraints span multiple variables or
 depend on computed state.
+
+**Keep `tracing` out of proof paths.** Kani 0.68 ICEs on the `catch_unwind` intrinsic
+that `tracing` macros reach. Put logging in proof-reachable code behind
+`#[cfg(not(kani))]` (see `ReloadCoordinator::step` in `ffwd-runtime/src/reload.rs`).
 
 ---
 
@@ -364,18 +377,20 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 
 ## Per-module verification status
 
+`kani-slow` proofs run nightly and on `ci:full` PRs, not in default PR CI.
+
 | Module | What it does | Verification |
 |--------|-------------|-------------|
-| `ffwd-core/structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (6 proofs) + proptest (SIMD ≡ scalar) |
-| `ffwd-core/structural_iter.rs` | Streaming structural position iterator, including space-only `next_non_space` semantics where tab/CR remain non-space | Kani exhaustive (3 proofs) |
-| `ffwd-core/framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (6 proofs) |
+| `ffwd-core/structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (8 proofs, 6 `kani-slow`) + proptest (SIMD ≡ scalar) |
+| `ffwd-core/structural_iter.rs` | Streaming structural position iterator, including space-only `next_non_space` semantics where tab/CR remain non-space | Kani exhaustive (3 proofs, 1 `kani-slow`) |
+| `ffwd-core/framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (6 proofs, 2 `kani-slow`) |
 | `ffwd-core/reassembler.rs` | CRI partial line reassembly (P/F merging) | Kani exhaustive (9 proofs) |
 | `ffwd-core/byte_search.rs` | Proven byte search (find_byte, rfind_byte) | Kani exhaustive + oracle (3 proofs) |
 | `ffwd-core/scanner.rs` | Scanner-to-builder protocol (`ScanBuilder`, `BuilderState`) | Kani bounded (4 proofs) + property-based protocol coverage |
-| `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs) + proptest oracle + compliance regressions |
-| `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (2 proofs) |
-| `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (19 proofs) |
-| `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (37 proofs incl. 3 contract verifications + 4 compositional stubs) |
+| `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs, 3 `kani-slow`) + proptest oracle + compliance regressions |
+| `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (4 proofs incl. mid-range and overflow boundary, 2 `kani-slow`) |
+| `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (17 proofs, 4 `kani-slow`) |
+| `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (50 proofs incl. contract verifications and compositional stubs, 5 `kani-slow`) |
 | `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs) + proptest + **TLA+** |
 | `ffwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `ffwd-types/pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |

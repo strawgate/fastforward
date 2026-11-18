@@ -1266,6 +1266,44 @@ mod tests {
         );
     }
 
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn otlp_http_exporter_speaks_tls_to_https_endpoints() {
+        use opentelemetry_otlp::WithExportConfig as _;
+        use opentelemetry_sdk::trace::SpanExporter as _;
+        use tokio::io::AsyncReadExt as _;
+
+        // A plain TCP listener stands in for the collector: a TLS-capable
+        // client connects and opens with a TLS handshake record (0x16). A
+        // client built without a TLS backend never connects at all.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let first_byte = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut byte = [0u8; 1];
+            socket.read_exact(&mut byte).await.expect("read");
+            byte[0]
+        });
+
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(format!("https://127.0.0.1:{port}/v1/traces"))
+            .with_timeout(Duration::from_secs(2))
+            .build()
+            .expect("exporter builds");
+        let export = tokio::spawn(async move { exporter.export(Vec::new()).await });
+
+        let byte = tokio::time::timeout(Duration::from_secs(5), first_byte)
+            .await
+            .expect("exporter never connected: no TLS backend for https")
+            .expect("listener task");
+        assert_eq!(byte, 0x16, "expected a TLS ClientHello");
+        export.abort();
+    }
+
     #[test]
     fn redact_url_handles_urls_without_scheme() {
         assert_eq!(

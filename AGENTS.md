@@ -5,17 +5,19 @@
 
 ## Prerequisites
 
-- **Rust 1.89+** (`rustup` recommended)
+- **Rust via `rustup`** — the toolchain is pinned in `rust-toolchain.toml` (currently 1.100.0) and rustup installs it automatically. MSRV is 1.94, but clippy results only match CI on the pinned version.
 - **[just](https://github.com/casey/just)** task runner (`cargo install just`)
 - **[taplo](https://taplo.tamasfe.dev/)** for TOML formatting (`cargo install taplo-cli`)
 - **[cargo-nextest](https://nexte.st/)** for test execution (`cargo install cargo-nextest`)
 - **[sccache](https://github.com/mozilla/sccache)** for compile caching (`cargo install sccache --locked`) — pre-configured in `.cargo/config.toml`
-- **Optional:** [pre-commit](https://pre-commit.com/) (`pip install pre-commit && pre-commit install`)
+- **Git hooks:** `scripts/install-hooks.sh` (no `just` needed) — see [Keeping CI green](#keeping-ci-green)
 - **Optional:** [Kani](https://github.com/model-checking/kani) for formal verification (`cargo install --locked kani-verifier && cargo kani setup`)
 
 ## Primary commands
 
-All commands use `just` recipes. **Never use bare `cargo clippy`** — it won't catch CI failures because CI runs `cargo clippy -- -D warnings`.
+All commands use `just` recipes. **Never use bare `cargo clippy`** — it won't catch CI failures because CI runs `cargo clippy --workspace -- -D warnings`.
+
+**No `just` in your sandbox?** Use `scripts/ci-local.sh pre-push` — it runs the CI Lint job's checks with plain cargo/python and handles the missing-`sccache` case. See [Keeping CI green](#keeping-ci-green).
 
 ```bash
 # ── Build ───────────────────────────────────────────────
@@ -39,6 +41,7 @@ just toml-fmt                # Auto-format TOML files
 # ── CI (run before pushing) ────────────────────────────
 just ci                      # lint + test (default-members, fast)
 just ci-all                  # lint-all + test-all (full workspace, CI parity)
+just pre-push                # = scripts/ci-local.sh pre-push (CI Lint job parity, no just needed)
 
 # ── Formal Verification ────────────────────────────────
 just kani                    # Kani proofs for production crates
@@ -208,6 +211,41 @@ Before editing code, check `dev-docs/CHANGE_MAP.md`:
 - **Invariants changed** → update `dev-docs/VERIFICATION.md`, Kani/proptest harnesses, TLA+ specs.
 - **Crate boundaries changed** → update `dev-docs/CRATE_RULES.md`, crate-level `AGENTS.md` files.
 
+## Keeping CI green
+
+Most red PRs fail on cheap checks (fmt, clippy, `cargo deny`), not on real bugs. Run the CI Lint job locally before every push.
+
+### Run the CI checks locally
+
+```bash
+scripts/install-hooks.sh          # once per clone: installs pre-commit + pre-push hooks
+scripts/ci-local.sh pre-commit    # seconds: fmt, taplo, typos, python guardrails
+scripts/ci-local.sh pre-push      # CI "Lint" job parity: + xtask verify, clippy --workspace,
+                                  #   rustdoc -D warnings, cargo deny, cargo machete, cargo audit, actionlint
+scripts/ci-local.sh test          # CI "Test (Linux)": nextest, or cargo test if nextest is missing
+```
+
+- These need **no `just`**. With `just`: `just install-hooks`, `just pre-commit`, `just pre-push`.
+- The hooks run the same script, so a passing hook means the Lint job passes. Bypass once with `--no-verify` or `FFWD_SKIP_HOOKS=1` (and say so in the PR).
+- Tools that are not installed (`taplo`, `typos`, `cargo-deny`, `cargo-machete`, `cargo-audit`, `actionlint`) are skipped with a warning and an install hint. CI does run them; set `FFWD_STRICT_TOOLS=1` to fail instead.
+- `scripts/ci-local.sh` mirrors the `lint` job in `.github/workflows/ci.yml`. **Change both together.**
+
+### Known causes of red CI
+
+| Symptom in CI | Cause | Avoid it |
+|---|---|---|
+| Clippy fails on code you didn't touch (e.g. `needless_range_loop`, `unused_async_trait_impl`) | A new Rust release added lints | The toolchain is pinned in `rust-toolchain.toml`; CI installs that exact version. Bump it in its own PR that also fixes the new lints. |
+| Clippy passes locally, fails in CI (or the reverse) | Local `rustc` differs from the pinned one (common in agent sandboxes with a preinstalled newer/older Rust) | Use rustup so `rust-toolchain.toml` applies. `scripts/ci-local.sh pre-push` refuses to run on a mismatched `rustc`. Check with `rustc --version`. |
+| Clippy fails only in CI | You ran `just clippy` / bare `cargo clippy`, which skip `ffwd-transform` and `ffwd` | Run `cargo clippy --workspace -- -D warnings` (what `pre-push` does). |
+| `Dependency audit` / `Security audit` fails | A new RustSec advisory, or a lockfile change pulled in an affected version | Run `cargo deny check`. If no fix exists, ask the maintainer before adding an ignore to **both** `deny.toml` and `.cargo/audit.toml` with a tracking issue (see #2918). |
+| `cargo machete` fails | Unused dependency in a `Cargo.toml` | Remove it, or add a `[package.metadata.cargo-machete] ignored` entry with a reason. |
+| Rustdoc fails | Broken intra-doc link or `rustdoc::` lint | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items` |
+| Integration test can't find the `ff` binary | Test hand-builds a path from `current_exe()` | Use `env!("CARGO_BIN_EXE_ff")`; Cargo builds the bin for integration tests. |
+| Every cargo command fails with `sccache: not found` | `.cargo/config.toml` sets `rustc-wrapper = "sccache"` | Install sccache, or `export RUSTC_WRAPPER=` (`ci-local.sh` does this for you). |
+| Tests behave differently than in CI (re-runs read 0 lines) | Default checkpoints resume at EOF | `export FFWD_DISABLE_DEFAULT_CHECKPOINTS=1` (CI and `ci-local.sh` set it). |
+
+If CI is red on `main` for a reason unrelated to your change, don't paper over it in your PR — point at the fix PR or open an issue.
+
 ## Git and PR conventions
 
 - **Commit messages:** `type: concise description` — `fix:`, `feat:`, `refactor:`, `docs:`, `bench:`, `test:`
@@ -215,7 +253,7 @@ Before editing code, check `dev-docs/CHANGE_MAP.md`:
 - **PR titles:** same format as commits, under 70 chars.
 - **PR body:** explain what and why. Include benchmark results if relevant.
 - **Tests required** in every PR.
-- **`just ci` must pass** before pushing.
+- **`scripts/ci-local.sh pre-push` must pass** before pushing (the pre-push hook runs it). Add `just ci` / `scripts/ci-local.sh test` for behavior changes.
 
 Full details: `CONTRIBUTING.md`, `dev-docs/PR_PROCESS.md`.
 

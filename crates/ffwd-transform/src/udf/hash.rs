@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray, UInt64Array};
@@ -88,10 +87,6 @@ macro_rules! hash_string_array {
 }
 
 impl ScalarUDFImpl for HashUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "hash"
     }

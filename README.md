@@ -24,7 +24,7 @@ The [documentation site](https://strawgate.github.io/fastforward/) has interacti
 ## Try it
 
 ```bash
-# Build from source (Rust 1.89+)
+# Build from source (Rust 1.94+)
 git clone https://github.com/strawgate/fastforward.git && cd fastforward
 cargo build --release -p ffwd
 
@@ -34,19 +34,21 @@ cargo build --release -p ffwd
 
 ```yaml
 # config.yaml
-input:
-  type: file
-  path: logs.json
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: logs.json
+        format: json
 
-transform: |
-  SELECT level, message, status, duration_ms
-  FROM logs
-  WHERE level = 'ERROR' AND duration_ms > 50
+    transform: |
+      SELECT level, message, status, duration_ms
+      FROM logs
+      WHERE level = 'ERROR' AND duration_ms > 50
 
-output:
-  type: stdout
-  format: console
+    outputs:
+      - type: stdout
+        format: console
 ```
 
 ```bash

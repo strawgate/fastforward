@@ -1,3 +1,6 @@
+# Pinned so local builds, agent sandboxes, and CI run the same rustc and clippy.
+# CI's setup-rust action installs exactly this version. Bump it in its own PR
+# together with any fixes for new clippy lints (see AGENTS.md, "Keeping CI green").
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]

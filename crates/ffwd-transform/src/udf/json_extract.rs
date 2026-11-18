@@ -9,7 +9,6 @@
 //! A single parameterised struct [`JsonExtractUdf`] covers all three functions.
 //! The [`JsonExtractMode`] selects name and return type.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{Array, StringArray, StructArray, UInt32Array};
@@ -197,10 +196,6 @@ impl JsonExtractUdf {
 }
 
 impl ScalarUDFImpl for JsonExtractUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         self.mode.udf_name()
     }

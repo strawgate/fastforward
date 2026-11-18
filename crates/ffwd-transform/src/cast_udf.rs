@@ -1,7 +1,5 @@
 //! Internal cast UDF implementations (`int` and `float`).
 
-use std::any::Any;
-
 use arrow::datatypes::DataType;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
@@ -56,10 +54,6 @@ impl IntCastUdf {
 }
 
 impl ScalarUDFImpl for IntCastUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "int"
     }
@@ -118,10 +112,6 @@ impl FloatCastUdf {
 }
 
 impl ScalarUDFImpl for FloatCastUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "float"
     }

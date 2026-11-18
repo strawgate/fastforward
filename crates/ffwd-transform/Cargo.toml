@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 arrow = { workspace = true }
+async-trait = { workspace = true }
 bytes = "1"
 csv = "1"
 datafusion = { workspace = true }

@@ -405,6 +405,7 @@ fn projected_kvlist_attribute_is_projected_as_json() {
                     body: Some(any_string("normal body")),
                     attributes: vec![KeyValue {
                         key: "nested".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::KvlistValue(KeyValueList {
                                 values: vec![kv_string("inner", "value")],
@@ -435,6 +436,7 @@ fn projected_array_attribute_is_projected_as_json() {
                     body: Some(any_string("normal body")),
                     attributes: vec![KeyValue {
                         key: "tags".into(),
+                        key_strindex: 0,
                         value: Some(AnyValue {
                             value: Some(Value::ArrayValue(ArrayValue {
                                 values: vec![any_string("a"), any_string("b")],

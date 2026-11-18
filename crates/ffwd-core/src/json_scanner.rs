@@ -2573,6 +2573,9 @@ mod verification {
     /// Keep this harness on a small fixed buffer: the new >32-depth overflow
     /// behavior is covered by unit tests and proptests above, while Kani here
     /// focuses on local crash-freedom and bounds without exploding the search.
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(10)]
     #[kani::solver(cadical)]
@@ -2621,6 +2624,9 @@ mod verification {
 
     /// next_quote on a single block: if found, the position has a set bit
     /// in the bitmask. If not found, no bits are set in [from, end).
+    ///
+    /// Gated behind `kani-slow`: symbolic u64 bitmask + 66-unwind takes >30s.
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
     #[kani::unwind(66)] // inner None-branch loop: up to 64 iterations (end≤64) + 2 margin
     #[kani::solver(kissat)]
@@ -2785,7 +2791,11 @@ mod verification {
     ///
     /// Crash-freedom proof: for any 8-byte input, the function must return
     /// normally (no panic, no OOB access, no infinite loop).
+    ///
+    /// Gated behind `kani-slow`: exceeds 120s per harness in CI (runs nightly).
+    #[cfg(feature = "kani-slow")]
     #[kani::proof]
+    #[kani::solver(kissat)] // slow (>10s) proof, gated behind kani-slow
     #[kani::unwind(16)]
     fn verify_decode_json_escapes_no_panic() {
         let input: [u8; 8] = kani::any();
