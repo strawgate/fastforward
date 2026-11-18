@@ -181,6 +181,34 @@ fn non_numeric_string_in_between_and_in_list_does_not_match() {
 }
 
 #[test]
+fn between_with_string_bounds_does_not_fail_batch() {
+    // status: "200", "500", "not_a_number", "503"; used as bounds here.
+    let batch = make_test_batch();
+    let mut transform =
+        SqlTransform::new("SELECT msg FROM logs WHERE 300 BETWEEN status AND 600").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    assert_eq!(result.num_rows(), 1);
+    assert_utf8_column_value(&result, "msg", 0, "started");
+}
+
+#[test]
+fn in_list_with_null_or_string_items_does_not_fail_batch() {
+    let batch = make_test_batch();
+    let mut transform =
+        SqlTransform::new("SELECT msg FROM logs WHERE status IN (500, NULL)").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    assert_eq!(result.num_rows(), 1);
+    assert_utf8_column_value(&result, "msg", 0, "disk full");
+
+    let batch = make_test_batch();
+    let mut transform =
+        SqlTransform::new("SELECT msg FROM logs WHERE 503 IN (status, 404)").unwrap();
+    let result = transform.execute_blocking(batch).unwrap();
+    assert_eq!(result.num_rows(), 1);
+    assert_utf8_column_value(&result, "msg", 0, "oom killed");
+}
+
+#[test]
 fn string_number_comparison_in_projection_keeps_column_name() {
     let batch = make_test_batch();
     let mut transform = SqlTransform::new("SELECT status >= 400 FROM logs").unwrap();

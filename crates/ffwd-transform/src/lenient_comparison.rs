@@ -82,19 +82,12 @@ fn rewrite_expr(expr: Expr, schema: &DFSchema) -> Transformed<Expr> {
             }
         }
         Expr::Between(between) => {
-            let target = match (
+            let types = [
                 type_of(&between.expr),
                 type_of(&between.low),
                 type_of(&between.high),
-            ) {
-                (Some(e), Some(lo), Some(hi))
-                    if is_string(&e) && lo.is_numeric() && hi.is_numeric() =>
-                {
-                    comparison_coercion(&lo, &hi)
-                }
-                _ => None,
-            };
-            match target {
+            ];
+            match numeric_target(&types) {
                 Some(t) => {
                     let Between {
                         expr,
@@ -102,39 +95,37 @@ fn rewrite_expr(expr: Expr, schema: &DFSchema) -> Transformed<Expr> {
                         low,
                         high,
                     } = between;
+                    let [e, lo, hi] = types;
                     Transformed::yes(Expr::Between(Between::new(
-                        Box::new(try_cast(*expr, t)),
+                        Box::new(lenient(*expr, e.as_ref(), &t)),
                         negated,
-                        low,
-                        high,
+                        Box::new(lenient(*low, lo.as_ref(), &t)),
+                        Box::new(lenient(*high, hi.as_ref(), &t)),
                     )))
                 }
                 None => Transformed::no(Expr::Between(between)),
             }
         }
         Expr::InList(in_list) => {
-            let target = match type_of(&in_list.expr) {
-                Some(e) if is_string(&e) && !in_list.list.is_empty() => {
-                    in_list.list.iter().try_fold(None::<DataType>, |acc, item| {
-                        let t = type_of(item).filter(DataType::is_numeric)?;
-                        match acc {
-                            None => Some(Some(t)),
-                            Some(prev) => comparison_coercion(&prev, &t).map(Some),
-                        }
-                    })
-                }
-                _ => None,
-            }
-            .flatten();
-            match target {
+            let expr_type = type_of(&in_list.expr);
+            let list_types: Vec<Option<DataType>> = in_list.list.iter().map(type_of).collect();
+            let all_types: Vec<Option<DataType>> = std::iter::once(expr_type.clone())
+                .chain(list_types.iter().cloned())
+                .collect();
+            match numeric_target(&all_types) {
                 Some(t) => {
                     let InList {
                         expr,
                         list,
                         negated,
                     } = in_list;
+                    let list = list
+                        .into_iter()
+                        .zip(list_types.iter())
+                        .map(|(item, ty)| lenient(item, ty.as_ref(), &t))
+                        .collect();
                     Transformed::yes(Expr::InList(InList::new(
-                        Box::new(try_cast(*expr, t)),
+                        Box::new(lenient(*expr, expr_type.as_ref(), &t)),
                         list,
                         negated,
                     )))
@@ -143,6 +134,37 @@ fn rewrite_expr(expr: Expr, schema: &DFSchema) -> Transformed<Expr> {
             }
         }
         other => Transformed::no(other),
+    }
+}
+
+/// The numeric type a multi-operand comparison (`BETWEEN`, `IN`) should use
+/// when it mixes string and numeric operands. `NULL` operands are neutral.
+/// Returns `None` when there is nothing to make lenient, or when an operand
+/// has a type outside strings, numbers and `NULL`.
+fn numeric_target(types: &[Option<DataType>]) -> Option<DataType> {
+    let mut has_string = false;
+    let mut target: Option<DataType> = None;
+    for ty in types {
+        match ty.as_ref()? {
+            DataType::Null => {}
+            t if is_string(t) => has_string = true,
+            t if t.is_numeric() => {
+                target = match target {
+                    None => Some(t.clone()),
+                    Some(prev) => Some(comparison_coercion(&prev, t)?),
+                };
+            }
+            _ => return None,
+        }
+    }
+    if has_string { target } else { None }
+}
+
+/// `TRY_CAST` a string operand to `target`; leave other operands alone.
+fn lenient(expr: Expr, ty: Option<&DataType>, target: &DataType) -> Expr {
+    match ty {
+        Some(t) if is_string(t) => try_cast(expr, target.clone()),
+        _ => expr,
     }
 }
 
