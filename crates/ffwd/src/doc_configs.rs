@@ -129,6 +129,12 @@ fn is_known_read_only_gap(err: &str) -> bool {
 
 /// Run read-only pipeline validation, keeping each pipeline's error message.
 fn validate_read_only(config: &ffwd_config::Config) -> Result<(), String> {
+    // Lite builds (no `datafusion`) only accept `SELECT * FROM logs` and no
+    // enrichment, so semantic checks there would reject valid doc SQL. The
+    // config has already loaded, which is the format check this test is for.
+    if cfg!(not(feature = "datafusion")) {
+        return Ok(());
+    }
     let mut errors = Vec::new();
     match validate_pipelines_read_only(config, None, |_| {}, |err| errors.push(err)) {
         Ok(()) => Ok(()),
