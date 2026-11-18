@@ -488,6 +488,14 @@ impl Pipeline {
             // Wire up shared enrichment sources to this transform.
             #[cfg(feature = "datafusion")]
             {
+                if matches!(input_cfg.type_config, InputTypeConfig::PrometheusScrape(_)) {
+                    transform.set_probe_column_types(
+                        ffwd_arrow::prom::PROM_TYPED_COLUMNS
+                            .iter()
+                            .map(|(name, ty)| ((*name).to_string(), ty.clone()))
+                            .collect(),
+                    );
+                }
                 if let Some(ref db) = geo_database {
                     transform.set_geo_database(Arc::clone(db));
                 }

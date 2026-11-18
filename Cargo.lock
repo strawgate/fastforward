@@ -2096,6 +2096,7 @@ dependencies = [
  "proptest",
  "serial_test",
  "stats_alloc",
+ "xxhash-rust",
 ]
 
 [[package]]

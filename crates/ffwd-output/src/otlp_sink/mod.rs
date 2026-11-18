@@ -4,6 +4,7 @@
 mod columns;
 mod encode;
 mod factory;
+mod metrics;
 mod send;
 mod types;
 

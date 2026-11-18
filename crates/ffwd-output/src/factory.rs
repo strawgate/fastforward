@@ -286,9 +286,8 @@ pub fn build_sink_factory(
                 client,
                 stats,
             )
-            .map_err(|e| {
-                OutputError::Construction(format!("output '{name}': otlp factory: {e}"))
-            })?;
+            .map_err(|e| OutputError::Construction(format!("output '{name}': otlp factory: {e}")))?
+            .with_signal(cfg.signal.unwrap_or_default());
             Ok(Arc::new(factory))
         }
         OutputConfigV2::Stdout(cfg) => {

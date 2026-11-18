@@ -86,6 +86,13 @@ File-discovery reliability notes: `dev-docs/references/file-discovery.md`.
 > `SourceEvent::Data` carries immutable `Bytes`, and `FramedInput` keeps only
 > small per-source `Vec<u8>` remainders where a line is incomplete or tainted.
 
+Arrow-native inputs skip framing and scanning and emit
+`SourceEvent::Batch { batch: RecordBatch }` directly: `host_metrics`, the
+OTLP and Arrow IPC receivers, and `prometheus_scrape`, which fetches each
+target on its own tokio task and parses the body with
+`ffwd_arrow::prom::PromBatchBuilder` (SIMD scan into zero-copy `Utf8View`
+columns, see `ffwd-core/src/prom_text.rs`).
+
 Each input source is polled on its own input-side worker thread. That thread
 owns the mutable accumulation buffer used before scan and sends immutable
 `Bytes` chunks to a per-input CPU worker over a bounded `tokio::sync::mpsc`
@@ -262,6 +269,10 @@ RecordBatch → OutputSink::send_batch() → HTTP/stdout/file
 
 - **OtlpSink**: Encodes RecordBatch → OTLP protobuf, sends via HTTP.
   Handles resource attributes, observed timestamps, DataType-based dispatch.
+  With `signal: auto` (default), batches that have a string `__name__` and a
+  numeric `__value__` column (for example from `prometheus_scrape`) are
+  regrouped into an `ExportMetricsServiceRequest` instead
+  (`otlp_sink/metrics.rs`); rows stay flat everywhere before the sink.
 - **ElasticsearchSink**: Bulk API with retry, compression, async reqwest.
 - **LokiSink**: Loki push API with label grouping, dedup, async reqwest.
 - **JsonLinesSink**: Converts RecordBatch → newline-delimited JSON,

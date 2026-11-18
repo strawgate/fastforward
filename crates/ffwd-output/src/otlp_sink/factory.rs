@@ -3,7 +3,7 @@
 use std::io;
 use std::sync::Arc;
 
-use ffwd_config::OtlpProtocol;
+use ffwd_config::{OtlpProtocol, OtlpSignal};
 use ffwd_types::diagnostics::ComponentStats;
 
 use super::types::OtlpSink;
@@ -25,6 +25,7 @@ pub struct OtlpSinkFactory {
     compression: Compression,
     headers: Vec<(String, String)>,
     message_field: String,
+    signal: OtlpSignal,
     client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
@@ -49,9 +50,17 @@ impl OtlpSinkFactory {
             compression,
             headers,
             message_field,
+            signal: OtlpSignal::Auto,
             client,
             stats,
         })
+    }
+
+    /// Choose which OTLP signal the created sinks send.
+    #[must_use]
+    pub fn with_signal(mut self, signal: OtlpSignal) -> Self {
+        self.signal = signal;
+        self
     }
 }
 
@@ -66,7 +75,8 @@ impl super::super::sink::SinkFactory for OtlpSinkFactory {
             self.client.clone(),
             Arc::clone(&self.stats),
         )?
-        .with_message_field(self.message_field.clone());
+        .with_message_field(self.message_field.clone())
+        .with_signal(self.signal);
         Ok(Box::new(sink))
     }
 

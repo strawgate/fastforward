@@ -348,6 +348,9 @@ pub enum InputTypeConfig {
     HostMetrics(SensorTypeConfig),
     /// AWS S3 (and S3-compatible) object storage input.
     S3(S3TypeConfig),
+    /// Scrape Prometheus text-format `/metrics` endpoints on an interval.
+    #[serde(rename = "prometheus_scrape")]
+    PrometheusScrape(PrometheusScrapeTypeConfig),
 }
 
 impl InputTypeConfig {
@@ -369,6 +372,7 @@ impl InputTypeConfig {
             Self::Journald(_) => InputType::Journald,
             Self::HostMetrics(_) => InputType::HostMetrics,
             Self::S3(_) => InputType::S3,
+            Self::PrometheusScrape(_) => InputType::PrometheusScrape,
         }
     }
 }
@@ -595,4 +599,66 @@ pub struct S3InputConfig {
     /// Polling interval for `ListObjectsV2` mode in milliseconds. Default: 5000.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub poll_interval_ms: Option<PositiveMillis>,
+}
+
+/// Response compression requested from scrape targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PrometheusScrapeCompressionConfig {
+    /// Ask for an uncompressed body (`Accept-Encoding: identity`). Default.
+    ///
+    /// Decompressing gzip costs about as much CPU as parsing the text and
+    /// building Arrow columns, so uncompressed scrapes are roughly twice as
+    /// cheap for ffwd when the network is not the bottleneck.
+    #[default]
+    None,
+    /// Ask for gzip (`Accept-Encoding: gzip`). Use for remote or
+    /// bandwidth-constrained targets.
+    Gzip,
+}
+
+/// Configuration for `type: prometheus_scrape`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrometheusScrapeTypeConfig {
+    /// Target URLs to scrape, e.g. `http://localhost:9100/metrics`.
+    #[serde(deserialize_with = "deserialize_vec_strict_string")]
+    pub targets: Vec<String>,
+    /// Value of the `job` label added to every sample. Defaults to the input name.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub job: Option<String>,
+    /// How often to scrape each target in milliseconds (default: 15000).
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub scrape_interval_ms: Option<PositiveMillis>,
+    /// Per-scrape timeout in milliseconds. Defaults to 10000, or to the
+    /// interval when that is shorter. Setting it above `scrape_interval_ms`
+    /// is a validation error.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub scrape_timeout_ms: Option<PositiveMillis>,
+    /// Response compression to request (default: `none`).
+    #[serde(default)]
+    pub compression: Option<PrometheusScrapeCompressionConfig>,
+    /// Keep timestamps written in the exposition (default: true). When false,
+    /// every sample gets the scrape time.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub honor_timestamps: Option<bool>,
+    /// Extra request headers, e.g. `Authorization: Bearer ...`.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_helpers::deserialize_option_string_map_strict_values"
+    )]
+    pub headers: Option<HashMap<String, String>>,
+    /// Largest response body accepted, in bytes (default: 67108864).
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub max_body_bytes: Option<usize>,
+    /// Largest number of distinct label columns one scrape may produce
+    /// (default: 1000). A scrape over the limit is rejected, which protects
+    /// downstream schemas from label-cardinality explosions.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub max_label_columns: Option<usize>,
+    /// Add a `__series_id__` UInt64 column hashing the metric name and labels
+    /// (default: true).
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub series_id: Option<bool>,
 }

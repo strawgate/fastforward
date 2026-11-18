@@ -13,6 +13,8 @@
 pub mod columnar;
 pub mod conflict_schema;
 pub mod materialize;
+/// Prometheus text exposition to Arrow `RecordBatch` (zero-copy `Utf8View`).
+pub mod prom;
 pub mod scanner;
 pub mod star_schema;
 pub mod streaming_builder;

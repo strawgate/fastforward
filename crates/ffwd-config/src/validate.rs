@@ -818,6 +818,9 @@ fn validate_pipeline_input(
                 )));
             }
         }
+        InputTypeConfig::PrometheusScrape(p) => {
+            validate_prometheus_scrape(pipeline_name, input_label, input, p)?;
+        }
     }
 
     if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
@@ -835,6 +838,105 @@ fn validate_pipeline_input(
     }
 
     Ok(())
+}
+
+fn validate_prometheus_scrape(
+    pipeline_name: &str,
+    input_label: &str,
+    input: &InputConfig,
+    p: &crate::types::PrometheusScrapeTypeConfig,
+) -> Result<(), ConfigError> {
+    let err = |msg: String| {
+        Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': {msg}"
+        )))
+    };
+    if p.targets.is_empty() {
+        return err("prometheus_scrape requires at least one entry in 'targets'".to_string());
+    }
+    // Targets are named by index: a URL may carry credentials.
+    let mut seen = HashSet::new();
+    for (i, target) in p.targets.iter().enumerate() {
+        let parsed = url::Url::parse(target.trim()).ok().filter(|u| {
+            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+        });
+        let Some(parsed) = parsed else {
+            return err(format!(
+                "targets[{i}] must be an http:// or https:// URL with a host"
+            ));
+        };
+        // Compare normalized URLs so `HTTP://Host:80/m` and `http://host/m`
+        // count as the same target.
+        if !seen.insert(parsed.to_string()) {
+            return err(format!("targets[{i}] repeats an earlier target"));
+        }
+    }
+    if let Some(job) = &p.job
+        && job.trim().is_empty()
+    {
+        return err("'job' must not be blank".to_string());
+    }
+    // An explicit timeout is checked against the interval actually used. An
+    // omitted timeout is capped to the interval at runtime, so a short
+    // interval with the default timeout stays valid.
+    if let Some(timeout) = p.scrape_timeout_ms {
+        let interval = p.scrape_interval_ms.map_or(
+            DEFAULT_SCRAPE_INTERVAL_MS,
+            crate::serde_helpers::PositiveMillis::get,
+        );
+        if timeout.get() > interval {
+            return err(format!(
+                "scrape_timeout_ms ({}) must not exceed scrape_interval_ms ({interval})",
+                timeout.get()
+            ));
+        }
+    }
+    // Values are never echoed: they often hold credentials.
+    for (name, value) in p.headers.iter().flatten() {
+        if !is_http_header_name(name) {
+            return err(format!(
+                "header name {name:?} is not a valid HTTP header name"
+            ));
+        }
+        if !is_http_header_value(value) {
+            return err(format!(
+                "header {name:?} has an invalid value (control characters are not allowed)"
+            ));
+        }
+    }
+    if p.max_body_bytes == Some(0) {
+        return err("'max_body_bytes' must be at least 1".to_string());
+    }
+    if p.max_label_columns == Some(0) {
+        return err("'max_label_columns' must be at least 1".to_string());
+    }
+    if input.format.is_some() {
+        return err(
+            "prometheus_scrape does not support 'format' (it always parses the Prometheus text format)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Default `prometheus_scrape` interval; matches
+/// `ffwd_io::prometheus_scrape::DEFAULT_SCRAPE_INTERVAL`.
+const DEFAULT_SCRAPE_INTERVAL_MS: u64 = 15_000;
+
+/// An HTTP field name: a non-empty RFC 9110 token.
+fn is_http_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// An HTTP field value as the client accepts it: no control bytes other
+/// than horizontal tab.
+fn is_http_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
 fn validate_pipeline_enrichment(

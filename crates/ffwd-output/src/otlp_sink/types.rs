@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{Array, PrimitiveArray};
 use arrow::datatypes::{Int64Type, UInt32Type, UInt64Type};
 
-use ffwd_config::OtlpProtocol;
+use ffwd_config::{OtlpProtocol, OtlpSignal};
 use ffwd_types::diagnostics::ComponentStats;
 use zstd::bulk::Compressor as ZstdCompressor;
 
@@ -31,6 +31,9 @@ pub(super) const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 pub struct OtlpSink {
     pub(super) name: String,
     pub(super) endpoint: String,
+    /// Endpoint used when a batch is sent as OTLP metrics.
+    pub(super) metrics_endpoint: String,
+    pub(super) signal: OtlpSignal,
     pub(super) protocol: OtlpProtocol,
     pub(super) compression: Compression,
     pub(super) headers: Vec<(String, String)>,
@@ -56,6 +59,7 @@ impl OtlpSink {
     ) -> io::Result<Self> {
         use ffwd_types::field_names;
 
+        let metrics_endpoint = metrics_endpoint_for(&endpoint, protocol);
         // For gRPC, ensure the endpoint has the correct service path.
         // Users typically configure just the host:port (e.g., "http://collector:4317").
         // The gRPC spec requires the full path: /package.Service/Method (#1059)
@@ -76,6 +80,8 @@ impl OtlpSink {
         Ok(OtlpSink {
             name,
             endpoint,
+            metrics_endpoint,
+            signal: OtlpSignal::Auto,
             protocol,
             compression,
             headers,
@@ -100,11 +106,46 @@ impl OtlpSink {
         self
     }
 
+    /// Choose which OTLP signal this sink sends. See [`OtlpSignal`].
+    #[inline]
+    #[must_use]
+    pub fn with_signal(mut self, signal: OtlpSignal) -> Self {
+        self.signal = signal;
+        self
+    }
+
     /// Returns the raw encoded OTLP protobuf payload produced by one of the
     /// encode methods on this sink.
     pub fn encoded_payload(&self) -> &[u8] {
         &self.encoder_buf
     }
+}
+
+const GRPC_LOGS_PATH: &str = "/opentelemetry.proto.collector.logs.v1.LogsService/Export";
+const GRPC_METRICS_PATH: &str = "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export";
+
+/// Derive the metrics endpoint from the configured (logs) endpoint.
+///
+/// gRPC: the service path is replaced with `MetricsService/Export`.
+/// HTTP: a path ending in `/v1/logs` becomes `/v1/metrics`, keeping any
+/// query string or fragment; any other URL is used as configured, so a dedicated metrics
+/// output can point anywhere.
+pub(super) fn metrics_endpoint_for(endpoint: &str, protocol: OtlpProtocol) -> String {
+    if protocol == OtlpProtocol::Http {
+        let (path, query) = endpoint
+            .find(['?', '#'])
+            .map_or((endpoint, ""), |i| endpoint.split_at(i));
+        return match path.trim_end_matches('/').strip_suffix("/v1/logs") {
+            Some(base) => format!("{base}/v1/metrics{query}"),
+            None => endpoint.to_string(),
+        };
+    }
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with(GRPC_METRICS_PATH) {
+        return trimmed.to_string();
+    }
+    let base = trimmed.strip_suffix(GRPC_LOGS_PATH).unwrap_or(trimmed);
+    format!("{base}{GRPC_METRICS_PATH}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

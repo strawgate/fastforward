@@ -449,6 +449,12 @@ In `_bench-pair`, the receiver diagnostics HTTP server (`/ready`) can return `20
 
 Fix: poll `http://127.0.0.1:9091/ready` (which returns 503 until at least one pipeline is registered), then sleep 1 second to let `run_async()` complete socket binding before spawning the sender. Without this grace period, the race window is ~1 ms and triggers roughly 10 % of the time on loaded CI runners. (See PR #1320.)
 
+### `xtask verify` only looks 6 lines above `unsafe {` for `SAFETY:`
+
+The `unsafe_needs_safety_comment` check in `xtask/src/main.rs` scans the `unsafe {` line and the six lines before it for `SAFETY:`. A long rationale comment that puts `SAFETY:` at its top pushes it out of that window, so `cargo run -p xtask -- verify` fails even though the block is documented. This happened in the Prometheus builder (`crates/ffwd-arrow/src/prom.rs`, `StringViewArray::new_unchecked`).
+
+Fix: put the background rationale first and end the comment with the `// SAFETY:` paragraph, so `SAFETY:` sits directly above the block.
+
 ### A saturated output pool hides the shutdown signal from the pipeline loop
 
 When an output is down and the worker pool is full, `run_async` sits inside `submit_batch` waiting for a worker slot, so its `select!` never sees the shutdown token. Workers retry forever, so the slot never frees, and shutdown waits out the whole pool drain timeout (60s). That is why `run_async` spawns a small task that opens the pool's shutdown retry window (`ShutdownRetryGrace::begin`) the moment the token fires, independently of the loop. When the window (`shutdown_retry_grace_ms`, default 10s) closes, the busy worker gives up its batch without acking it, the blocked submit completes, and the loop exits. An unacked batch is not durably held: checkpointed inputs (files) replay it from their last committed checkpoint on restart, while inputs without checkpoints (TCP/UDP/OTLP receivers) lose it. A test that only uses a few hundred lines never fills the pool and passes without the fix; `shutdown_with_down_output_and_saturated_pool_exits_promptly` uses 50,000 lines and 64-byte batches for this reason.

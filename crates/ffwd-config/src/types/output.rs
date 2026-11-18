@@ -125,6 +125,27 @@ pub struct OtlpOutputConfig {
     pub batch_size: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_timeout_ms: Option<PositiveMillis>,
+    /// Which OTLP signal to send (default: `auto`).
+    #[serde(default)]
+    pub signal: Option<OtlpSignal>,
+}
+
+/// OTLP signal an `otlp` output sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OtlpSignal {
+    /// Send metric-shaped batches as OTLP metrics and all other batches as
+    /// OTLP logs. Default. A batch is metric-shaped when it has a string
+    /// (`Utf8`, `LargeUtf8` or `Utf8View`) `__name__` column and a numeric
+    /// `__value__` column, as `prometheus_scrape` produces.
+    #[default]
+    Auto,
+    /// Always send OTLP logs.
+    Logs,
+    /// Always send OTLP metrics; batches without a string `__name__` and a
+    /// numeric `__value__` column are rejected.
+    Metrics,
 }
 
 /// Generic HTTP JSON-lines output configuration.

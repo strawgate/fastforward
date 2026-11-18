@@ -134,7 +134,7 @@ random — the SAT solver considers ALL possible values simultaneously.
 
 Add Kani proofs when implementing or modifying:
 
-1. **Parsers** — Any code handling raw bytes (`framer.rs`, `cri.rs`, `json_scanner.rs`)
+1. **Parsers** — Any code handling raw bytes (`framer.rs`, `cri.rs`, `json_scanner.rs`, `prom_text.rs`)
    - MUST have `verify_<function>_no_panic` proof
    - SHOULD have correctness proof against an oracle
 
@@ -399,6 +399,7 @@ ffwd-core is the proven kernel. All rules are CI-enforced.
 | `ffwd-core/json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (10 proofs, 3 `kani-slow`) + proptest oracle + compliance regressions |
 | `ffwd-core/scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (4 proofs incl. mid-range and overflow boundary, 2 `kani-slow`) |
 | `ffwd-core/cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (17 proofs, 4 `kani-slow`) |
+| `ffwd-core/prom_text.rs` | Prometheus text exposition scanner: SIMD structural mask, line walker, value fast path | Kani (6 proofs, 2 `kani-slow`: `verify_prom_structural_mask_simd_eq_scalar` (SIMD mask ≡ scalar for all blocks), `verify_parse_prom_value_integers` (integer fast path exact), `verify_parse_prom_value_signed_decimal_exact` (sign and decimal-point paths exact for zero fractions, including `-0.0`), `verify_parse_prom_value_no_panic`, `verify_scan_prom_text_name_value_oracle` (`m <digit>` → one row with that name and value), `verify_scan_prom_text_no_panic` (any one byte of `m 1\n` replaced)). Proofs stub `core`'s float parser (`parse_prom_value_fallback`, trusted) and, in the scan proofs, the SIMD block mask (scalar classifier over the zero-padded 8-byte prefix; SIMD ≡ scalar is proven separately). The two scan proofs take over 10 min each (scratch `Vec` growth in symex), so they are `kani-slow` via `cfg_attr(feature = "kani-slow", kani::proof)`; default PR CI covers the scanner with proptest. Local run (Kani 0.68): SIMD mask 46 s, integers 18 s, signed decimal 23 s, value no-panic 4 s, all successful) + proptest (SIMD ≡ scalar, decimal fast path ≡ `core` parser, generated-exposition round trip, arbitrary-input no-panic). Why proptest suffices for non-zero decimal fractions: the fast path runs only for ≤ 15 digits, so the mantissa is < 10^15 < 2^53 and `POW10[k]` (k ≤ 15) is exact in f64. One IEEE-754 division of two exact operands is correctly rounded, so the result is the nearest f64 to the decimal (Clinger's fast path). The proptest checks that bit-for-bit against `core`'s parser. |
 | `ffwd-core/otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (50 proofs incl. contract verifications and compositional stubs, 5 `kani-slow`) |
 | `ffwd-types/pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani bounded (16 proofs, run against `ArrayMap` with capacity 4; `u8` checkpoints, narrowed to ≤ 4 or ≤ 8 in the multi-batch proofs) + proptest + **TLA+** |
 | `ffwd-types/pipeline/registry.rs` | Source registry states (Active → Draining → Committed), upsert, generation pruning | Kani bounded (4 proofs, run against `ArrayMap` with capacity 4) + unit tests |

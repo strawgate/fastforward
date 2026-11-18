@@ -15,3 +15,4 @@ Arrow integration layer. Implements ffwd-core's ScanBuilder trait to produce Rec
 - `streaming_builder.rs` — Zero-copy StringViewArray builder (hot path)
 - `conflict_schema.rs` — StructArray conflict column detection + normalization
 - `scanner.rs` — Scanner wrapper (zero-copy + detached output modes)
+- `prom.rs` — Prometheus text exposition → RecordBatch (dense zero-copy `Utf8View` builder)

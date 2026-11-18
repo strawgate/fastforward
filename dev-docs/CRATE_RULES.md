@@ -29,10 +29,10 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 
 | Rule | Enforcement |
 |------|-------------|
-| unsafe allowed (SIMD only) | Code review. SIMD impls only. |
+| unsafe allowed for SIMD, plus the trusted-path `Utf8View` exception: `StringViewArray::new_unchecked` over buffers already validated as UTF-8 (`columnar::accumulator`, `columnar::builder`, `prom`), each with a `// SAFETY:` comment | Code review + `xtask verify` (`unsafe_needs_safety_comment`) |
 | Implements core's ScanBuilder + CharDetector traits | Compilation |
 | proptest: SIMD output == scalar output | CI test suite |
-| Deps: core + arrow + bytes | Cargo.toml |
+| Deps: core + arrow + bytes, plus `xxhash-rust` for the Prometheus series id (`prom`) | Cargo.toml |
 | Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## ffwd-types

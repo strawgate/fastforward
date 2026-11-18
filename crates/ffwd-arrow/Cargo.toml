@@ -20,6 +20,7 @@ ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
 ffwd-kani = { version = "0.1.0", path = "../ffwd-kani" }
 ffwd-lint-attrs = { version = "0.1.0", path = "../ffwd-lint-attrs" }
 ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

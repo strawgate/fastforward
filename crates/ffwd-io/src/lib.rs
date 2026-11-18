@@ -35,6 +35,8 @@ pub(crate) mod platform_sensor_filter;
 /// Adaptive polling primitives shared by file-tail and runtime input loops.
 pub mod poll_cadence;
 pub(crate) mod polling_input_health;
+/// Prometheus text-format scrape input.
+pub mod prometheus_scrape;
 pub(crate) mod receiver_health;
 pub(crate) mod receiver_http;
 /// High-performance S3 (and S3-compatible) object storage input.

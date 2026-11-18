@@ -165,11 +165,23 @@ pub(crate) fn validate_generated_config_read_only(
 // Per-pipeline validation
 // ---------------------------------------------------------------------------
 
+/// Columns an input produces with a non-string type. The probe batch types
+/// them the same way so arithmetic in SQL validates as it would run.
+fn typed_probe_columns(
+    input: &ffwd_config::InputTypeConfig,
+) -> &'static [(&'static str, arrow::datatypes::DataType)] {
+    match input {
+        ffwd_config::InputTypeConfig::PrometheusScrape(_) => &ffwd_arrow::prom::PROM_TYPED_COLUMNS,
+        _ => &[],
+    }
+}
+
 fn validate_transform_probe_read_only(
     transform: &mut ffwd::transform::SqlTransform,
     source_metadata: ffwd_config::SourceMetadataStyle,
+    typed: &[(&str, arrow::datatypes::DataType)],
 ) -> Result<(), String> {
-    use arrow::array::{ArrayRef, StringArray, StringViewArray, UInt64Array};
+    use arrow::array::{ArrayRef, StringViewArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use ffwd_config::SourceMetadataStyle;
@@ -179,16 +191,37 @@ fn validate_transform_probe_read_only(
 
     let mut fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty()
     {
-        vec![
+        let mut base = vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("level", DataType::Utf8, true),
             Field::new("msg", DataType::Utf8, true),
-        ]
+        ];
+        base.extend(
+            typed
+                .iter()
+                .map(|(name, ty)| Field::new(*name, ty.clone(), true)),
+        );
+        // `SELECT *` still names columns elsewhere (`WHERE __name__ = 'up'`);
+        // the probe needs them too or planning fails on a valid query.
+        let mut referenced: Vec<&String> = transform.analyzer().referenced_columns.iter().collect();
+        referenced.sort();
+        for name in referenced {
+            if !base.iter().any(|f| f.name() == name) {
+                base.push(Field::new(name.as_str(), DataType::Utf8, true));
+            }
+        }
+        base
     } else {
         scan_config
             .wanted_fields
             .iter()
-            .map(|field| Field::new(field.name.as_str(), DataType::Utf8, true))
+            .map(|field| {
+                let ty = typed
+                    .iter()
+                    .find(|(name, _)| *name == field.name.as_str())
+                    .map_or(DataType::Utf8, |(_, ty)| ty.clone());
+                Field::new(field.name.as_str(), ty, true)
+            })
             .collect()
     };
 
@@ -199,26 +232,47 @@ fn validate_transform_probe_read_only(
     // that turns NULL into an uncastable literal can still fail here.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
-        .map(|_| Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef)
+        .map(|field| arrow::array::new_null_array(field.data_type(), 1))
         .collect();
 
+    // Metadata columns replace a same-named column the query referenced
+    // (`WHERE __source_id = 2`), so the probe never holds a duplicate.
+    let mut set_column = |field: Field, array: ArrayRef| {
+        let existing = fields.iter().position(|f| f.name() == field.name());
+        if let Some(i) = existing {
+            fields.remove(i);
+            arrays.remove(i);
+        }
+        fields.push(field);
+        arrays.push(array);
+    };
+
     if source_metadata == SourceMetadataStyle::Fastforward {
-        fields.push(Field::new(SOURCE_ID, DataType::UInt64, true));
-        arrays.push(Arc::new(UInt64Array::from(vec![Some(1u64)])) as ArrayRef);
+        set_column(
+            Field::new(SOURCE_ID, DataType::UInt64, true),
+            Arc::new(UInt64Array::from(vec![Some(1u64)])) as ArrayRef,
+        );
     }
 
+    let file_path = || Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef;
     match source_metadata {
         SourceMetadataStyle::Ecs => {
-            fields.push(Field::new(ECS_FILE_PATH, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(ECS_FILE_PATH, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::Otel => {
-            fields.push(Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::Vector => {
-            fields.push(Field::new(VECTOR_FILE, DataType::Utf8View, true));
-            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            set_column(
+                Field::new(VECTOR_FILE, DataType::Utf8View, true),
+                file_path(),
+            );
         }
         SourceMetadataStyle::None | SourceMetadataStyle::Fastforward => {}
         _ => {}
@@ -612,6 +666,7 @@ fn validate_pipeline_read_only(
                 | InputTypeConfig::WindowsEbpfSensor(_)
                 | InputTypeConfig::HostMetrics(_)
                 | InputTypeConfig::ArrowIpc(_)
+                | InputTypeConfig::PrometheusScrape(_)
         ) {
             if input_cfg.format.is_some() {
                 return Err(format!(
@@ -648,8 +703,12 @@ fn validate_pipeline_read_only(
                     .map_err(|e| format!("input '{input_name}': enrichment error: {e}"))?;
             }
         }
-        validate_transform_probe_read_only(&mut transform, input_cfg.source_metadata)
-            .map_err(|e| format!("input '{input_name}': {e}"))?;
+        validate_transform_probe_read_only(
+            &mut transform,
+            input_cfg.source_metadata,
+            typed_probe_columns(&input_cfg.type_config),
+        )
+        .map_err(|e| format!("input '{input_name}': {e}"))?;
     }
 
     Ok(())
@@ -854,6 +913,26 @@ mod tests {
     }
 
     #[test]
+    fn prometheus_value_is_numeric_in_the_read_only_probe() {
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [\"http://127.0.0.1:9100/metrics\"]",
+            "SELECT __name__, __value__ * 2 + 1 AS doubled, __timestamp_ms__ / 1000 AS secs FROM logs",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
+            .expect("arithmetic on __value__ should validate");
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [\"http://127.0.0.1:9100/metrics\"]",
+            "SELECT *, __value__ + 1 AS next FROM logs WHERE __value__ > 0",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
+            .expect("SELECT * with arithmetic on __value__ should validate");
+    }
+
+    #[test]
     fn generated_wizard_config_is_validated_before_write() {
         let output_path = std::path::Path::new("ffwd.generated.yaml");
         let invalid_yaml = single_pipeline_yaml_with_transform(
@@ -888,6 +967,47 @@ mod tests {
             read_only.is_err(),
             "effective-config validation should reject duplicate aliases"
         );
+    }
+
+    #[test]
+    fn select_star_probe_does_not_duplicate_referenced_metadata_column() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/logs.json
+        format: json
+        source_metadata: fastforward
+    transform: SELECT * FROM logs WHERE __source_id = 2
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
+    }
+
+    #[test]
+    fn full_validation_accepts_prometheus_select_star_with_typed_where() {
+        let yaml = single_pipeline_yaml_with_transform(
+            "type: prometheus_scrape\ntargets: [http://localhost:9100/metrics]",
+            "SELECT *, __value__ + 1 AS next, __series_id__ & 255 AS shard FROM logs WHERE __name__ = 'up' AND __value__ > 0",
+            "type: \"null\"",
+        );
+        let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        assert!(runtime.is_ok(), "full validation failed: {runtime:?}");
     }
 
     #[test]
@@ -1214,6 +1334,33 @@ pipelines:
         path: /tmp/logs.json
         format: json
     transform: SELECT 100 / int(duration_ms) AS rate FROM logs WHERE status >= 400
+    outputs:
+      - type: stdout
+"#;
+        let config = ffwd_config::Config::load_str(yaml).expect("valid config");
+        let mut failures = Vec::new();
+
+        validate_pipelines_read_only(
+            &config,
+            None,
+            |_name| {},
+            |err| {
+                failures.push(err.to_string());
+            },
+        );
+
+        assert!(failures.is_empty(), "probe failed validation: {failures:?}");
+    }
+
+    #[test]
+    fn select_star_probe_includes_where_columns() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: prometheus_scrape
+        targets: [http://localhost:9100/metrics]
+    transform: SELECT * FROM logs WHERE __name__ = 'up' AND __value__ > 0
     outputs:
       - type: stdout
 "#;
