@@ -24,6 +24,7 @@ impl OutputWorkerPool {
             ack_rx,
             ack_tx,
             cancel: CancellationToken::new(),
+            stop_retrying: CancellationToken::new(),
             join_set: JoinSet::new(),
             channel_capacity: 1,
             max_workers,
@@ -198,6 +199,19 @@ impl OutputWorkerPool {
         }
     }
 
+    /// Tell workers that shutdown has begun: stop retrying failed sends.
+    ///
+    /// Each worker still finishes the send it is making, and batches that
+    /// are queued or submitted later still get one delivery attempt. A
+    /// failed attempt resolves as [`DeliveryOutcome::PoolClosed`] instead of
+    /// backing off, so the batch is held for replay from the last checkpoint
+    /// rather than keeping shutdown waiting on an output that is down.
+    /// [`Self::drain`] also calls this; calling it earlier lets the pipeline
+    /// stop retries before it flushes its input channel.
+    pub fn stop_retrying(&self) {
+        self.stop_retrying.cancel();
+    }
+
     /// Try to receive any pending ack items without blocking.
     ///
     /// Call this from the pipeline's `select!` loop to advance checkpoints.
@@ -222,6 +236,7 @@ impl OutputWorkerPool {
         // race with the start of drain are rejected, closing the window between
         // the guard check in submit() and the actual teardown below.
         self.is_draining = true;
+        self.stop_retrying.cancel();
         #[cfg(feature = "turmoil")]
         crate::turmoil_barriers::trigger(
             crate::turmoil_barriers::RuntimeBarrierEvent::PoolDrainBegin,
@@ -318,6 +333,7 @@ impl OutputWorkerPool {
             .apply_worker_event(id, OutputHealthEvent::StartupSucceeded);
         let cfg = WorkerConfig {
             cancel: self.cancel.clone(),
+            stop_retrying: self.stop_retrying.clone(),
             idle_timeout: self.idle_timeout,
             max_retry_delay: self.max_retry_delay,
             metrics: Arc::clone(&self.metrics),

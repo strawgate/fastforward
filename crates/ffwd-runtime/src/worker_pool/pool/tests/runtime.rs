@@ -49,6 +49,36 @@
     }
 
     #[tokio::test]
+    async fn pool_drain_with_down_output_does_not_wait_for_graceful_timeout() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let factory = Arc::new(CountingSinkFactory {
+            calls: Arc::clone(&calls),
+            fail: true,
+            fail_shutdown: false,
+        });
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), test_metrics());
+
+        pool.submit(empty_work_item()).await;
+        // Let the worker enter its retry loop.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let started = std::time::Instant::now();
+        pool.drain(Duration::from_secs(60)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain should stop retries instead of waiting out the graceful timeout, took {:?}",
+            started.elapsed()
+        );
+
+        let ack = pool.ack_rx_mut().try_recv().expect("expected an ack item");
+        assert_eq!(
+            ack.outcome,
+            DeliveryOutcome::PoolClosed,
+            "undelivered batch should be held for replay"
+        );
+    }
+
+    #[tokio::test]
     async fn pool_respects_max_workers() {
         let calls = Arc::new(AtomicU32::new(0));
         let factory = Arc::new(CountingSinkFactory {

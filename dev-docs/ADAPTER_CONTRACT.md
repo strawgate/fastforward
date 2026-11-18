@@ -301,6 +301,11 @@ The file path is:
 - The current worker/pipeline seam does not yet retain enough batch payload
   state to requeue held batches in-process, so non-advancing failures are
   replayed on restart if shutdown force-stops with unresolved tickets.
+- Once shutdown begins, output workers stop retrying failed sends. Each queued
+  or in-progress batch still gets its delivery attempt, but a transient failure
+  resolves as `PoolClosed` (held, checkpoint not advanced) instead of backing
+  off. A down output therefore cannot hold shutdown open for the pool drain
+  timeout; the undelivered data is replayed on restart for checkpointed inputs.
 
 ## Diagnostics And Control-Plane Contract
 

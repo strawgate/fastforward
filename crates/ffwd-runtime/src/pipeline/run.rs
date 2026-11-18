@@ -246,6 +246,12 @@ impl Pipeline {
             }
         }
 
+        // Shutdown has begun: stop retrying failed output sends. Without this,
+        // a down output keeps every worker in its retry loop, so flushing the
+        // input channel blocks on a full pool and pool drain waits out its
+        // whole timeout. Batches that fail from here on are held for replay.
+        self.pool.stop_retrying();
+
         if should_drain_input_channel && !internal_faults::shutdown_skip_channel_drain() {
             // Drain channel messages before joining input threads.
             // This prevents deadlock during shutdown if a producer is blocked in
