@@ -92,6 +92,8 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = [
 opentelemetry-otlp = { version = "0.33", default-features = false, features = [
     "http-proto",
     "reqwest-client",
+    # reqwest 0.13 (pulled in by otlp 0.33) needs its own TLS feature for https endpoints.
+    "reqwest-rustls",
     "trace",
     "metrics",
 ] }
