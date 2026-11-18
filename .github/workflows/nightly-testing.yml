@@ -198,6 +198,7 @@ jobs:
           total_fail_count=0
           shards_with_results=0
           unfinished_shards=""
+          seen_shards=" "
 
           # Locate shard result directories by their marker file rather than
           # by artifact directory names.
@@ -205,6 +206,7 @@ jobs:
             shard_dir="$(dirname "$shard_file")"
             shard="$(cat "$shard_file")"
             shards_with_results=$((shards_with_results + 1))
+            seen_shards="${seen_shards}${shard%%/*} "
             if [ ! -f "$shard_dir/summary.txt" ]; then
               unfinished_shards="${unfinished_shards} ${shard}"
             fi
@@ -237,6 +239,11 @@ jobs:
               "$failures_tsv" >>"$repro_file"
           done < <(find /tmp/turmoil-artifacts -type f -name shard.txt | sort)
 
+          missing_shards=""
+          for i in 0 1 2 3 4 5 6 7; do
+            case "$seen_shards" in *" $i "*) ;; *) missing_shards="${missing_shards} ${i}" ;; esac
+          done
+
           # Shards that failed for infra/compile reasons produce no failed
           # seeds; do not file an issue for those.
           if [ "$total_fail_count" -eq 0 ]; then
@@ -268,7 +275,10 @@ jobs:
             fi
             echo
             echo "- Failed shards: ${failed_shards}"
-            echo "- Shards with results: ${shards_with_results}/8 (missing shards failed before the sweep ran; check the run)"
+            echo "- Shards with results: ${shards_with_results}/8"
+            if [ -n "$missing_shards" ]; then
+              echo "- Shards with no results (failed before the sweep ran; check the run):${missing_shards}"
+            fi
             if [ -n "$unfinished_shards" ]; then
               echo "- Shards that stopped mid-sweep:${unfinished_shards}"
             fi
