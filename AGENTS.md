@@ -5,7 +5,7 @@
 
 ## Prerequisites
 
-- **Rust 1.89+** (`rustup` recommended)
+- **Rust 1.94+** (`rustup` recommended)
 - **[just](https://github.com/casey/just)** task runner (`cargo install just`)
 - **[taplo](https://taplo.tamasfe.dev/)** for TOML formatting (`cargo install taplo-cli`)
 - **[cargo-nextest](https://nexte.st/)** for test execution (`cargo install cargo-nextest`)

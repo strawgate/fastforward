@@ -24,7 +24,7 @@ The [documentation site](https://strawgate.github.io/fastforward/) has interacti
 ## Try it
 
 ```bash
-# Build from source (Rust 1.89+)
+# Build from source (Rust 1.94+)
 git clone https://github.com/strawgate/fastforward.git && cd fastforward
 cargo build --release -p ffwd
 

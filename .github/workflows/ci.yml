@@ -418,7 +418,7 @@ jobs:
         with:
           # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
           # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
+          kani-version: '0.68.0'
           args: >-
             --solver kissat
             --jobs 3
@@ -456,7 +456,7 @@ jobs:
         with:
           # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
           # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
+          kani-version: '0.68.0'
           args: >-
             --solver kissat
             --jobs 4
@@ -491,7 +491,7 @@ jobs:
         with:
           # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
           # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
+          kani-version: '0.68.0'
           args: >-
             --solver kissat
             --jobs 3
@@ -527,7 +527,7 @@ jobs:
         with:
           # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
           # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
+          kani-version: '0.68.0'
           args: >-
             --solver kissat
             --jobs 3
