@@ -223,6 +223,15 @@ struct Columns<'a> {
 }
 
 impl Columns<'_> {
+    /// Label `i` of `row`. An empty value counts as absent, as in
+    /// Prometheus, so `{a=""}` and `{}` are the same series.
+    fn label(&self, i: usize, row: usize) -> Option<&str> {
+        self.labels
+            .get(i)
+            .and_then(|(_, col)| col.get(row))
+            .filter(|v| !v.is_empty())
+    }
+
     /// The row's timestamp, or `None` when it has none or it can't be
     /// encoded (see [`time_ns`]). Grouping uses this effective value, so a
     /// missing and an unusable timestamp land in the same point.
@@ -409,11 +418,11 @@ fn classify(name: &str, ty: TypeTag, has_quantile: bool) -> (&str, Kind, Role) {
 fn series_hash(cols: &Columns<'_>, row: usize, skip: Option<usize>) -> u64 {
     const PRIME: u64 = 0x0100_0000_01b3;
     let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for (i, (_, col)) in cols.labels.iter().enumerate() {
+    for i in 0..cols.labels.len() {
         if Some(i) == skip {
             continue;
         }
-        if let Some(v) = col.get(row) {
+        if let Some(v) = cols.label(i, row) {
             h ^= i as u64;
             h = h.wrapping_mul(PRIME);
             for b in v.bytes() {
@@ -433,11 +442,7 @@ fn series_hash(cols: &Columns<'_>, row: usize, skip: Option<usize>) -> u64 {
 
 fn same_series(cols: &Columns<'_>, a: usize, b: usize, skip: Option<usize>) -> bool {
     cols.time_ms(a) == cols.time_ms(b)
-        && cols
-            .labels
-            .iter()
-            .enumerate()
-            .all(|(i, (_, col))| Some(i) == skip || col.get(a) == col.get(b))
+        && (0..cols.labels.len()).all(|i| Some(i) == skip || cols.label(i, a) == cols.label(i, b))
 }
 
 fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
@@ -778,11 +783,11 @@ fn encode_attributes(
     row: usize,
     skip: Option<usize>,
 ) {
-    for (i, (key, col)) in cols.labels.iter().enumerate() {
+    for (i, (key, _)) in cols.labels.iter().enumerate() {
         if Some(i) == skip {
             continue;
         }
-        if let Some(v) = col.get(row) {
+        if let Some(v) = cols.label(i, row) {
             encode_kv(out, field, key, v);
         }
     }
@@ -1405,6 +1410,25 @@ mod tests {
         let p = &hist.data_points[0];
         assert_eq!(p.bucket_counts.iter().sum::<u64>(), p.count);
         assert_eq!(p.count, 1);
+    }
+
+    #[test]
+    fn empty_and_absent_labels_are_the_same_series() {
+        let h = Some("histogram");
+        let b = batch(&[
+            ("h_bucket", 1.0, None, h, &[("a", ""), ("le", "+Inf")]),
+            ("h_sum", 2.0, None, h, &[]),
+            ("h_count", 1.0, None, h, &[]),
+        ]);
+        let req = decode(&b);
+        let Some(Data::Histogram(hist)) = &req.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected histogram")
+        };
+        assert_eq!(hist.data_points.len(), 1);
+        let p = &hist.data_points[0];
+        assert_eq!((p.count, p.sum), (1, Some(2.0)));
+        assert!(p.attributes.is_empty(), "empty label is not exported");
     }
 
     #[test]
