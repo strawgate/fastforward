@@ -227,11 +227,20 @@ CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
 - Each harness gets at most 6 GB of address space and 15 minutes. A harness
   that needs more fails on its own ("CBMC failed with status 6") instead of
   getting the runner killed and hiding the rest of the shard.
-- Harnesses listed in `scripts/kani_nightly_only.txt` do not fit that budget
-  yet. PR and push CI skip them and the nightly workflow runs them. The
-  script fails if a listed harness no longer exists. Shrink a harness (fewer
-  symbolic bytes, enumerated cases, `Vec::with_capacity`) and remove it from
-  the list rather than growing the list.
+- `scripts/kani_nightly_only.txt` is for harnesses that do not fit that
+  budget yet: PR and push CI skip them and the nightly workflow runs them.
+  The list is empty; keep it that way. The script fails if a listed harness
+  no longer exists. Shrink a harness rather than listing it:
+  - Enumerate small enums and permutations with constant `match` arms or
+    loops instead of one symbolic tag. A symbolic event or ack order makes
+    every map key symbolic.
+  - Use fixed arrays and `Vec::with_capacity` instead of symbolic-size
+    vectors; stub `std::fmt::format` when the proof never reads messages.
+  - Under `cfg(kani)`, `ffwd-types` swaps `BTreeMap` for `ArrayMap`
+    (`pipeline/ord_map.rs`), a sorted fixed-capacity array tested against
+    `BTreeMap`. CBMC cannot bound a B-tree, so no lifecycle proof fit before.
+  - Prove a byte-level helper instead of code that walks `str::chars()`
+    (see `for_each_kept_range` in `ffwd-diagnostics`).
 - The `kani` job does not wait on `Lint`, so a lint failure does not hide
   proof results.
 - Harnesses that exceed the per-harness CI budget are gated behind the

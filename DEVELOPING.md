@@ -420,6 +420,12 @@ Optional dependencies behind non-default features (for example `quick-xml` under
 
 Kani proofs that ran out of memory or time in CI showed up as failures for months, so a real counterexample would have looked the same as a resource failure. When `verify_rebuild_attempts_bounded` (ffwd-runtime `reload.rs`) finally fit the budget, it failed: the harness started from a state the reload coordinator can never reach. Keep every PR-CI harness inside the 6 GB / 15 minute budget (see `dev-docs/VERIFICATION.md`), and treat `scripts/kani_nightly_only.txt` as debt to pay down, not a parking lot.
 
+Once `verify_committed_monotonic` (ffwd-types `lifecycle.rs`) fit the budget, it failed too: it never assumed the batches' checkpoints were nondecreasing, which the pipeline relies on and the TLA+ model assumes.
+
+### Small Rust idioms can cost CBMC 20x
+
+In `ArrayMap` (ffwd-types `pipeline/ord_map.rs`), moving slots with `slice::swap` and iterating with `FilterMap` over a function pointer gave a two-batch lifecycle proof 548k symex steps and ran it out of memory. Moving with `Option::take` and a plain iterator struct cut it to 30k steps and 6 seconds. When a harness blows up, check `size of program expression` in Kani's verbose output before shrinking the inputs.
+
 ### Check a varint's 10th byte before shifting it in
 
 `decode_varint` (ffwd-core `otlp.rs`) once ran its overflow check on the 9th byte instead of the 10th. It rejected valid 10-byte varints such as `u64::MAX` and accepted a 10th byte whose payload overflowed 64 bits. Only bit 0 of the 10th byte may be set; `decode_varint_accepts_ten_byte_u64_max` and `decode_varint_rejects_tenth_byte_payload_above_one` pin this down.
