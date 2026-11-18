@@ -300,6 +300,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(10)]
     fn verify_cri_metadata_append_value_always_counts_one_row() {
         let valid_stream: bool = kani::any();
         let stream = if valid_stream {
@@ -309,7 +310,9 @@ mod verification {
         };
         let mut metadata = CriMetadata::default();
 
-        let appended_value = metadata.append_value(b"2024-01-15T10:30:00Z", stream);
+        // Short timestamp: with no unwind bound and a 20-byte timestamp the
+        // UTF-8 check and copy loops timed out after 15 minutes in CI.
+        let appended_value = metadata.append_value(b"2024", stream);
 
         assert!(metadata.rows == 1);
         assert!(appended_value == valid_stream);
