@@ -244,13 +244,13 @@ fn validate_transform_probe_read_only(
     // Metadata columns replace a same-named column the query referenced
     // (`WHERE __source_id = 2`), so the probe never holds a duplicate.
     let mut set_column = |field: Field, array: ArrayRef| {
-        if let Some(i) = fields.iter().position(|f| f.name() == field.name()) {
-            fields[i] = field;
-            arrays[i] = array;
-        } else {
-            fields.push(field);
-            arrays.push(array);
+        let existing = fields.iter().position(|f| f.name() == field.name());
+        if let Some(i) = existing {
+            fields.remove(i);
+            arrays.remove(i);
         }
+        fields.push(field);
+        arrays.push(array);
     };
 
     if source_metadata == SourceMetadataStyle::Fastforward {
