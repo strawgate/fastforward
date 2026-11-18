@@ -181,9 +181,7 @@ fn validate_transform_probe_read_only(
     source_metadata: ffwd_config::SourceMetadataStyle,
     typed: &[(&str, arrow::datatypes::DataType)],
 ) -> Result<(), String> {
-    use arrow::array::{
-        ArrayRef, Float64Array, Int64Array, StringArray, StringViewArray, UInt64Array,
-    };
+    use arrow::array::{ArrayRef, StringViewArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use ffwd_config::SourceMetadataStyle;
@@ -234,11 +232,7 @@ fn validate_transform_probe_read_only(
     // that turns NULL into an uncastable literal can still fail here.
     let mut arrays: Vec<ArrayRef> = fields
         .iter()
-        .map(|field| match field.data_type() {
-            DataType::Float64 => Arc::new(Float64Array::from(vec![None::<f64>])) as ArrayRef,
-            DataType::Int64 => Arc::new(Int64Array::from(vec![None::<i64>])) as ArrayRef,
-            _ => Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
-        })
+        .map(|field| arrow::array::new_null_array(field.data_type(), 1))
         .collect();
 
     // Metadata columns replace a same-named column the query referenced
@@ -1008,7 +1002,7 @@ pipelines:
     fn full_validation_accepts_prometheus_select_star_with_typed_where() {
         let yaml = single_pipeline_yaml_with_transform(
             "type: prometheus_scrape\ntargets: [http://localhost:9100/metrics]",
-            "SELECT *, __value__ + 1 AS next FROM logs WHERE __name__ = 'up' AND __value__ > 0",
+            "SELECT *, __value__ + 1 AS next, __series_id__ & 255 AS shard FROM logs WHERE __name__ = 'up' AND __value__ > 0",
             "type: \"null\"",
         );
         let config = ffwd_config::Config::load_str(&yaml).expect("config should parse");

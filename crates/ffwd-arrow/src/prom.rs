@@ -44,9 +44,10 @@ pub const PROM_SERIES_ID_FIELD: &str = "__series_id__";
 /// Columns a Prometheus batch always types as non-strings. SQL validation
 /// probes, which have no real batch to read types from, use this list so
 /// arithmetic such as `__value__ + 1` plans the same way it runs.
-pub static PROM_TYPED_COLUMNS: [(&str, DataType); 2] = [
+pub static PROM_TYPED_COLUMNS: [(&str, DataType); 3] = [
     ("__value__", DataType::Float64),
     ("__timestamp_ms__", DataType::Int64),
+    (PROM_SERIES_ID_FIELD, DataType::UInt64),
 ];
 
 /// Default limit on distinct label columns in one body.
