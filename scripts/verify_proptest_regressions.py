@@ -18,6 +18,7 @@ NO_PERSISTENCE_ALLOWLIST = {
     "crates/ffwd-core/src/json_scanner.rs",
     "crates/ffwd-core/src/otlp.rs",
     "crates/ffwd-types/src/pipeline/lifecycle.rs",
+    "crates/ffwd-types/src/pipeline/ord_map.rs",
     "crates/ffwd-io/tests/it/checkpoint_state_machine.rs",
     "crates/ffwd-io/tests/it/framed_state_machine.rs",
     "crates/ffwd-io/tests/it/framed_buffered_equivalence.rs",
