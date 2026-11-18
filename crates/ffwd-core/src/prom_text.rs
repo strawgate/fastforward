@@ -45,6 +45,30 @@ pub const PROM_TYPE_FIELD: &[u8] = b"__type__";
 /// Prometheus (the `__` prefix is reserved) but are kept rather than dropped.
 pub const PROM_RESERVED_LABEL_PREFIX: &[u8] = b"label:";
 
+/// Sample-name suffixes that belong to a declared family (histogram,
+/// summary, gauge histogram, OpenMetrics counter / info / `_created`).
+const FAMILY_SUFFIXES: [&[u8]; 8] = [
+    b"_bucket",
+    b"_sum",
+    b"_count",
+    b"_total",
+    b"_created",
+    b"_info",
+    b"_gcount",
+    b"_gsum",
+];
+
+/// True when `sample` is the family `family` itself or one of its component
+/// series (`family` + a suffix from [`FAMILY_SUFFIXES`]).
+#[inline]
+fn belongs_to_family(sample: &[u8], family: &[u8]) -> bool {
+    match sample.strip_prefix(family) {
+        Some([]) => true,
+        Some(rest) => FAMILY_SUFFIXES.contains(&rest),
+        None => false,
+    }
+}
+
 #[inline(always)]
 fn is_reserved_column(key: &[u8]) -> bool {
     key == PROM_VALUE_FIELD || key == PROM_TIMESTAMP_FIELD || key == PROM_TYPE_FIELD
@@ -640,7 +664,7 @@ impl<B: PromBuilder> Walker<'_, '_, B> {
         }
 
         if let (Some(type_idx), Some((fs, fe, ts, te))) = (self.type_idx, self.family)
-            && self.buf[name.start..name.end].starts_with(&self.buf[fs..fe])
+            && belongs_to_family(&self.buf[name.start..name.end], &self.buf[fs..fe])
         {
             self.builder.append_str_by_idx(type_idx, &self.buf[ts..te]);
         }
@@ -865,6 +889,17 @@ mod tests {
             assert!(r.contains(&("__type__".into(), "histogram".into())));
         }
         assert!(!rows[4].iter().any(|(k, _)| k == "__type__"));
+    }
+
+    #[test]
+    fn unrelated_metric_sharing_a_prefix_gets_no_type() {
+        let rows = scan("# TYPE foo counter\nfoo 1\nfoo_total 2\nfoobar 3\nfoo_bucketx 4\n")
+            .expect("should succeed");
+        let has_type = |r: &Vec<(String, String)>| r.iter().any(|(k, _)| k == "__type__");
+        assert!(has_type(&rows[0]));
+        assert!(has_type(&rows[1]));
+        assert!(!has_type(&rows[2]));
+        assert!(!has_type(&rows[3]));
     }
 
     #[test]
