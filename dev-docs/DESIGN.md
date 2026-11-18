@@ -200,6 +200,19 @@ provides bare-name access for suffixed columns.
 
 **Research:** `dev-docs/research/type-suffix-redesign.md`. **Related:** #445.
 
+### Lenient string-vs-number SQL comparisons
+
+`WHERE status >= 400` on a Utf8 column wraps the string side in `TRY_CAST` (analyzer rule
+in `ffwd-transform/src/lenient_comparison.rs`, run before DataFusion's `TypeCoercion`).
+Numeric strings compare numerically; non-numeric values become NULL and don't match.
+
+**Why:** DataFusion 55 casts strictly, so one `"N/A"` fails the query and the runtime drops
+the whole batch. Log fields routinely mix numbers and placeholders.  
+**Rejected:** accepting the strict cast (batch loss on one bad value); restoring
+DataFusion 53's string comparison (silently wrong: `'50' >= 400` is true).  
+**Scope:** comparisons, `BETWEEN`, `IN`. Explicit `CAST` stays strict; `int()`/`float()`
+remain the explicit lenient casts.
+
 ### Flat schema (not OTAP star schema)
 
 Single `RecordBatch` with all fields as columns. `resource.attributes.*` prefix
