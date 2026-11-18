@@ -27,7 +27,7 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::{Analyzer, AnalyzerRule};
 
 /// Analyzer rule that turns implicit string-to-number comparison casts into
-/// `TRY_CAST`, so unparseable values yield `NULL` instead of a query error.
+/// `TRY_CAST`, so unparsable values yield `NULL` instead of a query error.
 #[derive(Debug, Default)]
 pub(crate) struct LenientStringNumericComparison;
 
