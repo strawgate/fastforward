@@ -32,12 +32,14 @@ def list_harnesses(crate_dir: Path, cargo_args: list[str]) -> list[str]:
     """Return every standard and contract harness name in the crate.
 
     `cargo kani list` takes no cargo options itself; they must come before
-    the `list` subcommand.
+    the `list` subcommand. The -Z flags are needed on both sides: before
+    `list` they enable the features for compilation when cargo options are
+    present, after it when none are.
     """
     out = crate_dir / "kani-list.json"
     out.unlink(missing_ok=True)
     subprocess.run(
-        ["cargo", "kani", *cargo_args, *UNSTABLE, "list", "--format", "json"],
+        ["cargo", "kani", *cargo_args, *UNSTABLE, "list", *UNSTABLE, "--format", "json"],
         cwd=crate_dir,
         check=True,
     )

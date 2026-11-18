@@ -45,12 +45,16 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       miri: ${{ steps.filter.outputs.miri }}
       rust: ${{ steps.filter.outputs.rust }}
+      kani_matrix: ${{ steps.kani-plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@f3ceefdc7ef57bc2d8560787d4b6c33e44044cec
         id: filter
         with:
+          list-files: json
           filters: |
+            all:
+              - '**'
             kani_required:
               - 'crates/ffwd-kani/**'
               - 'crates/ffwd-core/**'
@@ -97,6 +101,21 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
+      # Kani shards to run: on PRs, only crates whose code or workspace deps
+      # changed (see scripts/kani_plan.py); on push to main and ci:full, all.
+      - name: Plan Kani shards
+        id: kani-plan
+        env:
+          CHANGED_FILES: ${{ steps.filter.outputs.all_files }}
+          RUN_ALL: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+        run: |
+          if [ "$RUN_ALL" = "true" ]; then
+            matrix=$(python3 scripts/kani_plan.py --all)
+          else
+            matrix=$(python3 scripts/kani_plan.py --changed-files "${CHANGED_FILES:-[]}")
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Kani shards: $(echo "$matrix" | python3 -c 'import json,sys; m=json.load(sys.stdin); print(len(m), sorted({e["crate"] for e in m}))')"
 
   # -------------------------------------------------------------------------
   # Frontend — format, lint, typecheck, and tests in one job
@@ -378,10 +397,12 @@ jobs:
   # Kani formal verification, sharded across many runners.
   #
   # Each matrix entry verifies one slice of one crate's harnesses.
+  # scripts/kani_plan.py builds the matrix: on PRs it keeps only crates
+  # whose code, or a workspace crate they depend on, changed. It also holds
+  # the per-crate shard counts; raise one when that crate's shards get slow.
   # scripts/kani_shard.py lists the crate's harnesses with `cargo kani list`
   # and takes every Nth one, so new proofs are picked up automatically and
-  # one module's slow proofs spread across shards. Raise `of` for a crate
-  # (and add the matching `shard` entries) when its shards get slow.
+  # one module's slow proofs spread across shards.
   #
   # --jobs 2 per runner: each CBMC process can take 3-5 GB, and three or
   # more on a 16 GB runner caused OOM kills that GitHub reports as "The
@@ -398,44 +419,17 @@ jobs:
     name: Kani (${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.of }})
     needs: [changes]
     if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
+      needs.changes.outputs.kani_matrix != '[]' && (
+        github.event_name == 'push' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:full') ||
+        github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Shard counts per crate live in scripts/kani_plan.py.
       matrix:
-        include:
-          - { crate: ffwd-core, shard: 1, of: 6 }
-          - { crate: ffwd-core, shard: 2, of: 6 }
-          - { crate: ffwd-core, shard: 3, of: 6 }
-          - { crate: ffwd-core, shard: 4, of: 6 }
-          - { crate: ffwd-core, shard: 5, of: 6 }
-          - { crate: ffwd-core, shard: 6, of: 6 }
-          - { crate: ffwd-kani, shard: 1, of: 2 }
-          - { crate: ffwd-kani, shard: 2, of: 2 }
-          # ffwd-arrow has a binary with required-features that cargo-kani
-          # cannot skip, so verify only the library target.
-          - { crate: ffwd-arrow, shard: 1, of: 4, lib: true }
-          - { crate: ffwd-arrow, shard: 2, of: 4, lib: true }
-          - { crate: ffwd-arrow, shard: 3, of: 4, lib: true }
-          - { crate: ffwd-arrow, shard: 4, of: 4, lib: true }
-          - { crate: ffwd-types, shard: 1, of: 2 }
-          - { crate: ffwd-types, shard: 2, of: 2 }
-          # Lifecycle/registry/reload state-machine proofs take minutes each.
-          - { crate: ffwd-runtime, shard: 1, of: 6 }
-          - { crate: ffwd-runtime, shard: 2, of: 6 }
-          - { crate: ffwd-runtime, shard: 3, of: 6 }
-          - { crate: ffwd-runtime, shard: 4, of: 6 }
-          - { crate: ffwd-runtime, shard: 5, of: 6 }
-          - { crate: ffwd-runtime, shard: 6, of: 6 }
-          - { crate: ffwd-io, shard: 1, of: 2 }
-          - { crate: ffwd-io, shard: 2, of: 2 }
-          - { crate: ffwd-output, shard: 1, of: 2 }
-          - { crate: ffwd-output, shard: 2, of: 2 }
-          - { crate: ffwd-diagnostics, shard: 1, of: 1 }
-          - { crate: ffwd, shard: 1, of: 1 }
+        include: ${{ fromJSON(needs.changes.outputs.kani_matrix) }}
     env:
       # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
       # unreleased). Unpin once a release after 0.68.0 ships. Keep in step

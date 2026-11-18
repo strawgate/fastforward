@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import unittest
@@ -212,6 +213,16 @@ KANI_JOB_NAMES = [
 ]
 
 
+def extract_kani_plan_crates() -> set[str]:
+    """Crates named in the SHARDS table of scripts/kani_plan.py."""
+    tree = ast.parse((ROOT / "scripts" / "kani_plan.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        target = getattr(node, "target", None)
+        if isinstance(target, ast.Name) and target.id == "SHARDS" and node.value is not None:
+            return set(ast.literal_eval(node.value))
+    raise ValueError("scripts/kani_plan.py missing SHARDS table")
+
+
 def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
     """Extract -p crate names from a single Kani job block."""
     crates: set[str] = set()
@@ -255,12 +266,15 @@ def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
             if "cargo kani" in cmd or "cargo-kani" in cmd:
                 crates |= set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", cmd))
 
-    # Also collect crates from a sharded matrix job, whose include entries
-    # name one crate each (e.g. `- { crate: ffwd-core, shard: 1, of: 6 }`)
-    # and whose run step calls scripts/kani_shard.py.
+    # Also collect crates from a sharded matrix job whose run step calls
+    # scripts/kani_shard.py. Its matrix comes from scripts/kani_plan.py
+    # (`fromJSON(...kani_matrix)`), whose SHARDS table names the crates, or
+    # from literal include entries (`- { crate: ffwd-core, shard: 1, of: 6 }`).
     if any("scripts/kani_shard.py" in line for line in kani_block):
         for line in kani_block:
             crates |= set(re.findall(r"\bcrate:\s*([A-Za-z0-9_-]+)", line))
+        if any("kani_matrix" in line for line in kani_block):
+            crates |= extract_kani_plan_crates()
 
     return crates
 
