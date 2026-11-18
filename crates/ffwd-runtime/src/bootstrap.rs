@@ -1015,7 +1015,7 @@ fn print_shutdown_stats(
             .saturating_sub(totals.lines_delivered);
         if undelivered > 0 {
             eprintln!(
-                "  {}undelivered{} {} lines were not accepted by an output",
+                "  {}undelivered{} {} lines were not confirmed by the best-delivering output",
                 yellow(use_color),
                 reset(use_color),
                 format_count(undelivered),
