@@ -221,13 +221,13 @@ Most red PRs fail on cheap checks (fmt, clippy, `cargo deny`), not on real bugs.
 scripts/install-hooks.sh          # once per clone: installs pre-commit + pre-push hooks
 scripts/ci-local.sh pre-commit    # seconds: fmt, taplo, typos, python guardrails
 scripts/ci-local.sh pre-push      # CI "Lint" job parity: + xtask verify, clippy --workspace,
-                                  #   rustdoc -D warnings, cargo deny, cargo machete, actionlint
+                                  #   rustdoc -D warnings, cargo deny, cargo machete, cargo audit, actionlint
 scripts/ci-local.sh test          # CI "Test (Linux)": nextest, or cargo test if nextest is missing
 ```
 
 - These need **no `just`**. With `just`: `just install-hooks`, `just pre-commit`, `just pre-push`.
 - The hooks run the same script, so a passing hook means the Lint job passes. Bypass once with `--no-verify` or `FFWD_SKIP_HOOKS=1` (and say so in the PR).
-- Tools that are not installed (`taplo`, `typos`, `cargo-deny`, `cargo-machete`, `actionlint`) are skipped with a warning and an install hint. CI does run them; set `FFWD_STRICT_TOOLS=1` to fail instead.
+- Tools that are not installed (`taplo`, `typos`, `cargo-deny`, `cargo-machete`, `cargo-audit`, `actionlint`) are skipped with a warning and an install hint. CI does run them; set `FFWD_STRICT_TOOLS=1` to fail instead.
 - `scripts/ci-local.sh` mirrors the `lint` job in `.github/workflows/ci.yml`. **Change both together.**
 
 ### Known causes of red CI

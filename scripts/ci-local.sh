@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/ci-local.sh pre-commit   # fast (a few seconds): fmt, TOML, typos, python guardrails
 #   scripts/ci-local.sh pre-push     # pre-commit + CI Lint parity: xtask verify, clippy,
-#                                    # rustdoc, cargo deny, cargo machete
+#                                    # rustdoc, cargo deny, cargo machete, cargo audit
 #   scripts/ci-local.sh test         # full workspace tests, as in CI "Test (Linux)"
 #   scripts/ci-local.sh all          # pre-push + test
 #
@@ -109,6 +109,12 @@ run_pre_push() {
 
     step "cargo machete"
     if need cargo-machete "cargo install cargo-machete --locked"; then cargo machete; fi
+
+    # CI's "Security audit" step (rustsec/audit-check) reads .cargo/audit.toml.
+    step "cargo audit"
+    if need cargo-audit "cargo install cargo-audit --locked"; then
+        cargo audit --deny=vuln --deny=unsound --deny=yanked
+    fi
 }
 
 run_test() {

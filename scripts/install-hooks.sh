@@ -9,13 +9,22 @@
 # or set FFWD_SKIP_HOOKS=1. Remove with `scripts/install-hooks.sh --uninstall`.
 set -euo pipefail
 
+# With core.hooksPath set (often a global, shared hooks directory), installing
+# would overwrite hooks that other repositories use. Refuse instead.
+HOOKS_PATH="$(git config --get core.hooksPath || true)"
+if [ -n "$HOOKS_PATH" ]; then
+    cat >&2 <<EOF
+error: core.hooksPath is set to '$HOOKS_PATH', so hooks would be written there
+       and could replace hooks other repositories share. Not installing.
+       Call scripts/ci-local.sh pre-commit / pre-push from your own hooks instead,
+       or unset core.hooksPath for this repo and re-run.
+EOF
+    exit 1
+fi
+
 HOOKS_DIR="$(git rev-parse --git-path hooks)"
 mkdir -p "$HOOKS_DIR"
 MARKER="# installed by scripts/install-hooks.sh"
-
-if [ "$(git config --get core.hooksPath || true)" != "" ]; then
-    echo "warning: core.hooksPath is set to '$(git config --get core.hooksPath)'; git will not run hooks from $HOOKS_DIR" >&2
-fi
 
 for hook in pre-commit pre-push; do
     target="$HOOKS_DIR/$hook"
