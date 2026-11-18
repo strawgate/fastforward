@@ -416,6 +416,14 @@ CI's clippy and test steps don't pass `--all-targets`, so a struct field added t
 
 Optional dependencies behind non-default features (for example `quick-xml` under ffwd-io's `s3`) aren't in the graph `cargo deny check` inspects, so advisory ignores can hide them. Before adding an ignore, run `cargo deny --all-features check advisories` without it. cargo-audit reads `.cargo/audit.toml`, not `deny.toml`, so keep both ignore lists in sync.
 
+### A Kani proof that never finishes hides real bugs
+
+Kani proofs that ran out of memory or time in CI showed up as failures for months, so a real counterexample would have looked the same as a resource failure. When `verify_rebuild_attempts_bounded` (ffwd-runtime `reload.rs`) finally fit the budget, it failed: the harness started from a state the reload coordinator can never reach. Keep every PR-CI harness inside the 6 GB / 15 minute budget (see `dev-docs/VERIFICATION.md`), and treat `scripts/kani_nightly_only.txt` as debt to pay down, not a parking lot.
+
+### Check a varint's 10th byte before shifting it in
+
+`decode_varint` (ffwd-core `otlp.rs`) once ran its overflow check on the 9th byte instead of the 10th. It rejected valid 10-byte varints such as `u64::MAX` and accepted a 10th byte whose payload overflowed 64 bits. Only bit 0 of the 10th byte may be set; `decode_varint_accepts_ten_byte_u64_max` and `decode_varint_rejects_tenth_byte_payload_above_one` pin this down.
+
 ### proptest finds bugs unit tests can't
 
 Every time we thought the scanner was correct, proptest broke it. Escapes crossing 64-byte boundaries, fields in different orders, duplicate keys with different types. Run `PROPTEST_CASES=2000` minimum.

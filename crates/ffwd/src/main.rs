@@ -19,6 +19,8 @@ mod commands;
 #[cfg(all(unix, feature = "opamp"))]
 mod config_flow;
 mod config_templates;
+#[cfg(test)]
+mod doc_configs;
 mod generate;
 mod send;
 #[cfg(all(unix, feature = "opamp"))]

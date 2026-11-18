@@ -11,10 +11,14 @@ This page focuses on usage notes and examples.
 Tail one or more log files with glob pattern support.
 
 ```yaml
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri      # cri | json | raw | auto
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri      # cri | json | raw | auto
+    outputs:
+      - type: stdout
 ```
 
 - **Glob re-scanning**: New files matching the pattern are discovered automatically (every 5s).
@@ -34,9 +38,13 @@ Read data from standard input, drain outputs, and exit when stdin closes.
 This input is intended for `ff send` and piped shell workflows.
 
 ```yaml
-input:
-  type: stdin
-  format: auto     # auto | cri | json | raw
+pipelines:
+  default:
+    inputs:
+      - type: stdin
+        format: auto     # auto | cri | json | raw
+    outputs:
+      - type: stdout
 ```
 
 ```bash
@@ -83,78 +91,99 @@ data source is required.
 
 ```yaml
 # Record profile (benchmarking)
-input:
-  type: generator
-  generator:
-    events_per_sec: 50000
-    batch_size: 4096
-    profile: record
-    attributes:
-      benchmark_id: ${BENCHMARK_ID}
-      pod_name: ${POD_NAME}
-      stream_id: ${POD_NAME}
-      service: bench-emitter
-      status: 200
-      sampled: true
-      deleted_at: null
-    sequence:
-      field: seq
-    event_created_unix_nano_field: event_created_unix_nano
+pipelines:
+  default:
+    inputs:
+      - type: generator
+        generator:
+          events_per_sec: 50000
+          batch_size: 4096
+          profile: record
+          attributes:
+            benchmark_id: ${BENCHMARK_ID}
+            pod_name: ${POD_NAME}
+            stream_id: ${POD_NAME}
+            service: bench-emitter
+            status: 200
+            sampled: true
+            deleted_at: null
+          sequence:
+            field: seq
+          event_created_unix_nano_field: event_created_unix_nano
+    outputs:
+      - type: stdout
 ```
 
 ```yaml
 # Envoy access log traffic
-input:
-  type: generator
-  generator:
-    profile: envoy
-    events_per_sec: 10000
+pipelines:
+  default:
+    inputs:
+      - type: generator
+        generator:
+          profile: envoy
+          events_per_sec: 10000
+    outputs:
+      - type: stdout
 ```
 
 ```yaml
 # CRI Kubernetes logs (note: format auto-defaults to cri)
-input:
-  type: generator
-  format: cri
-  generator:
-    profile: cri_k8s
-    events_per_sec: 5000
+pipelines:
+  default:
+    inputs:
+      - type: generator
+        generator:
+          profile: cri_k8s
+          events_per_sec: 5000
+    outputs:
+      - type: stdout
 ```
 
 ```yaml
 # CloudTrail audit events
-input:
-  type: generator
-  generator:
-    profile: cloud_trail
-    events_per_sec: 1000
+pipelines:
+  default:
+    inputs:
+      - type: generator
+        generator:
+          profile: cloud_trail
+          events_per_sec: 1000
+    outputs:
+      - type: stdout
 ```
 
 ### Timestamp examples (`logs` profile)
 
 ```yaml
-# Real-time simulation (timestamps start at now, +1ms per event)
-input:
-  type: generator
-  generator:
-    timestamp:
-      start: "now"
+# Three timestamp modes side by side; keep the one you need.
+pipelines:
+  default:
+    inputs:
+      # Real-time simulation (timestamps start at now, +1ms per event)
+      - name: realtime
+        type: generator
+        generator:
+          timestamp:
+            start: "now"
 
-# Backfill from now (timestamps go backward, 100ms apart)
-input:
-  type: generator
-  generator:
-    timestamp:
-      start: "now"
-      step_ms: -100
+      # Backfill from now (timestamps go backward, 100ms apart)
+      - name: backfill
+        type: generator
+        generator:
+          timestamp:
+            start: "now"
+            step_ms: -100
 
-# Fixed historical window (5-second intervals)
-input:
-  type: generator
-  generator:
-    timestamp:
-      start: "2023-06-01T12:00:00Z"
-      step_ms: 5000
+      # Fixed historical window (5-second intervals)
+      - name: historical
+        type: generator
+        generator:
+          timestamp:
+            start: "2023-06-01T12:00:00Z"
+            step_ms: 5000
+    outputs:
+      - type: stdout
 ```
 
 Use `generate-json <num_lines> <output_file>` on the CLI to write a fixed number of lines to a file instead.
@@ -164,10 +193,14 @@ Use `generate-json <num_lines> <output_file>` on the CLI to write a fixed number
 Receive log lines on a UDP socket.
 
 ```yaml
-input:
-  type: udp
-  listen: 0.0.0.0:514
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: udp
+        listen: 0.0.0.0:514
+        format: json
+    outputs:
+      - type: stdout
 ```
 
 TLS is not supported for UDP inputs.
@@ -177,10 +210,14 @@ TLS is not supported for UDP inputs.
 Accept log lines on a TCP socket.
 
 ```yaml
-input:
-  type: tcp
-  listen: 0.0.0.0:5140
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:5140
+        format: json
+    outputs:
+      - type: stdout
 ```
 
 Framing behavior:
@@ -192,14 +229,18 @@ Framing behavior:
 Optional TLS/mTLS config:
 
 ```yaml
-input:
-  type: tcp
-  listen: 0.0.0.0:5140
-  tls:
-    cert_file: /etc/ffwd/tls/server.pem
-    key_file: /etc/ffwd/tls/server.key
-    require_client_auth: true
-    client_ca_file: /etc/ffwd/tls/clients-ca.pem
+pipelines:
+  default:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:5140
+        tls:
+          cert_file: /etc/ffwd/tls/server.pem
+          key_file: /etc/ffwd/tls/server.key
+          require_client_auth: true
+          client_ca_file: /etc/ffwd/tls/clients-ca.pem
+    outputs:
+      - type: stdout
 ```
 
 `client_ca_file` enables client certificate verification and is accepted only
@@ -211,11 +252,15 @@ client authentication is rejected at startup.
 Receive OTLP log records from another agent or SDK.
 
 ```yaml
-input:
-  type: otlp
-  listen: 0.0.0.0:4318
-  # Experimental: projected_fallback/projected_only require otlp-research builds.
-  protobuf_decode_mode: prost
+pipelines:
+  default:
+    inputs:
+      - type: otlp
+        listen: 0.0.0.0:4318
+        # Experimental: projected_fallback/projected_only require otlp-research builds.
+        protobuf_decode_mode: prost
+    outputs:
+      - type: stdout
 ```
 
 ## HTTP
@@ -223,14 +268,18 @@ input:
 Receive newline-delimited payloads over HTTP `POST` (NDJSON or raw lines).
 
 ```yaml
-input:
-  type: http
-  listen: 0.0.0.0:8081
-  format: json     # json | raw
-  http:
-    path: /ingest  # optional, defaults to /
-    strict_path: true
-    method: POST
-    max_request_body_size: 20971520
-    response_code: 200
+pipelines:
+  default:
+    inputs:
+      - type: http
+        listen: 0.0.0.0:8081
+        format: json     # json | raw
+        http:
+          path: /ingest  # optional, defaults to /
+          strict_path: true
+          method: POST
+          max_request_body_size: 20971520
+          response_code: 200
+    outputs:
+      - type: stdout
 ```

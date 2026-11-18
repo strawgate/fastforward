@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use super::channel_input::ChannelInputSource;
 use super::instrumented_sink::{FailureAction, InstrumentedSink, InstrumentedSinkFactory};
 use super::observable_checkpoint::ObservableCheckpointStore;
-use super::tcp_server::{TcpServerHandle, run_tcp_server};
+use super::tcp_server::{TcpServerHandle, run_acking_tcp_server, run_tcp_server};
 use super::turmoil_tcp_sink::TurmoilTcpSink;
 
 fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
@@ -594,9 +594,15 @@ fn tcp_hold_release_burst_delivery() {
 /// In turmoil, fail_rate breaks TCP connections entirely (not individual
 /// segments), and repair_rate controls how quickly the link is restored.
 ///
-/// With a low fail_rate and high repair_rate, the pipeline's retry logic
-/// should recover from most connection breaks and deliver a substantial
-/// portion of data.
+/// Turmoil TCP never retransmits: a random partition silently discards
+/// in-flight segments and the receiver then stalls on the sequence gap for
+/// the rest of the connection, while sender writes can still "succeed".
+/// The sink therefore waits for per-line acks with a timeout, so a lost
+/// segment surfaces as a send error and the worker pool retries the batch on
+/// a fresh connection. Without acks, seeds such as 63, 67, 153 and 329
+/// delivered 0 or 1 lines (issue #2753).
+///
+/// With retries the pipeline must deliver every line at least once.
 #[test]
 fn tcp_intermittent_failures_with_fail_rate() {
     let seed = super::turmoil_seed();
@@ -609,7 +615,7 @@ fn tcp_intermittent_failures_with_fail_rate() {
     let sh = server_handle.clone();
     sim.host("server", move || {
         let h = sh.clone();
-        async move { run_tcp_server(TCP_PORT, h).await }
+        async move { run_acking_tcp_server(TCP_PORT, h).await }
     });
 
     sim.client("pipeline", async move {
@@ -618,7 +624,7 @@ fn tcp_intermittent_failures_with_fail_rate() {
 
         let lines = generate_json_lines(50);
         let input = ChannelInputSource::new("test", SourceId(1), lines);
-        let sink = TurmoilTcpSink::new("server", TCP_PORT);
+        let sink = TurmoilTcpSink::new("server", TCP_PORT).with_ack_timeout(Duration::from_secs(1));
         let mut pipeline = Pipeline::for_simulation("sim", Box::new(sink));
         pipeline.set_batch_timeout(Duration::from_millis(50));
         // Force multiple independent retry decisions. If all 50 lines fit in a
@@ -640,12 +646,27 @@ fn tcp_intermittent_failures_with_fail_rate() {
 
     sim.run().unwrap();
 
-    // With 0.1% TCP connection breakage, the pipeline's retry logic should
-    // recover from most breaks. We assert a minimum delivery threshold.
+    // Every line must arrive at least once: retries may duplicate lines whose
+    // ack was lost, but none may be silently dropped.
     let received = server_check.received_lines.load(Ordering::Relaxed);
+    let delivered_nums: std::collections::BTreeSet<u64> = server_check
+        .distinct_lines
+        .lock()
+        .expect("distinct_lines lock")
+        .iter()
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter_map(|v| {
+            // A record counts only if both fields match what was generated.
+            let num = v.get("num").and_then(serde_json::Value::as_u64)?;
+            let msg = v.get("msg").and_then(serde_json::Value::as_str)?;
+            (msg == format!("line {num}")).then_some(num)
+        })
+        .collect();
+    let missing: Vec<u64> = (0..50).filter(|n| !delivered_nums.contains(n)).collect();
     assert!(
-        received >= 5,
-        "expected at least 5 of 50 lines despite 0.1% fail rate (seed={seed}), got {received}"
+        missing.is_empty(),
+        "expected every line 0..50 despite 0.1% fail rate (seed={seed}); \
+         missing {missing:?} ({received} lines received)"
     );
 }
 

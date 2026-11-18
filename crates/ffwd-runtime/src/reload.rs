@@ -820,6 +820,13 @@ mod proptests {
 mod kani_proofs {
     use super::*;
 
+    /// Stand-in for `format!` in `step()`. CBMC unrolls the real formatter
+    /// without bound, so even a fully concrete reload proof timed out. The
+    /// proofs check states and effect kinds, never message text.
+    fn stub_format(_args: std::fmt::Arguments<'_>) -> String {
+        String::new()
+    }
+
     /// Bounded state for Kani exploration (avoids unbounded String).
     fn arb_state(tag: u8) -> State {
         match tag % 6 {
@@ -872,6 +879,7 @@ mod kani_proofs {
     // ── Property 1: ShuttingDown is absorbing ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
     fn verify_shutting_down_is_absorbing() {
         let event_tag: u8 = kani::any();
         let event = arb_event(event_tag);
@@ -898,6 +906,7 @@ mod kani_proofs {
     // ── Property 2: ShutdownRequested always reaches terminal ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
     fn verify_shutdown_requested_always_terminal() {
         let state_tag: u8 = kani::any();
         let first_run: bool = kani::any();
@@ -918,6 +927,7 @@ mod kani_proofs {
     // ── Property 3: First-run build failure is always fatal ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
     fn verify_first_run_build_failure_is_fatal() {
         let mut c = ReloadCoordinator {
             state: State::Starting,
@@ -945,13 +955,16 @@ mod kani_proofs {
     // ── Property 4: Rebuild attempts never exceed MAX ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
     #[kani::unwind(5)]
     fn verify_rebuild_attempts_bounded() {
         let mut c = ReloadCoordinator {
             state: State::Building,
             is_first_run: false,
             has_pending: kani::any(),
-            rebuild_attempts: kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1),
+            // Building is only reachable with attempts < MAX: the failure that
+            // reaches MAX moves to ShuttingDown.
+            rebuild_attempts: kani::any::<u32>() % MAX_REBUILD_ATTEMPTS,
             config_path: PathBuf::from("/x"),
         };
 
@@ -983,12 +996,22 @@ mod kani_proofs {
     // ── Property 5: has_pending consistency ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
     fn verify_has_pending_invariant() {
         let state_tag: u8 = kani::any();
         let first_run: bool = kani::any();
         let has_pending: bool = kani::any();
         let attempts: u32 = kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1);
         let event_tag: u8 = kani::any();
+        // Start from a state that satisfies the invariant: has_pending is
+        // only set on entering Building (and can survive into ShuttingDown).
+        kani::assume(
+            !has_pending
+                || matches!(
+                    arb_state(state_tag),
+                    State::Building | State::ShuttingDown { .. }
+                ),
+        );
 
         let mut c = arb_coordinator(state_tag, first_run, has_pending, attempts);
         let event = arb_event(event_tag);
@@ -1009,6 +1032,8 @@ mod kani_proofs {
     // ── Property 6: DrainPipelines only emitted from Running ──
 
     #[kani::proof]
+    #[kani::stub(std::fmt::format, stub_format)]
+    #[kani::unwind(3)]
     fn verify_drain_only_from_running() {
         let state_tag: u8 = kani::any();
         let first_run: bool = kani::any();

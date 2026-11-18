@@ -34,19 +34,21 @@ cargo build --release -p ffwd
 
 ```yaml
 # config.yaml
-input:
-  type: file
-  path: logs.json
-  format: json
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: logs.json
+        format: json
 
-transform: |
-  SELECT level, message, status, duration_ms
-  FROM logs
-  WHERE level = 'ERROR' AND duration_ms > 50
+    transform: |
+      SELECT level, message, status, duration_ms
+      FROM logs
+      WHERE level = 'ERROR' AND duration_ms > 50
 
-output:
-  type: stdout
-  format: console
+    outputs:
+      - type: stdout
+        format: console
 ```
 
 ```bash
