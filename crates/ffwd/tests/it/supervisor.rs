@@ -31,21 +31,8 @@ opamp:
         .and_then(|mut f| f.write_all(config.as_bytes()))
         .expect("write config");
 
-    // Find the ff binary.
-    let exe = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent dir")
-        .parent()
-        .expect("deps parent")
-        .join("ff");
-
-    if !exe.exists() {
-        panic!(
-            "ff binary not found at {} — run `cargo build -p ffwd` first",
-            exe.display()
-        );
-    }
+    // Cargo builds the `ff` bin for integration tests and exposes its path.
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ff"));
 
     let mut child = tokio::process::Command::new(&exe)
         .arg("supervised")
