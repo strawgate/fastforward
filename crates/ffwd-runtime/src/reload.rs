@@ -266,6 +266,8 @@ impl ReloadCoordinator {
 
             // ── Invalid transitions (no-op with trace) ──
             (_state, _event) => {
+                // Kani 0.68 ICEs on the catch_unwind intrinsic that tracing reaches.
+                #[cfg(not(kani))]
                 tracing::debug!(
                     state = ?self.state,
                     "reload coordinator: ignoring unexpected event in current state"

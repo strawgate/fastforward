@@ -416,8 +416,10 @@ jobs:
       - name: Run Kani verification (ffwd-core)
         uses: model-checking/kani-github-action@v1
         with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
+          # 0.68.0 is the first Kani whose toolchain can build Rust 1.94 crates
+          # (DataFusion 55). It ICEs on std's catch_unwind intrinsic (fixed on
+          # Kani main, unreleased), which `tracing` macros reach, so keep tracing
+          # calls in proven code behind #[cfg(not(kani))] until a newer Kani ships.
           kani-version: '0.68.0'
           args: >-
             --solver kissat
@@ -454,8 +456,10 @@ jobs:
         # vCPUs here gives more wall-clock return than on the other shards.
         uses: model-checking/kani-github-action@v1
         with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
+          # 0.68.0 is the first Kani whose toolchain can build Rust 1.94 crates
+          # (DataFusion 55). It ICEs on std's catch_unwind intrinsic (fixed on
+          # Kani main, unreleased), which `tracing` macros reach, so keep tracing
+          # calls in proven code behind #[cfg(not(kani))] until a newer Kani ships.
           kani-version: '0.68.0'
           args: >-
             --solver kissat
@@ -489,8 +493,10 @@ jobs:
       - name: Run Kani verification (ffwd-runtime + ffwd-types)
         uses: model-checking/kani-github-action@v1
         with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
+          # 0.68.0 is the first Kani whose toolchain can build Rust 1.94 crates
+          # (DataFusion 55). It ICEs on std's catch_unwind intrinsic (fixed on
+          # Kani main, unreleased), which `tracing` macros reach, so keep tracing
+          # calls in proven code behind #[cfg(not(kani))] until a newer Kani ships.
           kani-version: '0.68.0'
           args: >-
             --solver kissat
@@ -525,8 +531,10 @@ jobs:
       - name: Run Kani verification (ffwd-io + ffwd-output + ffwd-diagnostics + ffwd)
         uses: model-checking/kani-github-action@v1
         with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
+          # 0.68.0 is the first Kani whose toolchain can build Rust 1.94 crates
+          # (DataFusion 55). It ICEs on std's catch_unwind intrinsic (fixed on
+          # Kani main, unreleased), which `tracing` macros reach, so keep tracing
+          # calls in proven code behind #[cfg(not(kani))] until a newer Kani ships.
           kani-version: '0.68.0'
           args: >-
             --solver kissat
