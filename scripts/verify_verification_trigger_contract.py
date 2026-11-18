@@ -255,6 +255,13 @@ def _extract_kani_crates_from_block(kani_block: list[str]) -> set[str]:
             if "cargo kani" in cmd or "cargo-kani" in cmd:
                 crates |= set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", cmd))
 
+    # Also collect crates from a sharded matrix job, whose include entries
+    # name one crate each (e.g. `- { crate: ffwd-core, shard: 1, of: 6 }`)
+    # and whose run step calls scripts/kani_shard.py.
+    if any("scripts/kani_shard.py" in line for line in kani_block):
+        for line in kani_block:
+            crates |= set(re.findall(r"\bcrate:\s*([A-Za-z0-9_-]+)", line))
+
     return crates
 
 
@@ -536,6 +543,26 @@ jobs:
             extract_kani_args_crates(ci_text),
             {"ffwd-core", "ffwd-arrow", "ffwd-io", "ffwd-output"},
         )
+
+    def test_extract_kani_args_crates_sharded_matrix(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    strategy:
+      matrix:
+        include:
+          - { crate: ffwd-core, shard: 1, of: 2 }
+          - { crate: ffwd-core, shard: 2, of: 2 }
+          - { crate: ffwd-arrow, shard: 1, of: 1, lib: true }
+    steps:
+      - run: >-
+          python3 scripts/kani_shard.py
+          --crate ${{ matrix.crate }}
+  miri:
+    steps:
+      - run: echo hi
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), {"ffwd-core", "ffwd-arrow"})
 
     def test_extract_kani_args_crates_uses_kani_action_step(self) -> None:
         ci_text = """

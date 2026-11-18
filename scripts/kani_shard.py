@@ -9,7 +9,7 @@ shards), and verifies only those with `cargo kani --exact --harness ...`.
 New harnesses are picked up automatically; no hand-maintained lists.
 
 Usage:
-    scripts/kani_shard.py --crate ffwd-core --shard 0 --of 4 [--features kani-slow]
+    scripts/kani_shard.py --crate ffwd-core --shard 1 --of 4 [--features kani-slow]
 """
 
 from __future__ import annotations
@@ -53,23 +53,23 @@ def list_harnesses(crate_dir: Path, cargo_args: list[str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--crate", required=True, help="crate name under crates/")
-    parser.add_argument("--shard", type=int, required=True, help="0-based shard index")
+    parser.add_argument("--shard", type=int, required=True, help="1-based shard index")
     parser.add_argument("--of", type=int, required=True, help="total shard count")
     parser.add_argument("--features", default="", help="cargo features, e.g. kani-slow")
     parser.add_argument("--jobs", type=int, default=2, help="parallel CBMC processes")
     parser.add_argument("--lib", action="store_true", help="verify only the lib target")
     args = parser.parse_args()
 
-    if not 0 <= args.shard < args.of:
-        parser.error("--shard must be in [0, --of)")
+    if not 1 <= args.shard <= args.of:
+        parser.error("--shard must be in [1, --of]")
 
     crate_dir = REPO / "crates" / args.crate
     features = ["--features", args.features] if args.features else []
     target = ["--lib"] if args.lib else []
     harnesses = list_harnesses(crate_dir, [*features, *target])
-    mine = harnesses[args.shard :: args.of]
+    mine = harnesses[args.shard - 1 :: args.of]
     print(
-        f"{args.crate}: shard {args.shard + 1}/{args.of} runs "
+        f"{args.crate}: shard {args.shard}/{args.of} runs "
         f"{len(mine)} of {len(harnesses)} harnesses",
         flush=True,
     )

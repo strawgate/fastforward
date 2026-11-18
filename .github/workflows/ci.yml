@@ -375,173 +375,102 @@ jobs:
           -p ffwd-config
 
   # -------------------------------------------------------------------------
-  # Kani formal verification — split into four parallel shards by layer so
-  # the slowest one finishes within the hosted-runner budget.
+  # Kani formal verification, sharded across many runners.
   #
-  # Fast vs slow proofs:
-  #   Proofs gated behind the `kani-slow` feature (>30s solver time) run in
-  #   the nightly workflow (nightly-testing.yml, job kani-slow) and on PRs
-  #   labelled `ci:full`. PR and push-to-main CI run fast proofs only, so
-  #   a single slow harness can no longer hold main red.
+  # Each matrix entry verifies one slice of one crate's harnesses.
+  # scripts/kani_shard.py lists the crate's harnesses with `cargo kani list`
+  # and takes every Nth one, so new proofs are picked up automatically and
+  # one module's slow proofs spread across shards. Raise `of` for a crate
+  # (and add the matching `shard` entries) when its shards get slow.
   #
-  # Observed proof counts and timing constraints:
-  #   kani-core:           ~130 fast + ~15 slow proofs (ffwd-core + ffwd-kani)
-  #                        Slow: structural(unwind 65), cri(unwind 52), severity
-  #   kani-arrow:           24 proofs (ffwd-arrow) — all fast
-  #   kani-runtime-types:   63 proofs (ffwd-runtime + ffwd-types) — all fast
-  #   kani-io-output:       59 proofs (ffwd-io + ffwd-output +
-  #                        ffwd-diagnostics + ffwd binary) — all fast
+  # --jobs 2 per runner: each CBMC process can take 3-5 GB, and three or
+  # more on a 16 GB runner caused OOM kills that GitHub reports as "The
+  # runner has received a shutdown signal".
   #
-  # All shards use --jobs 2 (not 3 or 4). CBMC solver processes consume
-  # 3-5 GB each; at --jobs 3+ on 16 GB runners, memory pressure causes
-  # OOM kills or runner preemption (manifests as "runner shutdown signal"
-  # after only minutes). --jobs 2 keeps peak memory under ~10 GB.
+  # Proofs gated behind the `kani-slow` feature (each over ~2 min) run in
+  # nightly-testing.yml and on PRs labelled `ci:full`, never on push to
+  # main, so one slow harness cannot hold main red.
   #
-  # The core shard gets 120 min (headroom for ci:full PRs).
-  # Arrow gets 60 min (finishes in ~5 min, but needs compilation time).
-  # Runtime and IO shards get 120 min for cold-cache variance.
+  # Kani does not wait for Lint: it is the longest lane, so it starts as
+  # soon as path detection finishes.
   # -------------------------------------------------------------------------
-  kani-core:
-    name: Kani proofs (core)
-    needs: [changes, lint]
-    if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
-          key: kani-core
-
-      - name: Run Kani verification (ffwd-core + ffwd-kani)
-        uses: model-checking/kani-github-action@v1
-        with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
-          args: >-
-            --solver kissat
-            --jobs 2
-            --output-format terse
-            -Z function-contracts
-            -Z mem-predicates
-            -Z stubbing
-            -p ffwd-kani
-            -p ffwd-core
-            ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') && '--features kani-slow' || '' }}
-
-  kani-arrow:
-    name: Kani proofs (arrow)
-    needs: [changes, lint]
+  kani:
+    name: Kani (${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.of }})
+    needs: [changes]
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: ffwd-core, shard: 1, of: 6 }
+          - { crate: ffwd-core, shard: 2, of: 6 }
+          - { crate: ffwd-core, shard: 3, of: 6 }
+          - { crate: ffwd-core, shard: 4, of: 6 }
+          - { crate: ffwd-core, shard: 5, of: 6 }
+          - { crate: ffwd-core, shard: 6, of: 6 }
+          - { crate: ffwd-kani, shard: 1, of: 2 }
+          - { crate: ffwd-kani, shard: 2, of: 2 }
+          # ffwd-arrow has a binary with required-features that cargo-kani
+          # cannot skip, so verify only the library target.
+          - { crate: ffwd-arrow, shard: 1, of: 4, lib: true }
+          - { crate: ffwd-arrow, shard: 2, of: 4, lib: true }
+          - { crate: ffwd-arrow, shard: 3, of: 4, lib: true }
+          - { crate: ffwd-arrow, shard: 4, of: 4, lib: true }
+          - { crate: ffwd-types, shard: 1, of: 2 }
+          - { crate: ffwd-types, shard: 2, of: 2 }
+          - { crate: ffwd-runtime, shard: 1, of: 3 }
+          - { crate: ffwd-runtime, shard: 2, of: 3 }
+          - { crate: ffwd-runtime, shard: 3, of: 3 }
+          - { crate: ffwd-io, shard: 1, of: 2 }
+          - { crate: ffwd-io, shard: 2, of: 2 }
+          - { crate: ffwd-output, shard: 1, of: 2 }
+          - { crate: ffwd-output, shard: 2, of: 2 }
+          - { crate: ffwd-diagnostics, shard: 1, of: 1 }
+          - { crate: ffwd, shard: 1, of: 1 }
+    env:
+      # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
+      # unreleased). Unpin once a release after 0.68.0 ships. Keep in step
+      # with nightly-testing.yml.
+      KANI_VERSION: '0.67.0'
     steps:
       - uses: actions/checkout@v6
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
-          key: kani-arrow
+          # One cache per crate, written once by the first shard on main.
+          key: kani-${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
-      - name: Run Kani verification (ffwd-arrow --lib)
-        # ffwd-arrow has a binary with required-features that cargo-kani
-        # cannot skip, so verify only the library target.
-        uses: model-checking/kani-github-action@v1
+      - name: Cache Kani install
+        uses: actions/cache@v5
         with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
-          args: >-
-            --solver kissat
-            --jobs 2
-            --output-format terse
-            -Z function-contracts
-            -Z mem-predicates
-            -Z stubbing
-            -p ffwd-arrow
-            --lib
+          path: |
+            ~/.kani
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+          key: kani-install-${{ runner.os }}-${{ env.KANI_VERSION }}
 
-  # Orchestration layer: the typestate spec lives in ffwd-types and is
-  # consumed by ffwd-runtime — they form a natural pair to verify together.
-  kani-runtime-types:
-    name: Kani proofs (runtime + types)
-    needs: [changes, lint]
-    if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
+      - name: Install Kani
+        run: |
+          if ! cargo kani --version 2>/dev/null | grep -q "$KANI_VERSION"; then
+            cargo install --locked kani-verifier --version "$KANI_VERSION"
+          fi
+          cargo kani setup
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: kani-runtime-types
-
-      - name: Run Kani verification (ffwd-runtime + ffwd-types)
-        uses: model-checking/kani-github-action@v1
-        with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
-          args: >-
-            --solver kissat
-            --jobs 2
-            --output-format terse
-            -Z function-contracts
-            -Z mem-predicates
-            -Z stubbing
-            -p ffwd-types
-            -p ffwd-runtime
-
-  # I/O layer: file tailing, network receivers, output sinks, diagnostics
-  # transport, and the binary entrypoint.  Distinct from orchestration and
-  # from the Arrow/SIMD column path.
-  kani-io-output:
-    name: Kani proofs (io + output)
-    needs: [changes, lint]
-    if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: kani-io-output
-
-      - name: Run Kani verification (ffwd-io + ffwd-output + ffwd-diagnostics + ffwd)
-        uses: model-checking/kani-github-action@v1
-        with:
-          # Kani 0.68.0 ICEs on std's catch_unwind intrinsic (fixed on Kani main,
-          # unreleased). Unpin once a release after 0.68.0 ships.
-          kani-version: '0.67.0'
-          args: >-
-            --solver kissat
-            --jobs 2
-            --output-format terse
-            -Z function-contracts
-            -Z mem-predicates
-            -Z stubbing
-            -p ffwd-io
-            -p ffwd-output
-            -p ffwd-diagnostics
-            -p ffwd
+      - name: Verify ${{ matrix.crate }} shard ${{ matrix.shard }}/${{ matrix.of }}
+        run: >-
+          python3 scripts/kani_shard.py
+          --crate ${{ matrix.crate }}
+          --shard ${{ matrix.shard }}
+          --of ${{ matrix.of }}
+          --jobs 2
+          ${{ matrix.lib && '--lib' || '' }}
+          ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') && (matrix.crate == 'ffwd-core' || matrix.crate == 'ffwd-kani') && '--features kani-slow' || '' }}
 
   # -------------------------------------------------------------------------
   # Miri — UB-oriented execution, split into two parallel shards.
@@ -914,10 +843,7 @@ jobs:
       - test-network
       - cross-check
       - feature-check
-      - kani-core
-      - kani-arrow
-      - kani-runtime-types
-      - kani-io-output
+      - kani
       - miri-core
       - miri-types
       - miri-io-buffered
