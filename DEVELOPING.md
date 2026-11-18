@@ -400,6 +400,22 @@ The `body` column can store the full input line and is often larger than all par
 
 CI runs `cargo clippy --workspace -- -D warnings` (all warnings are errors) on the Rust version pinned in `rust-toolchain.toml`. Bare `cargo clippy` only shows warnings, and `just clippy` skips the non-default members (`ffwd-transform`, `ffwd`), so code that looks clean locally can fail in CI. Use `just clippy-all` or `scripts/ci-local.sh pre-push` (which the pre-push hook runs). Additionally, conditional SIMD compilation means warnings differ between aarch64 (macOS) and x86_64 (CI Linux).
 
+### CI tracks stable Rust, so a new toolchain can turn main red
+
+`rust-toolchain.toml` pins `channel = "stable"`, so CI picks up each new Rust release (and its new clippy lints) without any commit. Rust 1.100 added several lints and changed cargo's build-dir layout. If Lint suddenly fails on code nobody touched, check the toolchain version in the job log first.
+
+### Locate the `ff` binary with `CARGO_BIN_EXE_ff` in integration tests
+
+Do not derive the binary path from `std::env::current_exe()` (walking up from `target/debug/deps`). Cargo's build-dir layout changed in Rust 1.100 and that walk stopped finding `target/debug/ff`. `env!("CARGO_BIN_EXE_ff")` is cargo's supported path and works across layouts.
+
+### CI doesn't build benches, so they rot silently
+
+CI's clippy and test steps don't pass `--all-targets`, so a struct field added to a type like `ScanConfig` can break a bench (`crates/ffwd-core/benches/scanner.rs` missed `row_predicate`) without anything going red. Run `cargo build --workspace --all-targets` after changing shared config structs.
+
+### `cargo deny` only audits default features
+
+Optional dependencies behind non-default features (for example `quick-xml` under ffwd-io's `s3`) aren't in the graph `cargo deny check` inspects, so advisory ignores can hide them. Before adding an ignore, run `cargo deny --all-features check advisories` without it. cargo-audit reads `.cargo/audit.toml`, not `deny.toml`, so keep both ignore lists in sync.
+
 ### proptest finds bugs unit tests can't
 
 Every time we thought the scanner was correct, proptest broke it. Escapes crossing 64-byte boundaries, fields in different orders, duplicate keys with different types. Run `PROPTEST_CASES=2000` minimum.
