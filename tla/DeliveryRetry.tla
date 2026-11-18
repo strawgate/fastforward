@@ -74,9 +74,10 @@ VARIABLES
     sinkState,   \* Remote sink condition: "Healthy" | "Transient" | "Permanent"
     stopRetrying,   \* Whether the shutdown retry window closed (pool stop token fired)
     shutdownStarted, \* Whether shutdown began, opening the bounded retry window
-    okPhase          \* Shutdown phase when ReceiveOk fired: "None" | "Running" | "Grace" | "Stopped"
+    okPhase,         \* Shutdown phase when ReceiveOk fired: "None" | "Running" | "Grace" | "Stopped"
+    retriedInGrace   \* Whether a retry Send started while the grace window was open
 
-vars == <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
+vars == <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 (* ---------------------------------------------------------------------------
  * Backoff computation
@@ -109,6 +110,7 @@ TypeOK ==
     /\ stopRetrying \in BOOLEAN
     /\ shutdownStarted \in BOOLEAN
     /\ okPhase \in {"None", "Running", "Grace", "Stopped"}
+    /\ retriedInGrace \in BOOLEAN
 
 (* ---------------------------------------------------------------------------
  * Initial state
@@ -124,6 +126,7 @@ Init ==
     /\ stopRetrying = FALSE
     /\ shutdownStarted = FALSE
     /\ okPhase = "None"
+    /\ retriedInGrace = FALSE
 
 (* ---------------------------------------------------------------------------
  * Environment actions (sink state changes)
@@ -136,19 +139,19 @@ Init ==
 SinkRecover ==
     /\ sinkState = "Transient"
     /\ sinkState' = "Healthy"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Sink enters transient failure (network error, timeout, rate limit).
 SinkFail ==
     /\ sinkState = "Healthy"
     /\ sinkState' = "Transient"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Sink enters permanent failure mode (schema rejection, 4xx).
 SinkPermanentFail ==
     /\ sinkState \in {"Healthy", "Transient"}
     /\ sinkState' = "Permanent"
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 (* ---------------------------------------------------------------------------
  * Worker actions
@@ -163,6 +166,7 @@ Send ==
     /\ \/ state = "Idle"
        \/ (state = "WaitingBackoff" /\ ~stopRetrying)
     /\ state' = "Sending"
+    /\ retriedInGrace' = (retriedInGrace \/ (state = "WaitingBackoff" /\ shutdownStarted /\ ~stopRetrying))
     /\ UNCHANGED <<outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
 
 \* ReceiveOk: sink accepted the batch. Terminal success.
@@ -175,7 +179,7 @@ ReceiveOk ==
     /\ okPhase' = IF stopRetrying THEN "Stopped"
                   ELSE IF shutdownStarted THEN "Grace"
                   ELSE "Running"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted>>
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, retriedInGrace>>
 
 \* ReceiveRejected: sink permanently rejected the batch. Terminal failure.
 \* Maps to Ok(SendResult::Rejected) in process_item.
@@ -184,7 +188,7 @@ ReceiveRejected ==
     /\ sinkState = "Permanent"
     /\ state'   = "Terminal"
     /\ outcome' = "Rejected"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* ReceiveTransient: transient failure, compute next backoff and wait.
 \* Maps to Ok(SendResult::IoError), Ok(SendResult::RetryAfter), and
@@ -200,7 +204,7 @@ ReceiveTransient ==
     /\ backoffMs'  = IF retryCount = 0
                      THEN InitialBackoffMs
                      ELSE NextBackoff(backoffMs)
-    /\ UNCHANGED <<outcome, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<outcome, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Cancel: shutdown signal observed. Can happen in any non-terminal state.
 \* Models cancel.cancelled() in the tokio::select! arms of process_item.
@@ -213,7 +217,7 @@ Cancel ==
     /\ cancelled' = TRUE
     /\ state'     = "Terminal"
     /\ outcome'   = "Cancelled"
-    /\ UNCHANGED <<retryCount, backoffMs, sinkState, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<retryCount, backoffMs, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* BeginShutdown: graceful shutdown begins and the bounded retry window
 \* opens. Models ShutdownRetryGrace::begin, called when the shutdown token
@@ -222,7 +226,7 @@ Cancel ==
 BeginShutdown ==
     /\ ~shutdownStarted
     /\ shutdownStarted' = TRUE
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, okPhase>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, stopRetrying, okPhase, retriedInGrace>>
 
 \* StopRetrying: the retry window closes (grace timer, capped by the drain
 \* timeout). Models the ShutdownRetryGrace stop token firing. The token is
@@ -231,7 +235,7 @@ StopRetrying ==
     /\ shutdownStarted
     /\ ~stopRetrying
     /\ stopRetrying' = TRUE
-    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<state, outcome, retryCount, backoffMs, cancelled, sinkState, shutdownStarted, okPhase, retriedInGrace>>
 
 \* GiveUpTransient: a send fails transiently after stop_retrying fired. The
 \* batch is not retried; it resolves as PoolClosed (held for replay).
@@ -242,7 +246,7 @@ GiveUpTransient ==
     /\ stopRetrying
     /\ state'   = "Terminal"
     /\ outcome' = "Cancelled"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* AbortBackoff: stop_retrying fires while the worker sleeps in backoff.
 \* Maps to the stop_retrying.cancelled() arm in wait_before_retry.
@@ -251,7 +255,7 @@ AbortBackoff ==
     /\ stopRetrying
     /\ state'   = "Terminal"
     /\ outcome' = "Cancelled"
-    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase>>
+    /\ UNCHANGED <<retryCount, backoffMs, cancelled, sinkState, stopRetrying, shutdownStarted, okPhase, retriedInGrace>>
 
 \* Any response to an in-progress send. Under stop_retrying one of these is
 \* always enabled while Sending, whatever the sink state.
@@ -490,6 +494,6 @@ DeliveredAfterStopReachable == ~(okPhase = "Stopped")
 
 \* A batch can retry inside the grace window and then be delivered.
 DeliveredDuringGraceReachable ==
-    ~(okPhase = "Grace" /\ retryCount > 0)
+    ~(okPhase = "Grace" /\ retriedInGrace)
 
 =============================================================================

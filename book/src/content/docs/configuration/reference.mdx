@@ -61,7 +61,7 @@ These optional fields sit next to `inputs` and `outputs` under each pipeline.
 | `batch_target_bytes` | integer | No | `4194304` | Flush a batch once it reaches this many bytes. Must be greater than 0. |
 | `batch_timeout_ms` | integer | No | `100` | Maximum time a partial batch waits before it is flushed. |
 | `poll_interval_ms` | integer | No | `10` | Interval between input polls. |
-| `shutdown_retry_grace_ms` | integer | No | `10000` | How long output workers keep retrying failed sends after shutdown begins, capped by the 60s output drain timeout. It bounds retries, not a send already in progress when it ends. Batches still failing when it ends are not acknowledged: file inputs replay them on restart, while network inputs lose them. `0` stops retrying as soon as shutdown begins. |
+| `shutdown_retry_grace_ms` | integer | No | `10000` | How long output workers keep retrying failed sends after shutdown begins, capped by the 60s output drain timeout. It bounds retries, not a send already in progress when it ends. Batches still failing when it ends are not acknowledged: inputs with checkpoints (such as `file`) replay them on restart, while inputs without checkpoints (such as TCP, UDP and OTLP receivers) lose them. `0` stops retrying as soon as shutdown begins. |
 
 ---
 
