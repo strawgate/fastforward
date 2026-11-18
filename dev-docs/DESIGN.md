@@ -215,6 +215,22 @@ comparisons, `BETWEEN` and `IN` (prototyped in PR #2921). Deferred; revisit if
 dropped batches from mixed-type fields show up in practice.  
 **Rejected:** restoring DataFusion 53's string comparison (`'50' >= 400` is true).
 
+### Plan transform SQL once, reuse the logical plan
+
+`SqlTransform` parses and plans its SQL on the first batch and keeps the unoptimized
+`LogicalPlan`. Each later batch builds a `DataFrame` from that plan; the optimizer and
+physical planning still run per batch, so volatile functions such as `now()` are
+evaluated fresh. The plan holds its table providers, so `logs` and enrichment tables
+are registered as `SwapTable`s (fixed schema, swappable `MemTable`) whose data is
+replaced in place. A new input schema, or an enrichment table appearing, disappearing
+or changing schema, drops the cached plan and replans.
+
+**Why:** DataFusion 55's parse + analyze step is about 2x slower than 53's and ran on
+every batch. Caching it makes steady-state transforms 10–48% faster than before the
+upgrade.  
+**Rejected:** caching the optimized or physical plan (would freeze `now()` and other
+volatile expressions, and the physical plan binds the batch data).
+
 ### Flat schema (not OTAP star schema)
 
 Single `RecordBatch` with all fields as columns. `resource.attributes.*` prefix

@@ -58,6 +58,7 @@ rust-version = "1.94"
 arrow = { version = "59", default-features = false, features = [
     "ipc_compression",
 ] }
+async-trait = "0.1"
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 bytes = "1"
 chrono = { version = "0.4.44", default-features = false }
