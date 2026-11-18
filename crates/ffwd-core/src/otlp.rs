@@ -762,7 +762,9 @@ mod tests {
 
     #[test]
     fn decode_varint_rejects_tenth_byte_payload_above_one() {
-        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        // Nine zero-payload continuation bytes, so only the 10th byte's
+        // payload (2 > 1) overflows. The pre-fix decoder accepted this as 0.
+        let buf = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
         assert!(decode_varint(&buf, 0).is_err());
     }
 
@@ -2197,7 +2199,7 @@ mod verification {
         let data_len: usize = kani::any_where(|&l: &usize| l <= 4);
         let data: [u8; 4] = kani::any();
 
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(24);
         encode_bytes_field(&mut buf, field_number, &data[..data_len]);
 
         // Tag (1-10) + length varint (1-10) + data (0-4) = 2-24 bytes

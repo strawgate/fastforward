@@ -344,5 +344,7 @@ mod verification {
         );
 
         kani::cover!(result.is_some() && len >= 15, "large mid-range i64");
+        kani::cover!(result.is_some_and(|v| v > 0), "positive mid-range value");
+        kani::cover!(result.is_some_and(|v| v < 0), "negative mid-range value");
     }
 }

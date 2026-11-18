@@ -714,7 +714,8 @@ mod verification {
     /// for ALL u64 inputs. Exhaustive — no gap.
     ///
     /// Gated behind `kani-slow`: 65-unwind loop over symbolic u64 takes >30s.
-    /// PR CI runs the fast `verify_prefix_xor_vs_oracle` instead.
+    /// `verify_prefix_xor_vs_oracle` is gated the same way, so neither
+    /// exhaustive comparison runs in default PR CI; both run nightly.
     #[cfg(feature = "kani-slow")]
     #[kani::solver(kissat)]
     #[kani::proof]

@@ -202,32 +202,31 @@ just kani-boundary
 ```
 
 CI runs this check in the dedicated `Verification guardrail` job, and the
-required `CI conclusion` status depends on that guardrail passing. CI also runs
-`cargo kani` for the required proof-bearing crates (`ffwd-core`,
-`ffwd-arrow`, `ffwd-types`, `ffwd-io`, `ffwd-output`,
-`ffwd-runtime`, `ffwd-diagnostics`, and `ffwd`) under the following
-conditions (from the `kani` job in `.github/workflows/ci.yml`):
+required `CI conclusion` status depends on that guardrail passing.
 
-- **any push** to the repository, OR
-- a pull request carrying the **`ci:full` label**, OR
-- a **non-draft pull request** where the path-filter outputs
-  `kani_required == 'true'` — i.e. at least one changed file matches one of:
-  - `crates/ffwd-core/**`
-  - `crates/ffwd-arrow/**`
-  - `crates/ffwd-types/**`
-  - `crates/ffwd-io/**`
-  - `crates/ffwd-output/**`
-  - `crates/ffwd-runtime/**`
-  - `crates/ffwd-diagnostics/**`
-  - `crates/ffwd/**`
-  - `Cargo.toml`
-  - `Cargo.lock`
-  - `dev-docs/verification/kani-boundary-contract.toml`
-  - `scripts/verify_kani_boundary_contract.py`
-  - `.github/workflows/ci.yml`
+CI also runs `cargo kani` for the proof-bearing crates (`ffwd-kani`,
+`ffwd-core`, `ffwd-arrow`, `ffwd-types`, `ffwd-io`, `ffwd-output`,
+`ffwd-runtime`, `ffwd-diagnostics`, and `ffwd`) in the sharded `kani` job of
+`.github/workflows/ci.yml`:
 
-A matching path change in a **draft** PR does not trigger the job; the PR must
-be marked ready for review first.
+- The `changes` job runs `scripts/kani_plan.py`, which builds the shard
+  matrix. A crate's shards run when a changed file is in that crate or in any
+  workspace crate it depends on (transitively). Changes to workspace-wide
+  inputs (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+  `.cargo/config.toml`, `.github/workflows/ci.yml`, the Kani plan/shard
+  scripts, and the Kani boundary contract and its checker) run every shard.
+  Other changes (docs, book, TLA+) run none.
+- **Pushes** and PRs labeled **`ci:full`** run every shard. Draft PRs run no
+  Kani shards; mark the PR ready for review first.
+- Each shard runs `scripts/kani_shard.py`, which lists the crate's harnesses
+  with `cargo kani list`, takes every Nth one, and verifies them with
+  `--jobs 2` (more CBMC processes run the 16 GB runners out of memory). Shard
+  counts per crate live in the `SHARDS` table in `scripts/kani_plan.py`.
+- The `kani` job does not wait on `Lint`, so a lint failure does not hide
+  proof results.
+- Harnesses that exceed the per-harness CI budget are gated behind the
+  `kani-slow` feature in `ffwd-core` and `ffwd-kani`. They run in the nightly
+  workflow and on `ci:full` PRs.
 
 ### Verification guardrail checks
 

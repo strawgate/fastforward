@@ -256,9 +256,10 @@ migrate to proper `proof_for_contract` + `stub_verified`.
 
 ### CI resource constraints
 
-- CBMC solver processes use 3-5 GB each
-- GitHub Actions runners have ~7 GB free (16 GB total minus OS)
-- `--jobs 2` is the safe maximum (peak ~10 GB)
+- CBMC solver processes typically use 3-5 GB each
+- GitHub Actions `ubuntu-latest` runners have 16 GB RAM, ~12-13 GB usable
+- `--jobs 2` is the safe maximum (peak ~10 GB); CI shards harnesses across
+  many runners instead of raising `--jobs` (see `scripts/kani_shard.py`)
 - `--jobs 3` causes sporadic OOM; `--jobs 4` guarantees OOM
 - OOM manifests as "runner has received a shutdown signal" with lost logs
 
