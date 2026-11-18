@@ -21,7 +21,7 @@ Then read only the section needed for your task:
 
 | Tool | Version | Install |
 |------|---------|---------|
-| [Rust](https://rustup.rs) | Latest stable (managed by `rust-toolchain.toml`) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| [Rust](https://rustup.rs) | Pinned in `rust-toolchain.toml` (rustup installs it) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | [just](https://just.systems) | 1.40+ | `cargo install just` or `brew install just` |
 | [cargo-nextest](https://nexte.st) | 0.9+ | `cargo install cargo-nextest` |
 
@@ -43,7 +43,7 @@ Install the tools listed above manually.
 
 ```bash
 git clone https://github.com/strawgate/fastforward.git && cd fastforward
-just setup     # install tools, fetch deps, set up git hooks
+just setup     # install tools, fetch deps, set up git hooks (or: scripts/install-hooks.sh)
 just doctor    # verify everything is installed
 just ci        # fast lint + test (~30s)
 ```
