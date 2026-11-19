@@ -1489,6 +1489,7 @@ pipelines:
     );
 }
 
+#[cfg(feature = "datafusion")]
 #[cfg(not(feature = "turmoil"))]
 #[test]
 fn split_pipeline_processes_file_with_sql_filter() {
@@ -1804,6 +1805,7 @@ pipelines:
     );
 }
 
+#[cfg(feature = "datafusion")]
 /// Transform error: CPU worker drops the batch and does NOT advance
 /// the checkpoint (correct at-least-once semantics — data will be
 /// re-read on restart).

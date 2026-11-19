@@ -41,6 +41,7 @@ fn single_pipeline_yaml(input_body: &str, output_body: &str) -> String {
     single_pipeline_yaml_with_sections(input_body, None, output_body)
 }
 
+#[cfg(feature = "datafusion")]
 fn single_pipeline_yaml_with_transform(
     input_body: &str,
     transform: &str,
@@ -405,6 +406,7 @@ pipelines:
     }
 }
 
+#[cfg(feature = "datafusion")]
 /// Transform filter: generate 10,000 lines alternating INFO/ERROR, filter
 /// to ERROR only, verify the ERROR subsequence has zero gaps.
 #[test]
@@ -468,6 +470,7 @@ fn compliance_transform_filter() {
     );
 }
 
+#[cfg(feature = "datafusion")]
 /// Transform select: generate lines, project only sequence_id_int
 /// and message_str. Verify correct columns and zero gaps.
 #[test]

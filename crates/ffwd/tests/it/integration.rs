@@ -19,7 +19,9 @@ use ffwd_arrow::scanner::Scanner;
 use ffwd_config::Config;
 use ffwd_core::scan_config::ScanConfig;
 use ffwd_test_utils::test_meter;
+#[cfg(feature = "datafusion")]
 use ffwd_transform::SqlTransform;
+#[cfg(feature = "datafusion")]
 use ffwd_transform::enrichment::CsvFileTable;
 use tokio_util::sync::CancellationToken;
 
@@ -86,6 +88,7 @@ fn single_pipeline_yaml(input_body: &str, output_body: &str) -> String {
     single_pipeline_yaml_with_sections(input_body, None, output_body)
 }
 
+#[cfg(feature = "datafusion")]
 fn single_pipeline_yaml_with_transform(
     input_body: &str,
     transform: &str,
@@ -206,6 +209,7 @@ fn test_cri_format_parsing() {
 // 3. SQL transform: WHERE filter reduces row count
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "datafusion")]
 /// Write ten JSON lines (five ERROR, five INFO), run a pipeline whose SQL
 /// transform filters to ERROR rows only, and assert that the output stats
 /// reflect the reduction.
@@ -413,6 +417,7 @@ fn test_config_validation_errors() {
 /// `RecordBatch`, register a `CsvFileTable` with the `SqlTransform`, execute a
 /// SQL JOIN that brings in new columns from the CSV, and confirm the output
 /// batch contains the expected enriched column values.
+#[cfg(feature = "datafusion")]
 #[test]
 fn test_enrichment_join() {
     // Build a RecordBatch from raw JSON using the same scanner the pipeline uses.

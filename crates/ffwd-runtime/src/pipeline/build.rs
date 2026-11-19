@@ -892,6 +892,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn source_metadata_disabled_rejects_explicit_source_column() {
         let dir = tempfile::tempdir().unwrap();
@@ -910,6 +911,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[cfg(not(feature = "turmoil"))]
     #[test]
     fn source_metadata_enabled_allows_explicit_source_column() {
@@ -931,6 +933,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn public_source_metadata_style_rejects_explicit_source_id() {
         let dir = tempfile::tempdir().unwrap();
