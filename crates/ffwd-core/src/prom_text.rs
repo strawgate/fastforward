@@ -47,9 +47,13 @@ pub const PROM_TYPE_CREATED: &[u8] = b"created";
 /// Column the Arrow layer appends with each sample's series id. Reserved here
 /// so an exposition label of that name is prefixed instead of overwritten.
 pub const PROM_SERIES_ID_FIELD: &[u8] = b"__series_id__";
+/// Column the `prometheus_scrape` input appends with each cumulative
+/// sample's start time. Reserved like [`PROM_SERIES_ID_FIELD`].
+pub const PROM_START_TIMESTAMP_FIELD: &[u8] = b"__start_timestamp_ms__";
 
 /// Prefix for labels whose name collides with a synthetic column
-/// (`__value__`, `__timestamp_ms__`, `__type__`, `__series_id__`). Such labels are invalid in
+/// (`__value__`, `__timestamp_ms__`, `__type__`, `__series_id__`,
+/// `__start_timestamp_ms__`). Such labels are invalid in
 /// Prometheus (the `__` prefix is reserved) but are kept rather than dropped.
 /// Quoted label names that already start with this prefix get it once more,
 /// so `"label:__value__"` and a renamed `__value__` never share a column.
@@ -148,6 +152,7 @@ fn is_reserved_column(key: &[u8]) -> bool {
         || key == PROM_TIMESTAMP_FIELD
         || key == PROM_TYPE_FIELD
         || key == PROM_SERIES_ID_FIELD
+        || key == PROM_START_TIMESTAMP_FIELD
 }
 
 /// Builder extension used by the Prometheus scanner for pre-parsed numbers.

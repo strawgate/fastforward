@@ -910,6 +910,9 @@ fn validate_prometheus_scrape(
     if p.max_label_columns == Some(0) {
         return err("'max_label_columns' must be at least 1".to_string());
     }
+    if p.max_inflight_bytes == Some(0) {
+        return err("'max_inflight_bytes' must be at least 1".to_string());
+    }
     if input.format.is_some() {
         return err(
             "prometheus_scrape does not support 'format' (it always parses the Prometheus text format)"

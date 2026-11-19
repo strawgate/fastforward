@@ -33,8 +33,14 @@
 //!   labels that collide with its own columns is removed.
 //!
 //! Metric names are kept as scraped (no unit or `_total` suffix trimming), so
-//! a round trip back to Prometheus keeps the original names. Start times are
-//! not tracked yet; cumulative points carry `start_time_unix_nano = 0`.
+//! a round trip back to Prometheus keeps the original names.
+//!
+//! Cumulative points (counters, info, histograms, summaries) take
+//! `start_time_unix_nano` from the `__start_timestamp_ms__` column, which the
+//! `prometheus_scrape` input fills; a histogram or summary point uses the
+//! latest start time among its samples. A start time after the point's time
+//! is clamped to it. Without the column, or on a null, the start time is 0
+//! (unknown). Gauges never carry one.
 
 use std::collections::HashMap;
 
@@ -68,10 +74,12 @@ const AGGREGATION_TEMPORALITY: u32 = 2;
 const SUM_IS_MONOTONIC: u32 = 3;
 const TEMPORALITY_CUMULATIVE: u64 = 2;
 // NumberDataPoint
+const NDP_START_TIME: u32 = 2;
 const NDP_TIME: u32 = 3;
 const NDP_AS_DOUBLE: u32 = 4;
 const NDP_ATTRIBUTES: u32 = 7;
 // HistogramDataPoint
+const HDP_START_TIME: u32 = 2;
 const HDP_TIME: u32 = 3;
 const HDP_COUNT: u32 = 4;
 const HDP_SUM: u32 = 5;
@@ -79,6 +87,7 @@ const HDP_BUCKET_COUNTS: u32 = 6;
 const HDP_EXPLICIT_BOUNDS: u32 = 7;
 const HDP_ATTRIBUTES: u32 = 9;
 // SummaryDataPoint
+const SDP_START_TIME: u32 = 2;
 const SDP_TIME: u32 = 3;
 const SDP_COUNT: u32 = 4;
 const SDP_SUM: u32 = 5;
@@ -97,6 +106,7 @@ const NAME_COL: &str = "__name__";
 const VALUE_COL: &str = "__value__";
 const TS_COL: &str = "__timestamp_ms__";
 const TYPE_COL: &str = "__type__";
+const START_COL: &str = ffwd_arrow::prom::PROM_START_TIMESTAMP_FIELD;
 const RESERVED_LABEL_PREFIX: &str = "label:";
 const SERIES_ID_COL: &str = "__series_id__";
 
@@ -202,6 +212,8 @@ enum Role {
 struct Group {
     rep: usize,
     time_ms: Option<i64>,
+    /// Latest start time among the group's samples.
+    start_ms: Option<i64>,
     /// `(le, cumulative count)` or `(quantile, value)`, sorted by `finalize`.
     entries: Vec<(f64, f64)>,
     sum: Option<f64>,
@@ -227,6 +239,7 @@ struct Columns<'a> {
     name: StrCol<'a>,
     values: &'a arrow::array::Float64Array,
     ts: Option<&'a arrow::array::Int64Array>,
+    start: Option<&'a arrow::array::Int64Array>,
     ty: Option<StrCol<'a>>,
     job: Option<StrCol<'a>>,
     instance: Option<StrCol<'a>>,
@@ -258,6 +271,13 @@ impl Columns<'_> {
     /// missing and an unusable timestamp land in the same point.
     fn time_ms(&self, row: usize) -> Option<i64> {
         self.ts
+            .and_then(|t| t.is_valid(row).then(|| t.value(row)))
+            .filter(|&ms| ms_to_ns(ms).is_some())
+    }
+
+    /// The row's start time, when it has a usable one.
+    fn start_ms(&self, row: usize) -> Option<i64> {
+        self.start
             .and_then(|t| t.is_valid(row).then(|| t.value(row)))
             .filter(|&ms| ms_to_ns(ms).is_some())
     }
@@ -303,7 +323,7 @@ pub(crate) fn encode_metrics_batch(
                 ));
             }
             VALUE_COL => Some(DataType::Float64),
-            TS_COL => Some(DataType::Int64),
+            TS_COL | START_COL => Some(DataType::Int64),
             _ if name.starts_with("__") && name != NAME_COL && name != TYPE_COL => continue,
             _ if is_string_type(col.data_type()) => None,
             _ => Some(DataType::Utf8),
@@ -353,8 +373,10 @@ pub(crate) fn encode_metrics_batch(
 fn unprefixed_label(key: &str) -> &str {
     match key.strip_prefix(RESERVED_LABEL_PREFIX) {
         Some(rest)
-            if matches!(rest, VALUE_COL | TS_COL | TYPE_COL | SERIES_ID_COL)
-                || rest.starts_with(RESERVED_LABEL_PREFIX) =>
+            if matches!(
+                rest,
+                VALUE_COL | TS_COL | TYPE_COL | SERIES_ID_COL | START_COL
+            ) || rest.starts_with(RESERVED_LABEL_PREFIX) =>
         {
             rest
         }
@@ -366,6 +388,7 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
     let mut name = None;
     let mut values = None;
     let mut ts = None;
+    let mut start = None;
     let mut ty = None;
     let mut job = None;
     let mut instance = None;
@@ -375,6 +398,7 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
             NAME_COL => name = StrCol::new(arr),
             VALUE_COL => values = arr.as_primitive_opt::<Float64Type>(),
             TS_COL => ts = arr.as_primitive_opt::<Int64Type>(),
+            START_COL => start = arr.as_primitive_opt::<Int64Type>(),
             TYPE_COL => ty = StrCol::new(arr),
             "job" => job = StrCol::new(arr),
             "instance" => instance = StrCol::new(arr),
@@ -391,6 +415,7 @@ fn resolve_columns(owned: &[(String, ArrayRef)]) -> Result<Columns<'_>, String> 
         name: name.ok_or("metric batch needs a string __name__ column")?,
         values: values.ok_or("metric batch needs a numeric __value__ column")?,
         ts,
+        start,
         ty,
         job,
         instance,
@@ -530,6 +555,7 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
                 fam.groups.push(Group {
                     rep: row,
                     time_ms: cols.time_ms(row),
+                    start_ms: None,
                     entries: Vec::new(),
                     sum: None,
                     count: None,
@@ -542,15 +568,26 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
         let bound = skip
             .and_then(|i| cols.labels[i].1.get(row))
             .and_then(|s| parse_prom_value(s.as_bytes()));
-        match role {
+        // Only rows that contribute a value count toward the start time.
+        let contributes = match role {
             Role::Bucket | Role::Quantile => {
                 if let Some(b) = bound {
                     g.entries.push((b, value));
                 }
+                bound.is_some()
             }
-            Role::Sum => g.sum = Some(value),
-            Role::Count => g.count = Some(value),
-            Role::Point | Role::Skip => {}
+            Role::Sum => {
+                g.sum = Some(value);
+                true
+            }
+            Role::Count => {
+                g.count = Some(value);
+                true
+            }
+            Role::Point | Role::Skip => false,
+        };
+        if contributes {
+            g.start_ms = g.start_ms.max(cols.start_ms(row));
         }
     }
     resources
@@ -623,6 +660,14 @@ fn ms_to_ns(ms: i64) -> Option<u64> {
     u64::try_from(ms).ok()?.checked_mul(1_000_000)
 }
 
+/// Write a cumulative point's start time, clamped to its time. A missing
+/// start time is left out (0, unknown).
+fn encode_start_time(out: &mut Vec<u8>, field: u32, start_ms: Option<i64>, time_ns: u64) {
+    if let Some(start_ns) = start_ms.and_then(ms_to_ns) {
+        encode_fixed64(out, field, start_ns.min(time_ns));
+    }
+}
+
 fn encode_resource_metrics(
     res: &Resource<'_>,
     cols: &Columns<'_>,
@@ -664,9 +709,14 @@ fn encode_resource_metrics(
         match fam.kind {
             Kind::Gauge | Kind::Counter | Kind::Info => {
                 let data = begin(out);
+                let is_cumulative = fam.kind != Kind::Gauge;
                 for &row in &fam.points {
                     let dp = begin(out);
-                    encode_fixed64(out, NDP_TIME, time_ns(cols.time_ms(row), default_ns));
+                    let t = time_ns(cols.time_ms(row), default_ns);
+                    if is_cumulative {
+                        encode_start_time(out, NDP_START_TIME, cols.start_ms(row), t);
+                    }
+                    encode_fixed64(out, NDP_TIME, t);
                     encode_fixed64(out, NDP_AS_DOUBLE, cols.values.value(row).to_bits());
                     encode_attributes(out, NDP_ATTRIBUTES, cols, row, None);
                     end(out, DATA_POINTS, dp);
@@ -697,7 +747,9 @@ fn encode_resource_metrics(
                 let data = begin(out);
                 for g in &fam.groups {
                     let dp = begin(out);
-                    encode_fixed64(out, SDP_TIME, time_ns(g.time_ms, default_ns));
+                    let t = time_ns(g.time_ms, default_ns);
+                    encode_start_time(out, SDP_START_TIME, g.start_ms, t);
+                    encode_fixed64(out, SDP_TIME, t);
                     encode_fixed64(out, SDP_COUNT, float_count(g.count.unwrap_or(0.0)));
                     encode_fixed64(out, SDP_SUM, g.sum.unwrap_or(0.0).to_bits());
                     for &(q, v) in &g.entries {
@@ -758,7 +810,9 @@ fn encode_histogram_point(
     }
 
     let dp = begin(out);
-    encode_fixed64(out, HDP_TIME, time_ns(g.time_ms, default_ns));
+    let t = time_ns(g.time_ms, default_ns);
+    encode_start_time(out, HDP_START_TIME, g.start_ms, t);
+    encode_fixed64(out, HDP_TIME, t);
     encode_fixed64(out, HDP_COUNT, count);
     if let Some(sum) = g.sum {
         encode_fixed64(out, HDP_SUM, sum.to_bits());
@@ -1377,6 +1431,99 @@ mod tests {
         };
         let p = &sum.data_points[0];
         assert_eq!((p.count, p.sum, p.quantile_values.len()), (8, 4.0, 1));
+    }
+
+    /// `rows` plus a start-time column.
+    fn with_starts(rows: &[Row<'_>], starts: &[Option<i64>]) -> RecordBatch {
+        let b = batch(rows);
+        let mut fields: Vec<Field> = b.schema().fields().iter().map(|f| (**f).clone()).collect();
+        let mut arrays = b.columns().to_vec();
+        fields.push(Field::new(START_COL, DataType::Int64, true));
+        arrays.push(Arc::new(Int64Array::from(starts.to_vec())));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).expect("batch")
+    }
+
+    #[test]
+    fn cumulative_points_carry_the_start_time_column() {
+        let (c, h, s) = (Some("counter"), Some("histogram"), Some("summary"));
+        let b = with_starts(
+            &[
+                ("reqs_total", 5.0, Some(9), c, &[]),
+                ("temp", 1.0, Some(9), Some("gauge"), &[]),
+                ("lat_bucket", 1.0, Some(9), h, &[("le", "+Inf")]),
+                ("lat_count", 1.0, Some(9), h, &[]),
+                ("rpc", 0.1, Some(9), s, &[("quantile", "0.5")]),
+                ("rpc_count", 1.0, Some(9), s, &[]),
+            ],
+            // A group uses its latest start time; a gauge never has one.
+            &[Some(2), Some(3), Some(4), Some(6), Some(5), None],
+        );
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let by_name = |n: &str| {
+            metrics
+                .iter()
+                .find(|m| m.name == n)
+                .and_then(|m| m.data.clone())
+                .expect("metric")
+        };
+        let Data::Sum(sum) = by_name("reqs_total") else {
+            panic!("sum")
+        };
+        assert_eq!(sum.data_points[0].start_time_unix_nano, 2_000_000);
+        let Data::Gauge(g) = by_name("temp") else {
+            panic!("gauge")
+        };
+        assert_eq!(g.data_points[0].start_time_unix_nano, 0);
+        let Data::Histogram(hist) = by_name("lat") else {
+            panic!("histogram")
+        };
+        assert_eq!(hist.data_points[0].start_time_unix_nano, 6_000_000);
+        let Data::Summary(sm) = by_name("rpc") else {
+            panic!("summary")
+        };
+        assert_eq!(sm.data_points[0].start_time_unix_nano, 5_000_000);
+    }
+
+    #[test]
+    fn rows_left_out_of_a_point_do_not_set_its_start_time() {
+        let h = Some("histogram");
+        // A bucket without `le` is ignored, and so is its start time.
+        let b = with_starts(
+            &[
+                ("lat_bucket", 1.0, Some(9), h, &[]),
+                ("lat_count", 1.0, Some(9), h, &[]),
+            ],
+            &[Some(8), Some(2)],
+        );
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let Some(Data::Histogram(hist)) = &metrics[0].data else {
+            panic!("histogram")
+        };
+        assert_eq!(hist.data_points[0].start_time_unix_nano, 2_000_000);
+    }
+
+    #[test]
+    fn start_time_is_clamped_to_the_point_time_and_null_is_unknown() {
+        let c = Some("counter");
+        let b = with_starts(
+            &[
+                ("a_total", 1.0, Some(5), c, &[]),
+                ("b_total", 1.0, Some(5), c, &[]),
+            ],
+            &[Some(50), None],
+        );
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let starts: Vec<u64> = metrics
+            .iter()
+            .map(|m| match &m.data {
+                Some(Data::Sum(s)) => s.data_points[0].start_time_unix_nano,
+                _ => panic!("sum"),
+            })
+            .collect();
+        assert_eq!(starts, vec![5_000_000, 0]);
     }
 
     #[test]
