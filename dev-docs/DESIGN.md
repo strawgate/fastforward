@@ -492,12 +492,13 @@ shared by an input's targets, held from before a request until the pipeline
 takes the batch. A scrape reserves what its previous scrape needed and waits,
 holding nothing, while the budget is used up. The response buffer is reserved
 before it grows and may wait only until the scrape's timeout, so targets
-holding part of the budget cannot deadlock each other. Gunzip output and Arrow
-batches are covered right after they are built, without waiting; those steps
-are synchronous on the input's single-threaded runtime, so at most one scrape
-holds uncovered memory at a time, and a scrape that can't be covered is
-dropped (before it touches start-time state) and reserves its peak up front next
-time. Batch memory counts each allocation once, since the string-view columns
+holding part of the budget cannot deadlock each other; gunzip output grows the
+same way. An Arrow batch's size is known only once it is built, so it is covered
+right after, without waiting. Building is synchronous on the input's
+single-threaded runtime, so the budget is exceeded by at most one batch at a
+time, and only by a scrape that outgrew its estimate. A scrape that can't be
+covered is dropped (before it touches start-time state) and reserves its peak up
+front next time. Batch memory counts each allocation once, since the string-view columns
 share the response body. A scrape larger than the whole budget takes all of it and
 runs alone rather than failing.
 

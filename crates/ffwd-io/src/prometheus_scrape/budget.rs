@@ -9,14 +9,15 @@
 //! wait is what delays scrapes when the output is slow. If the scrape then
 //! needs more:
 //!
-//! - for the response body, it reserves before growing the buffer and may
-//!   wait only until its timeout. Waiting while holding part of the budget
-//!   could otherwise deadlock targets that each hold some and wait for more.
-//! - gunzip output and Arrow batches are allocated before their size is
-//!   known, so they are covered right after, without waiting
-//!   ([`Reservation::try_grow_to`]). These steps are synchronous on the
-//!   input's single-threaded runtime, so at most one scrape at a time holds
-//!   uncovered memory.
+//! - for the response body and gunzip output, it reserves before growing
+//!   the buffer and may wait only until its timeout. Waiting while holding
+//!   part of the budget could otherwise deadlock targets that each hold some
+//!   and wait for more.
+//! - an Arrow batch's size is known only once it is built, so it is covered
+//!   right after, without waiting ([`Reservation::try_grow_to`]). Building
+//!   is synchronous on the input's single-threaded runtime, so the budget is
+//!   exceeded by at most one batch at a time, and only by a scrape that
+//!   outgrew its estimate (its first, or one whose target grew).
 //!
 //! A scrape that can't get the extra is counted as failed and drops its
 //! data; its next attempt reserves enough up front.

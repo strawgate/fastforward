@@ -552,10 +552,10 @@ async fn hold(
 }
 
 /// Cover `bytes` that are already allocated, without waiting, and record the
-/// peak. Gunzip and Arrow materialization can't be reserved for ahead of
-/// time; they run synchronously on the input's single-threaded runtime, so
-/// at most one scrape at a time holds memory the budget does not cover, and
-/// only until this call. On failure the caller drops that memory, and the
+/// peak. An Arrow batch's size is known only once it is built; building
+/// runs synchronously on the input's single-threaded runtime, so at most one
+/// scrape at a time holds memory the budget does not cover, and only until
+/// this call. On failure the caller drops that memory, and the
 /// next scrape reserves the peak up front.
 fn cover(reservation: &mut Reservation, bytes: usize, peak: &mut usize) -> Result<(), ScrapeError> {
     *peak = (*peak).max(bytes);
@@ -634,9 +634,13 @@ async fn scrape_reserved(
     // integer milliseconds.
     builder.config_mut().openmetrics = resp_is_openmetrics;
     let body: Bytes = if is_gzip {
-        let decoded = gunzip_limited(&buf, limit)?;
-        cover(reservation, buf.capacity() + decoded.len(), peak)?;
-        decoded
+        let budget = GunzipBudget {
+            held_for_input: buf.capacity(),
+            reservation,
+            deadline,
+            peak,
+        };
+        gunzip_limited(&buf, limit, Some(budget)).await?
     } else {
         buf.freeze()
     };
@@ -695,17 +699,60 @@ fn batch_memory_bytes(batch: &RecordBatch) -> usize {
     total
 }
 
-fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
-    let mut out = Vec::with_capacity(input.len().saturating_mul(4).min(limit));
+/// Budget held by a scrape while it decompresses: its reservation, the
+/// deadline for growing it, the peak to record and the bytes already held
+/// for the compressed body.
+struct GunzipBudget<'a> {
+    reservation: &'a mut Reservation,
+    deadline: tokio::time::Instant,
+    peak: &'a mut usize,
+    held_for_input: usize,
+}
+
+/// Decompress a (possibly multi-member) gzip body of at most `limit` bytes.
+/// With a budget, each growth of the output is reserved before it is
+/// allocated, so a scrape waiting for budget holds only covered memory.
+async fn gunzip_limited(
+    input: &[u8],
+    limit: usize,
+    mut budget: Option<GunzipBudget<'_>>,
+) -> Result<Bytes, ScrapeError> {
+    const STEP: usize = 64 * 1024;
     // Multi-member: concatenated gzip streams are valid and decode in full.
-    let decoder = flate2::read::MultiGzDecoder::new(input);
-    let read = decoder
-        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(ScrapeError::Gzip)?;
-    if read > limit {
+    let mut decoder = flate2::read::MultiGzDecoder::new(input);
+    let mut out: Vec<u8> = Vec::new();
+    let mut filled = 0usize;
+    loop {
+        if filled == out.len() {
+            if filled > limit {
+                return Err(ScrapeError::TooLarge(limit));
+            }
+            // One byte past the limit detects an oversized body.
+            let new_len = filled.saturating_mul(2).max(STEP).min(limit + 1);
+            if let Some(b) = budget.as_mut() {
+                hold(
+                    b.reservation,
+                    b.held_for_input + new_len,
+                    b.deadline,
+                    b.peak,
+                )
+                .await?;
+            }
+            out.resize(new_len, 0);
+        }
+        let Some(spare) = out.get_mut(filled..) else {
+            break;
+        };
+        let n = decoder.read(spare).map_err(ScrapeError::Gzip)?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    if filled > limit {
         return Err(ScrapeError::TooLarge(limit));
     }
+    out.truncate(filled);
     Ok(Bytes::from(out))
 }
 
@@ -960,11 +1007,12 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(&[b'a'; 1000]).expect("write");
         let gz = enc.finish().expect("finish");
-        assert_eq!(gunzip_limited(&gz, 1000).expect("fits").len(), 1000);
-        assert!(matches!(
-            gunzip_limited(&gz, 999),
-            Err(ScrapeError::TooLarge(999))
-        ));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let gunzip = |limit| rt.block_on(gunzip_limited(&gz, limit, None));
+        assert_eq!(gunzip(1000).expect("fits").len(), 1000);
+        assert!(matches!(gunzip(999), Err(ScrapeError::TooLarge(999))));
     }
 
     /// Serve `body` to every connection with the given extra header lines.
@@ -1322,7 +1370,12 @@ mod tests {
             body.extend(enc.finish().expect("finish"));
         }
         assert_eq!(
-            gunzip_limited(&body, 1024).expect("gunzip").as_ref(),
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime")
+                .block_on(gunzip_limited(&body, 1024, None))
+                .expect("gunzip")
+                .as_ref(),
             b"a 1\nb 2\n"
         );
     }
