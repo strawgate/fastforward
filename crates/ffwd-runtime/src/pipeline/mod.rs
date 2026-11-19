@@ -59,7 +59,7 @@ use ffwd_io::input::InputSource;
 use ffwd_io::input::SourceEvent;
 use ffwd_io::tail::ByteOffset;
 use ffwd_output::OnceAsyncFactory;
-#[cfg(feature = "turmoil")]
+#[cfg(any(test, feature = "turmoil"))]
 use ffwd_output::SinkFactory;
 #[cfg(test)]
 use ffwd_output::build_sink_factory;
@@ -251,6 +251,25 @@ impl Pipeline {
         let name = self.name.clone();
         let factory = Arc::new(OnceAsyncFactory::new(name, sink));
         self.pool = OutputWorkerPool::new(factory, 1, Duration::MAX, Arc::clone(&self.metrics));
+        self.apply_shutdown_retry_grace();
+        self
+    }
+
+    /// Replace the output with a sink factory served by up to `max_workers`
+    /// workers (for tests that need concurrent sends and out-of-order acks).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_sink_factory(
+        mut self,
+        factory: Arc<dyn SinkFactory>,
+        max_workers: usize,
+    ) -> Self {
+        self.pool = OutputWorkerPool::new(
+            factory,
+            max_workers,
+            Duration::MAX,
+            Arc::clone(&self.metrics),
+        );
         self.apply_shutdown_retry_grace();
         self
     }

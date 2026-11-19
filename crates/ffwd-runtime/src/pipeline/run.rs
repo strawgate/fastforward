@@ -289,7 +289,21 @@ impl Pipeline {
             // Drain channel messages before joining input threads.
             // This prevents deadlock during shutdown if a producer is blocked in
             // `blocking_send` while the bounded channel is full.
-            while let Some(msg) = rx.recv().await {
+            loop {
+                // Bound the wait too: an empty channel whose producer is still
+                // alive must not hold shutdown past the budget.
+                let msg = match tokio::time::timeout_at(shutdown_deadline, rx.recv()).await {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            queued = rx.len(),
+                            timeout = ?self.pool_drain_timeout,
+                            "pipeline: shutdown drain budget spent; leaving queued batches unsent"
+                        );
+                        break;
+                    }
+                };
                 self.metrics.dec_channel_depth();
                 if tokio::time::Instant::now() >= shutdown_deadline {
                     // Budget spent: stop submitting. This batch and any still

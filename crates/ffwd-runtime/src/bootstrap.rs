@@ -1345,7 +1345,7 @@ mod tests {
         use bytes::Bytes;
         use ffwd_diagnostics::diagnostics::ComponentHealth;
         use ffwd_io::input::{InputSource, SourceEvent};
-        use ffwd_output::{BatchMetadata, SendResult, Sink};
+        use ffwd_output::{BatchMetadata, SendResult, Sink, SinkFactory};
         use tokio_util::sync::CancellationToken;
 
         use super::super::{MainPipelineExit, drive_main_pipeline};
@@ -1530,9 +1530,12 @@ mod tests {
             );
         }
 
-        /// Counts delivered rows after an optional per-batch delay.
+        /// Counts delivered rows after a per-batch delay. The delay varies
+        /// from batch to batch (0 to `max_delay_ms`), so with several workers
+        /// sends finish, and acks arrive, out of submission order.
         struct SlowCountingSink {
-            delay: Duration,
+            max_delay_ms: u64,
+            sends: Arc<AtomicU64>,
             rows: Arc<AtomicU64>,
         }
 
@@ -1543,8 +1546,10 @@ mod tests {
                 _metadata: &'a BatchMetadata,
             ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
                 Box::pin(async move {
-                    if !self.delay.is_zero() {
-                        tokio::time::sleep(self.delay).await;
+                    let n = self.sends.fetch_add(1, Ordering::Relaxed);
+                    let delay_ms = (n * 7) % (self.max_delay_ms + 1);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
                     self.rows
                         .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
@@ -1565,12 +1570,34 @@ mod tests {
             }
         }
 
+        /// Hands every worker a `SlowCountingSink` sharing one row counter.
+        struct SlowCountingFactory {
+            max_delay_ms: u64,
+            sends: Arc<AtomicU64>,
+            rows: Arc<AtomicU64>,
+        }
+
+        impl SinkFactory for SlowCountingFactory {
+            fn create(&self) -> io::Result<Box<dyn Sink>> {
+                Ok(Box::new(SlowCountingSink {
+                    max_delay_ms: self.max_delay_ms,
+                    sends: Arc::clone(&self.sends),
+                    rows: Arc::clone(&self.rows),
+                }))
+            }
+
+            fn name(&self) -> &str {
+                "slow-counting"
+            }
+        }
+
         /// Run one shutdown scenario and return (lines read into the
         /// pipeline, lines delivered).
         fn run_shutdown_scenario(
             lines: u64,
             shutdown_after_delivered: u64,
-            sink_delay_ms: u64,
+            max_delay_ms: u64,
+            workers: usize,
         ) -> (u64, u64) {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -1599,10 +1626,14 @@ mod tests {
                     .collect();
                 let mut pipeline = pipeline
                     .with_input("one-line", Box::new(OneLinePerPollInput { lines: input_lines }))
-                    .with_sink(Box::new(SlowCountingSink {
-                        delay: Duration::from_millis(sink_delay_ms),
-                        rows: Arc::clone(&delivered),
-                    }));
+                    .with_sink_factory(
+                        Arc::new(SlowCountingFactory {
+                            max_delay_ms,
+                            sends: Arc::new(AtomicU64::new(0)),
+                            rows: Arc::clone(&delivered),
+                        }),
+                        workers,
+                    );
 
                 let metrics = Arc::clone(pipeline.metrics());
                 let shutdown = CancellationToken::new();
@@ -1644,20 +1675,26 @@ mod tests {
         proptest::proptest! {
             #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
 
-            /// Whatever the batch count, sink speed and moment shutdown
-            /// arrives, every line read into the main pipeline is delivered
-            /// before shutdown returns: batches in flight, in the output
-            /// queue and in the input channel are all drained.
+            /// Whatever the batch count, worker count, sink latency and moment
+            /// shutdown arrives, every line read into the main pipeline is
+            /// delivered before shutdown returns: batches in flight, in the
+            /// output queue and in the input channel are all drained. With
+            /// several workers and varying latency, acks arrive out of order.
             #[test]
             #[serial_test::serial]
             fn shutdown_delivers_every_line_read_into_main_pipeline(
                 lines in 1u64..48,
                 shutdown_pct in 0u64..=100,
-                sink_delay_ms in 0u64..4,
+                max_delay_ms in 0u64..4,
+                workers in 1usize..=4,
             ) {
                 let shutdown_after_delivered = lines * shutdown_pct / 100;
-                let (read, delivered) =
-                    run_shutdown_scenario(lines, shutdown_after_delivered, sink_delay_ms);
+                let (read, delivered) = run_shutdown_scenario(
+                    lines,
+                    shutdown_after_delivered,
+                    max_delay_ms,
+                    workers,
+                );
                 proptest::prop_assert!(delivered >= shutdown_after_delivered);
                 proptest::prop_assert_eq!(
                     delivered, read,
