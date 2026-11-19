@@ -1468,6 +1468,8 @@ mod tests {
 
             let metrics = Arc::clone(pipeline.metrics());
             let shutdown = CancellationToken::new();
+            let pipeline_shutdown = CancellationToken::new();
+            let observed_shutdown = pipeline_shutdown.clone();
             let sd = shutdown.clone();
             let gate = release.clone();
             let entered = Arc::clone(&sink_entered);
@@ -1492,13 +1494,16 @@ mod tests {
                 }
                 let queued = metrics.channel_depth.load(Ordering::Relaxed);
                 sd.cancel();
+                // Keep the sink blocked until the driver has entered its
+                // shutdown arm, so the queued batches are still in the channel
+                // when it decides what to do with the running future.
+                observed_shutdown.cancelled().await;
                 gate.cancel();
                 queued
             });
 
             // Keep the sender alive so the reload arm never fires.
             let (_reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
-            let pipeline_shutdown = CancellationToken::new();
             let exit = tokio::time::timeout(
                 Duration::from_secs(20),
                 drive_main_pipeline(
