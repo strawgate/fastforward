@@ -8,7 +8,7 @@ use ffwd_types::pipeline::SourceId;
 use super::glob::expand_glob_patterns;
 use super::identity::{FileIdentity, identify_file};
 use super::reader::FileReader;
-use super::state::shutdown_should_emit_eof;
+use super::state::{next_truncation_generation, shutdown_should_emit_eof};
 use super::tailer::TailEvent;
 
 fn mark_watch_dir_result(path: &Path, result: io::Result<()>) -> bool {
@@ -162,8 +162,24 @@ impl FileDiscovery {
                     path: path.clone(),
                     source_id: pre_rotate_source_id,
                 });
-                let _ = reader.files.remove(path);
+                // A rewrite of the same inode replaces the file's contents in
+                // place, like a truncation: keep advancing its generation so
+                // the new contents never reuse an id that older contents
+                // were checkpointed under.
+                let same_inode_generation = reader
+                    .files
+                    .remove(path)
+                    .map(|old| (old.identity.device, old.identity.inode, old.generation));
                 had_error |= mark_open_result(path, "rotation", reader.open_file_at(path, false));
+                if let Some((device, inode, generation)) = same_inode_generation
+                    && let Some(reopened) = reader.files.get_mut(path)
+                    && reopened.identity.device == device
+                    && reopened.identity.inode == inode
+                {
+                    reopened.generation = reopened
+                        .generation
+                        .max(next_truncation_generation(generation));
+                }
             } else if is_new {
                 had_error |= mark_open_result(
                     path,
@@ -369,6 +385,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 111,
                     inode: 222,
@@ -461,7 +478,7 @@ mod tests {
 
         let tailed = reader.files.get(&path).expect("tailed file");
         assert_eq!(tailed.fingerprint_len, 32);
-        let source_id = tailed.identity.source_id();
+        let source_id = tailed.source_id();
 
         fs::write(&path, b"LINE-00000000\nrewritten-after-promoted-window\n").unwrap();
 
@@ -600,6 +617,7 @@ mod tests {
         reader.files.insert(
             path.clone(),
             TailedFile {
+                generation: 0,
                 comparison_fingerprint: stale_identity.fingerprint,
                 identity: stale_identity,
                 fingerprint_len: 1024,

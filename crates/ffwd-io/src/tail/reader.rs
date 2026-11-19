@@ -6,8 +6,13 @@ use std::time::{Duration, Instant};
 
 use ffwd_types::pipeline::SourceId;
 
-use super::identity::{ByteOffset, FileIdentity, compute_fingerprint, identify_open_file};
-use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState};
+use super::identity::{
+    ByteOffset, FileIdentity, compute_fingerprint, identify_open_file, truncation_generation_of,
+};
+use super::state::{
+    EOF_IDLE_POLLS_BEFORE_EMIT, EofState, next_truncation_generation,
+    should_adopt_restored_generation,
+};
 use super::tailer::{TailConfig, TailEvent};
 
 /// State tracked per tailed file.
@@ -79,6 +84,32 @@ fn evicted_matches_open_file(
     Ok(evicted.comparison_fingerprint == current_identity.fingerprint)
 }
 
+/// Seek an open file to a restored checkpoint offset.
+///
+/// An offset past the end of the file means the file shrank since the
+/// checkpoint was written, so reading restarts at 0.
+fn restore_active_offset(
+    tailed: &mut TailedFile,
+    source_id: SourceId,
+    offset: u64,
+) -> io::Result<()> {
+    let file_size = tailed.file.metadata()?.len();
+    let safe_offset = if offset > file_size {
+        tracing::warn!(
+            source_id = source_id.0,
+            saved_offset = offset,
+            file_size,
+            "checkpoint source offset exceeds file size — resetting to 0"
+        );
+        0
+    } else {
+        offset
+    };
+    tailed.offset = safe_offset;
+    tailed.file.seek(SeekFrom::Start(safe_offset))?;
+    Ok(())
+}
+
 /// Owns the open file descriptors, read buffer, and byte-level I/O.
 pub(super) struct FileReader {
     pub(super) files: HashMap<PathBuf, TailedFile>,
@@ -117,15 +148,18 @@ impl FileReader {
             if source_id == SourceId(0) {
                 return None;
             }
+            // Compare base identities: a truncated file's stored id includes
+            // its truncation generation, which a fresh open does not know.
             let match_key = self
                 .evicted_offsets
                 .iter()
-                .find(|(_, e)| e.source_id == source_id)
+                .find(|(_, e)| e.identity.source_id() == source_id)
                 .map(|(k, _)| k.clone())?;
             self.evicted_offsets.remove(&match_key)
         });
 
         let mut stored_identity = identity.clone();
+        let mut stored_generation = 0;
         let mut stored_comparison_fingerprint = identity.fingerprint;
         let mut stored_fingerprint_len = fingerprint_len;
         let mut stored_eof_state = EofState::default();
@@ -138,6 +172,7 @@ impl FileReader {
                 self.config.fingerprint_bytes,
             )? {
                 stored_identity = evicted.identity.clone();
+                stored_generation = evicted.generation;
                 stored_comparison_fingerprint = evicted.comparison_fingerprint;
                 stored_fingerprint_len = evicted.fingerprint_len;
                 stored_eof_state = evicted.eof_state;
@@ -156,10 +191,21 @@ impl FileReader {
                 && evicted.identity.inode == identity.inode
             {
                 // Empty-file sentinel case: fingerprint can legitimately change
-                // from 0 to non-zero when data is first appended.
+                // from 0 to non-zero when data is first appended. Keep the
+                // generation: a file truncated to empty already moved to a new
+                // one, and the appended bytes belong to it.
+                stored_generation = evicted.generation;
                 0
             } else {
                 tracing::warn!(path = %path.display(), evicted_identity = ?evicted.identity, current_identity = ?identity, "evicted offset identity mismatch — ignoring saved offset");
+                if evicted.identity.device == identity.device
+                    && evicted.identity.inode == identity.inode
+                {
+                    // Same inode, different contents: rewritten in place while
+                    // evicted. Advance the generation like a truncation so the
+                    // new contents never reuse an older contents' id.
+                    stored_generation = next_truncation_generation(evicted.generation);
+                }
                 if start_from_end {
                     file.seek(SeekFrom::End(0))?
                 } else {
@@ -176,6 +222,7 @@ impl FileReader {
             path.to_path_buf(),
             TailedFile {
                 identity: stored_identity,
+                generation: stored_generation,
                 comparison_fingerprint: stored_comparison_fingerprint,
                 fingerprint_len: stored_fingerprint_len,
                 file,
@@ -347,7 +394,7 @@ impl FileReader {
             let to_remove = self.files.len() - max_open;
             for (path, _) in by_age.into_iter().take(to_remove) {
                 if let Some(tailed) = self.files.remove(&path) {
-                    let source_id = tailed.identity.source_id();
+                    let source_id = tailed.source_id();
                     // NOTE: evicted_offsets has no size bound. When log rotation
                     // creates files faster than max_open can accommodate, each
                     // evicted file's offset state is moved here and never freed
@@ -358,6 +405,7 @@ impl FileReader {
                         path.clone(),
                         EvictedFile {
                             identity: tailed.identity,
+                            generation: tailed.generation,
                             comparison_fingerprint: tailed.comparison_fingerprint,
                             fingerprint_len: tailed.fingerprint_len,
                             eof_state: tailed.eof_state,
@@ -405,21 +453,8 @@ impl FileReader {
             return Ok(());
         }
         for tailed in self.files.values_mut() {
-            if tailed.identity.source_id() == source_id {
-                let file_size = tailed.file.metadata()?.len();
-                let safe_offset = if offset > file_size {
-                    tracing::warn!(
-                        source_id = source_id.0,
-                        saved_offset = offset,
-                        file_size,
-                        "checkpoint source offset exceeds file size — resetting to 0"
-                    );
-                    0
-                } else {
-                    offset
-                };
-                tailed.offset = safe_offset;
-                tailed.file.seek(SeekFrom::Start(safe_offset))?;
+            if tailed.source_id() == source_id {
+                restore_active_offset(tailed, source_id, offset)?;
                 return Ok(());
             }
         }
@@ -428,6 +463,36 @@ impl FileReader {
                 evicted.offset = offset;
                 return Ok(());
             }
+        }
+
+        // No exact match. The checkpoint may belong to a later truncation
+        // generation of a file that was reopened (for example after a
+        // restart), which starts again at generation 0. Adopt the newest
+        // generation seen; checkpoints from older generations describe
+        // contents the file no longer has and are ignored.
+        for tailed in self.files.values_mut() {
+            let Some(generation) = truncation_generation_of(tailed.identity.source_id(), source_id)
+            else {
+                continue;
+            };
+            if should_adopt_restored_generation(tailed.generation, generation) {
+                tailed.generation = generation;
+                restore_active_offset(tailed, source_id, offset)?;
+            }
+            return Ok(());
+        }
+        for evicted in self.evicted_offsets.values_mut() {
+            let Some(generation) =
+                truncation_generation_of(evicted.identity.source_id(), source_id)
+            else {
+                continue;
+            };
+            if should_adopt_restored_generation(evicted.generation, generation) {
+                evicted.generation = generation;
+                evicted.source_id = source_id;
+                evicted.offset = offset;
+            }
+            return Ok(());
         }
         Ok(())
     }
@@ -438,7 +503,7 @@ impl FileReader {
 
     pub(super) fn source_id_for_path(&self, path: &Path) -> Option<SourceId> {
         self.files.get(path).and_then(|tailed| {
-            let sid = tailed.identity.source_id();
+            let sid = tailed.source_id();
             if sid == SourceId(0) { None } else { Some(sid) }
         })
     }
@@ -448,7 +513,7 @@ impl FileReader {
             .files
             .iter()
             .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
-            .map(|(_, tailed)| (tailed.identity.source_id(), ByteOffset(tailed.offset)));
+            .map(|(_, tailed)| (tailed.source_id(), ByteOffset(tailed.offset)));
 
         let evicted = self
             .evicted_offsets
@@ -464,7 +529,7 @@ impl FileReader {
             .files
             .iter()
             .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
-            .map(|(path, tailed)| (tailed.identity.source_id(), path.clone()));
+            .map(|(path, tailed)| (tailed.source_id(), path.clone()));
 
         let evicted = self
             .evicted_offsets
@@ -520,6 +585,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -553,6 +619,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -590,6 +657,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -627,6 +695,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -876,6 +945,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 comparison_fingerprint: identity.fingerprint,
                 identity,
                 fingerprint_len: 3,
@@ -916,6 +986,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 comparison_fingerprint: identity.fingerprint,
                 identity,
                 fingerprint_len: 6,
@@ -957,6 +1028,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 999,
                     inode: 999,
@@ -1036,6 +1108,176 @@ mod tests {
         );
     }
 
+    /// Open `path` in a reader with a 16-byte fingerprint window, read it,
+    /// then rewrite it shorter with the same leading bytes and read again.
+    /// Returns the reader and the source id from before the truncation.
+    fn reader_after_same_prefix_truncation(path: &Path) -> (FileReader, SourceId) {
+        fs::write(path, b"same-leading-bytes original contents\n").unwrap();
+        let mut reader = FileReader {
+            config: TailConfig {
+                fingerprint_bytes: 16,
+                ..TailConfig::default()
+            },
+            ..test_reader()
+        };
+        reader.open_file_at(path, false).unwrap();
+        assert!(matches!(
+            reader.read_new_data(path).unwrap(),
+            ReadResult::Data(_)
+        ));
+        let before = reader.source_id_for_path(path).unwrap();
+
+        fs::write(path, b"same-leading-bytes new\n").unwrap();
+        assert!(matches!(
+            reader.read_new_data(path).unwrap(),
+            ReadResult::TruncatedThenData(_)
+        ));
+        (reader, before)
+    }
+
+    #[test]
+    fn truncation_with_same_leading_bytes_gets_new_source_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same-prefix.log");
+        let (reader, before) = reader_after_same_prefix_truncation(&path);
+
+        let tailed = reader.files.get(&path).unwrap();
+        assert_eq!(
+            tailed.identity.source_id(),
+            before,
+            "same device, inode and leading bytes keep the base identity"
+        );
+        assert_eq!(tailed.generation, 1);
+        let after = reader.source_id_for_path(&path).unwrap();
+        assert_ne!(after, before, "truncated file must get a new source id");
+        assert_eq!(
+            reader.file_offsets(),
+            vec![(after, ByteOffset(23))],
+            "checkpoint data must report only the new source, from offset 0"
+        );
+    }
+
+    #[test]
+    fn eviction_keeps_truncation_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evict-generation.log");
+        let (mut reader, _) = reader_after_same_prefix_truncation(&path);
+        let after = reader.source_id_for_path(&path).unwrap();
+
+        reader.evict_lru(0);
+        assert_eq!(reader.file_offsets(), vec![(after, ByteOffset(23))]);
+
+        reader.open_file_at(&path, false).unwrap();
+        assert_eq!(reader.source_id_for_path(&path), Some(after));
+        assert_eq!(reader.get_offset(&path), Some(23));
+    }
+
+    #[test]
+    fn evicted_truncate_to_empty_keeps_generation_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evict-empty.log");
+        let contents = b"same-leading-bytes original contents\n";
+        fs::write(&path, contents).unwrap();
+        let mut reader = FileReader {
+            config: TailConfig {
+                fingerprint_bytes: 16,
+                ..TailConfig::default()
+            },
+            ..test_reader()
+        };
+        reader.open_file_at(&path, false).unwrap();
+        assert!(matches!(
+            reader.read_new_data(&path).unwrap(),
+            ReadResult::Data(_)
+        ));
+        let original = reader.source_id_for_path(&path).unwrap();
+
+        // Truncate to empty, observe it, then evict while empty.
+        fs::write(&path, b"").unwrap();
+        assert!(matches!(
+            reader.read_new_data(&path).unwrap(),
+            ReadResult::Truncated
+        ));
+        reader.evict_lru(0);
+
+        // The same leading bytes come back while the file is evicted.
+        fs::write(&path, contents).unwrap();
+        reader.open_file_at(&path, false).unwrap();
+        let reopened = reader.source_id_for_path(&path).unwrap();
+        assert_ne!(reopened, original, "rewritten contents must get a new id");
+        assert_eq!(reader.files.get(&path).unwrap().generation, 1);
+    }
+
+    #[test]
+    fn evicted_same_inode_rewrite_advances_generation_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evict-rewrite.log");
+        let (mut reader, _) = reader_after_same_prefix_truncation(&path);
+        reader.evict_lru(0);
+
+        // Rewritten in place with different leading bytes while evicted.
+        fs::write(&path, b"different-leading-bytes now\n").unwrap();
+        reader.open_file_at(&path, false).unwrap();
+        assert_eq!(reader.files.get(&path).unwrap().generation, 2);
+    }
+
+    #[test]
+    fn restore_prefers_newest_truncation_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restore-generation.log");
+        let (reader, before) = reader_after_same_prefix_truncation(&path);
+        let after = reader.source_id_for_path(&path).unwrap();
+        drop(reader);
+
+        // The file grows past the old contents' end, so the stale checkpoint
+        // for the first generation would land inside the new data.
+        fs::write(
+            &path,
+            b"same-leading-bytes new\nmore data appended after restart\n",
+        )
+        .unwrap();
+
+        for stale_first in [true, false] {
+            let mut restarted = FileReader {
+                config: TailConfig {
+                    fingerprint_bytes: 16,
+                    ..TailConfig::default()
+                },
+                ..test_reader()
+            };
+            restarted.open_file_at(&path, false).unwrap();
+            if stale_first {
+                restarted.set_offset_by_source(before, 37).unwrap();
+                restarted.set_offset_by_source(after, 23).unwrap();
+            } else {
+                restarted.set_offset_by_source(after, 23).unwrap();
+                restarted.set_offset_by_source(before, 37).unwrap();
+            }
+            assert_eq!(
+                restarted.get_offset(&path),
+                Some(23),
+                "restore must resume from the newest generation (stale_first={stale_first})"
+            );
+            assert_eq!(restarted.source_id_for_path(&path), Some(after));
+        }
+    }
+
+    #[test]
+    fn restore_of_unrelated_source_id_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restore-unrelated.log");
+        fs::write(&path, b"some contents here\n").unwrap();
+        let mut reader = test_reader();
+        reader.open_file_at(&path, false).unwrap();
+        let before = reader.source_id_for_path(&path);
+
+        reader
+            .set_offset_by_source(SourceId(0x0FED_CBA9_8765_4321), 5)
+            .unwrap();
+        assert_eq!(reader.get_offset(&path), Some(0));
+        assert_eq!(reader.source_id_for_path(&path), before);
+    }
+
     #[test]
     fn truncation_refreshes_comparison_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
@@ -1106,6 +1348,7 @@ mod tests {
         reader.files.insert(
             path,
             TailedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -1138,6 +1381,7 @@ mod tests {
         reader.files.insert(
             path.clone(),
             TailedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,
@@ -1177,6 +1421,7 @@ mod tests {
         reader.evicted_offsets.insert(
             PathBuf::from("other.log"),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 1,
                     inode: 2,

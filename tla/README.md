@@ -424,6 +424,10 @@ Models the pure tail reducer behavior extracted in `crates/ffwd-io/src/tail/stat
 - graceful-shutdown EOF gating (`fileOffset >= fileSize`)
 - EOF reset on data/truncate paths
 - error backoff growth/cap/reset (`consecutive_error_polls`, `backoff_ms`)
+- truncation generations (`next_truncation_generation`,
+  `should_adopt_restored_generation`): a truncation rewinds to 0 and moves the
+  file to a new generation, so it gets a new `SourceId`; restores only adopt
+  newer generations
 
 ### What it proves
 
@@ -435,6 +439,9 @@ Models the pure tail reducer behavior extracted in `crates/ffwd-io/src/tail/stat
 | `ShutdownBehindSuppressesEof` | Safety | shutdown must suppress terminal EOF while unread file bytes remain |
 | `BackoffZeroIffNoErrors` | Safety | backoff state is cleared exactly when error streak is zero |
 | `BackoffDelayConsistent` | Safety | backoff delay follows the bounded exponential schedule |
+| `TruncateRewindsAndResetsEof` | Safety | truncation rewinds the offset to 0 and clears EOF state |
+| `GenerationNeverDecreases` | Safety (action) | neither truncation nor restore moves a file to an older generation, so offsets for one `SourceId` never go back |
+| `TruncateAdvancesGeneration` | Safety (action) | every truncation moves to the next generation (saturating at the cap) |
 
 ### Run
 

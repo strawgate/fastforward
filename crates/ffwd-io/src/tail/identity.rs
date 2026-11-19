@@ -4,6 +4,8 @@ use std::path::Path;
 
 use ffwd_types::pipeline::SourceId;
 
+use super::state::MAX_TRUNCATION_GENERATION;
+
 /// Byte offset within a file. Newtype prevents mixing with SourceId.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteOffset(pub u64);
@@ -33,6 +35,64 @@ impl FileIdentity {
         let fallback = source_digest(self.device, self.inode, self.fingerprint, 1);
         source_id_from_digests(primary, fallback)
     }
+}
+
+/// Odd multiplier that spreads truncation generations across the id space.
+///
+/// Being odd makes it invertible modulo 2^64, so a stored generation id can be
+/// mapped back to its generation number without probing (see
+/// [`truncation_generation_of`]).
+const GENERATION_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Multiplicative inverse of [`GENERATION_STRIDE`] modulo 2^64.
+const GENERATION_STRIDE_INV: u64 = modular_inverse_u64(GENERATION_STRIDE);
+
+/// Newton iteration for the inverse of an odd `u64` modulo 2^64.
+const fn modular_inverse_u64(value: u64) -> u64 {
+    // Each step doubles the number of correct low bits: 3 -> 6 -> ... -> 96.
+    let mut inverse = value;
+    let mut step = 0;
+    while step < 5 {
+        inverse = inverse.wrapping_mul(2u64.wrapping_sub(value.wrapping_mul(inverse)));
+        step += 1;
+    }
+    inverse
+}
+
+/// Return the `SourceId` of a file after `generation` detected truncations.
+///
+/// `base` is [`FileIdentity::source_id`]. Generation 0 is the base id itself,
+/// so files that were never truncated keep the ids existing checkpoints use.
+/// Each later generation is a distinct id, so a file that is truncated and
+/// rewritten with the same leading bytes is checkpointed as a new source
+/// instead of inheriting the offsets of its previous contents.
+pub(super) fn truncation_generation_source_id(base: SourceId, generation: u64) -> SourceId {
+    if base == SourceId(0) || generation == 0 {
+        return base;
+    }
+    let id = base
+        .0
+        .wrapping_add(generation.wrapping_mul(GENERATION_STRIDE));
+    // Keep SourceId(0) reserved for the empty-file sentinel. The odds of
+    // landing here are 2^-64; the only cost is that a restore cannot decode
+    // this generation and falls back to the base id.
+    if id == 0 { SourceId(1) } else { SourceId(id) }
+}
+
+/// Decode which truncation generation of `base` produced `candidate`.
+///
+/// Returns `Some(generation)` when `candidate` equals
+/// [`truncation_generation_source_id`]`(base, generation)` for a generation in
+/// `0..=MAX_TRUNCATION_GENERATION`, and `None` otherwise.
+pub(super) fn truncation_generation_of(base: SourceId, candidate: SourceId) -> Option<u64> {
+    if base == SourceId(0) || candidate == SourceId(0) {
+        return None;
+    }
+    let generation = candidate
+        .0
+        .wrapping_sub(base.0)
+        .wrapping_mul(GENERATION_STRIDE_INV);
+    (generation <= MAX_TRUNCATION_GENERATION).then_some(generation)
 }
 
 fn source_digest(device: u64, inode: u64, fingerprint: u64, seed: u64) -> u64 {
@@ -116,7 +176,10 @@ pub(super) fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_fingerprint, source_id_from_digests};
+    use super::{
+        GENERATION_STRIDE, GENERATION_STRIDE_INV, MAX_TRUNCATION_GENERATION, compute_fingerprint,
+        source_id_from_digests, truncation_generation_of, truncation_generation_source_id,
+    };
     use ffwd_types::pipeline::SourceId;
     use std::io::Write;
 
@@ -133,6 +196,52 @@ mod tests {
     #[test]
     fn source_id_uses_nonzero_sentinel_when_both_digests_are_zero() {
         assert_eq!(source_id_from_digests(0, 0), SourceId(1));
+    }
+
+    #[test]
+    fn generation_stride_inverse_is_exact() {
+        assert_eq!(GENERATION_STRIDE.wrapping_mul(GENERATION_STRIDE_INV), 1);
+    }
+
+    #[test]
+    fn generation_zero_keeps_base_source_id() {
+        let base = SourceId(0x1234_5678_9ABC_DEF0);
+        assert_eq!(truncation_generation_source_id(base, 0), base);
+        assert_eq!(truncation_generation_of(base, base), Some(0));
+    }
+
+    #[test]
+    fn truncation_generations_get_distinct_decodable_ids() {
+        let base = SourceId(0x1234_5678_9ABC_DEF0);
+        let mut seen = std::collections::HashSet::new();
+        for generation in [0, 1, 2, 3, 1000, MAX_TRUNCATION_GENERATION] {
+            let id = truncation_generation_source_id(base, generation);
+            assert_ne!(id, SourceId(0));
+            assert!(seen.insert(id), "generation {generation} reused an id");
+            assert_eq!(truncation_generation_of(base, id), Some(generation));
+        }
+    }
+
+    #[test]
+    fn empty_file_sentinel_has_no_generations() {
+        assert_eq!(truncation_generation_source_id(SourceId(0), 5), SourceId(0));
+        assert_eq!(truncation_generation_of(SourceId(0), SourceId(7)), None);
+    }
+
+    #[test]
+    fn unrelated_source_id_does_not_decode_as_generation() {
+        let base = SourceId(0x1234_5678_9ABC_DEF0);
+        let other = SourceId(0x0FED_CBA9_8765_4321);
+        assert_eq!(truncation_generation_of(base, other), None);
+    }
+
+    #[test]
+    fn far_generation_id_is_not_decoded() {
+        // Decodes as generation 81,837,719, past the bound, so a stale
+        // checkpoint from another file cannot be adopted.
+        let base = SourceId(0xd10c_ce99_2cf0_6c9f);
+        let unrelated = SourceId(0xb869_d299_7057_3302);
+        assert_eq!(truncation_generation_of(base, unrelated), None);
     }
 
     #[test]

@@ -154,11 +154,17 @@ invariants.
 nondecreasing checkpoints in creation order. The machine commits each batch's
 own checkpoint, so the committed checkpoint is monotonic only when that
 precondition holds. The TLA+ model has it built in: there `committed[s]` is a
-batch sequence number. Real inputs do not always satisfy it. When a tailed file
-is truncated, the reader resets its offset to 0 (`ffwd-io` `tail/lifecycle.rs`),
-and if the rewritten file keeps the same device, inode and leading bytes it
-keeps its `SourceId`, so later batches carry smaller offsets and the committed
-checkpoint goes back with them. The proof does not cover that path.
+batch sequence number. The file tailer keeps it across truncation: when a
+tailed file is truncated, the reader resets its offset to 0 and bumps the
+file's truncation generation (`ffwd-io` `tail/lifecycle.rs`), which gives the
+rewritten contents a new `SourceId` even when the device, inode and leading
+bytes are unchanged. Offsets for one `SourceId` therefore never go back.
+Restores decode the generation from a stored `SourceId` and resume from the
+newest generation, ignoring checkpoints of contents the file no longer has
+(`tail/identity.rs`). If the process stops after a truncation but before any
+batch of the new generation is committed, only the old generation's checkpoint
+exists and a restart resumes from it; this is part of the documented
+copytruncate race window.
 
 ### `BTreeMap` replaced by `ArrayMap` under Kani
 
@@ -250,6 +256,35 @@ Each source has its own `committed[s]`. A slow source doesn't block a fast sourc
 committing. Equivalent to per-partition independent offsets in Kafka. Differs from Flink's
 global checkpoint barrier, which is required for stateful stream processing but adds
 blocking a stateless forwarder should not need.
+
+### Truncated files get a new `SourceId` (truncation generations)
+
+**Context:** a tailed file's `SourceId` hashes its device, inode and first
+1024 bytes. A file truncated and rewritten with the same leading bytes kept its
+id, so checkpoints of the old contents (in flight, or persisted before a
+restart) could resume the new contents past unread data, and committed offsets
+for one id went backward.
+
+**Decision:** each detected truncation, and each same-inode rewrite seen on
+reopen, advances a per-file truncation generation (`tail/state.rs`
+`next_truncation_generation`). The id is `base + generation × odd stride
+(mod 2^64)` (`tail/identity.rs`). Generation 0 is the base id, so checkpoints
+from earlier versions restore unchanged. The stride is invertible, so a
+restore decodes a stored id's generation in O(1) and adopts only newer
+generations (`should_adopt_restored_generation`), whatever order the
+checkpoints arrive in. We did not add the base identity and generation to
+`SourceCheckpoint`: that would change the store format and make the runtime
+aware of file identities.
+
+**Consequences:** generations are capped at 2^16 (a file truncated more often
+keeps its last id), which keeps the chance that an unrelated stored id decodes
+as a generation at 2^-48 per (stored checkpoint, tailed file) pair. With
+`source_metadata: fastforward`, rows from a truncated file's new contents carry
+a new `source_id`. If the process stops after a truncation but before the new
+generation commits, a restart still resumes from the old generation's
+checkpoint (the copytruncate race window). Kani, proptest and
+`tla/TailLifecycle.tla` (`GenerationNeverDecreases`,
+`TruncateAdvancesGeneration`) cover the transitions.
 
 ### `fail()` is invisible to the pipeline machine
 
