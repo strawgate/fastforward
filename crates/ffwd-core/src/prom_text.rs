@@ -1669,6 +1669,50 @@ mod tests {
         assert_eq!(rows.len(), 3);
     }
 
+    /// Model of which sample values Prometheus' `parseFloat` accepts: Go's
+    /// `strconv.ParseFloat` without `p`, `P` or `_`. That leaves signed
+    /// `Inf`/`Infinity`, unsigned `NaN` (all case-insensitive) and decimal
+    /// `[+-]?(d+.?d*|.d+)([eE][+-]?d+)?` whose value does not overflow.
+    fn prometheus_accepts(s: &str) -> bool {
+        let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+        if unsigned.eq_ignore_ascii_case("inf") || unsigned.eq_ignore_ascii_case("infinity") {
+            return true;
+        }
+        if s.eq_ignore_ascii_case("nan") {
+            return true;
+        }
+        let b = unsigned.as_bytes();
+        let digits = |mut i: usize| {
+            let start = i;
+            while b.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            (i, i - start)
+        };
+        let (mut i, int_digits) = digits(0);
+        let mut frac_digits = 0;
+        if b.get(i) == Some(&b'.') {
+            (i, frac_digits) = digits(i + 1);
+        }
+        if int_digits + frac_digits == 0 {
+            return false;
+        }
+        if matches!(b.get(i), Some(b'e' | b'E')) {
+            i += 1;
+            if matches!(b.get(i), Some(b'+' | b'-')) {
+                i += 1;
+            }
+            let (end, exp_digits) = digits(i);
+            if exp_digits == 0 {
+                return false;
+            }
+            i = end;
+        }
+        // Go reports overflow as an error; the grammar check above is
+        // independent of `core`, which is only used for the range.
+        i == b.len() && s.parse::<f64>().is_ok_and(f64::is_finite)
+    }
+
     /// Expected results come from Prometheus' `parseFloat` (Go's
     /// `strconv.ParseFloat` after rejecting `p`, `P` and `_`); `None` is a
     /// Go error. A differential run over 200k random strings found no other
@@ -1861,6 +1905,22 @@ mod tests {
                 parse_prom_value(s.as_bytes()).map(f64::to_bits),
                 s.parse::<f64>().ok().map(f64::to_bits)
             );
+        }
+
+        /// Differential test against an independent model of Prometheus'
+        /// value grammar ([`prometheus_accepts`]). Strings mix digits, signs,
+        /// exponents, `Inf`/`NaN` letters and the hex/underscore characters
+        /// Prometheus rejects.
+        #[test]
+        fn value_acceptance_matches_prometheus_grammar(input in proptest::collection::vec(
+            prop::sample::select(b"0123456789.eE+-_xXpPiInNfFaAtTy".to_vec()), 1..12)
+        ) {
+            let s = core::str::from_utf8(&input).expect("ascii");
+            let parsed = parse_prom_value(&input);
+            prop_assert_eq!(parsed.is_some(), prometheus_accepts(s), "{}", s);
+            if let Some(v) = parsed.filter(|v| !v.is_nan()) {
+                prop_assert_eq!(Some(v.to_bits()), s.parse::<f64>().ok().map(f64::to_bits), "{}", s);
+            }
         }
 
         #[test]
