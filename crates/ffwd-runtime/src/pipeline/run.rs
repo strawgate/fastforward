@@ -277,12 +277,12 @@ impl Pipeline {
                     break;
                 }
             }
-        } else {
-            // Terminal paths intentionally stop accepting more input, but the
-            // receiver must still be closed before joining producers. Otherwise
-            // a producer blocked on the bounded channel can keep shutdown stuck.
-            drop(rx);
         }
+        // Close the receiver before joining producers on every path: terminal
+        // paths that skip the drain, and a drain that stops early because a
+        // batch hit a terminal processor or checkpoint path. Otherwise a
+        // producer blocked on the full bounded channel keeps shutdown stuck.
+        drop(rx);
 
         // All sender clones have now been dropped, so input threads/tasks can
         // be joined without risking a channel backpressure deadlock.
