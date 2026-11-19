@@ -9,7 +9,7 @@ use ffwd_types::pipeline::SourceId;
 use super::identity::{
     ByteOffset, FileIdentity, compute_fingerprint, identify_open_file, truncation_generation_of,
 };
-use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState};
+use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState, should_adopt_restored_generation};
 use super::tailer::{TailConfig, TailEvent};
 
 /// State tracked per tailed file.
@@ -461,7 +461,7 @@ impl FileReader {
             else {
                 continue;
             };
-            if generation > tailed.generation {
+            if should_adopt_restored_generation(tailed.generation, generation) {
                 tailed.generation = generation;
                 restore_active_offset(tailed, source_id, offset)?;
             }
@@ -473,7 +473,7 @@ impl FileReader {
             else {
                 continue;
             };
-            if generation > evicted.generation {
+            if should_adopt_restored_generation(evicted.generation, generation) {
                 evicted.generation = generation;
                 evicted.source_id = source_id;
                 evicted.offset = offset;

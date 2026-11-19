@@ -1,8 +1,9 @@
 #![cfg(kani)]
 
 use super::state::{
-    EOF_IDLE_POLLS_BEFORE_EMIT, EofModelState, MAX_BACKOFF_MS, backoff_delay_ms,
-    backoff_transition, eof_model_transition, shutdown_should_emit_eof,
+    EOF_IDLE_POLLS_BEFORE_EMIT, EofModelState, MAX_BACKOFF_MS, MAX_TRUNCATION_GENERATION,
+    backoff_delay_ms, backoff_transition, eof_model_transition, next_truncation_generation,
+    should_adopt_restored_generation, shutdown_should_emit_eof,
 };
 
 /// EndOfFile can only fire when we cross the idle-poll threshold for the first
@@ -163,4 +164,50 @@ fn verify_backoff_delay_is_monotonic_in_error_count() {
         );
     }
     kani::cover!(a < b, "strict growth case explored");
+}
+
+/// Truncation advances the generation by exactly one until the cap, then
+/// saturates. Mirrors `TailLifecycle.tla::TruncateStep`.
+#[kani::proof]
+fn verify_next_truncation_generation_advances_or_saturates() {
+    let generation: u64 = kani::any();
+    kani::assume(generation <= MAX_TRUNCATION_GENERATION);
+    let next = next_truncation_generation(generation);
+
+    assert!(
+        next <= MAX_TRUNCATION_GENERATION,
+        "generation must stay bounded"
+    );
+    if generation < MAX_TRUNCATION_GENERATION {
+        assert_eq!(
+            next,
+            generation + 1,
+            "truncation must advance the generation"
+        );
+    } else {
+        assert_eq!(next, MAX_TRUNCATION_GENERATION, "cap must saturate");
+    }
+    kani::cover!(
+        generation < MAX_TRUNCATION_GENERATION,
+        "generation advances"
+    );
+    kani::cover!(
+        generation == MAX_TRUNCATION_GENERATION,
+        "generation saturates"
+    );
+}
+
+/// Restores never move a file to an older generation, and always move it to
+/// a newer one. Mirrors `TailLifecycle.tla::RestoreStep`.
+#[kani::proof]
+fn verify_restore_adopts_only_newer_generations() {
+    let current: u64 = kani::any();
+    let stored: u64 = kani::any();
+    let adopt = should_adopt_restored_generation(current, stored);
+    let next = if adopt { stored } else { current };
+
+    assert!(next >= current, "restore must not lower the generation");
+    assert_eq!(adopt, stored > current, "newer generations must be adopted");
+    kani::cover!(adopt, "newer generation adopted");
+    kani::cover!(!adopt && stored < current, "older generation ignored");
 }

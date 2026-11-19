@@ -4,6 +4,8 @@ use std::path::Path;
 
 use ffwd_types::pipeline::SourceId;
 
+use super::state::MAX_TRUNCATION_GENERATION;
+
 /// Byte offset within a file. Newtype prevents mixing with SourceId.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteOffset(pub u64);
@@ -44,17 +46,6 @@ const GENERATION_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Multiplicative inverse of [`GENERATION_STRIDE`] modulo 2^64.
 const GENERATION_STRIDE_INV: u64 = modular_inverse_u64(GENERATION_STRIDE);
-
-/// Highest truncation generation a file can reach. Larger counts saturate,
-/// so a file truncated more often than this keeps its last id.
-///
-/// Restores decode a stored id as a generation of a tailed file when it falls
-/// in `0..=MAX_TRUNCATION_GENERATION`, so an unrelated stored id matches by
-/// chance with probability 2^-48 per (stored checkpoint, tailed file) pair.
-/// Checkpoint stores keep stale entries indefinitely, so the bound is kept
-/// small: even 10^9 pairs give a false-match chance below 10^-5, while 65,535
-/// truncations is more than an hourly-truncated file reaches in 7 years.
-pub(super) const MAX_TRUNCATION_GENERATION: u64 = u16::MAX as u64;
 
 /// Newton iteration for the inverse of an odd `u64` modulo 2^64.
 const fn modular_inverse_u64(value: u64) -> u64 {

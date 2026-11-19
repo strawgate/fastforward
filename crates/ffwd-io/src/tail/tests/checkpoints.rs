@@ -271,6 +271,55 @@ fn test_truncated_rewrite_with_same_leading_bytes_is_new_source() {
     );
 }
 
+/// A file truncated to empty and polled before new bytes arrive is reopened
+/// by rotation detection. Rewriting the same leading bytes afterwards must
+/// still produce a new source id, not the id of the original contents.
+#[test]
+fn test_truncate_to_empty_then_same_bytes_is_new_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("empty_then_same.log");
+    let contents = format!("{}\nline\n", "H".repeat(1100));
+    fs::write(&log_path, contents.as_bytes()).unwrap();
+
+    let config = TailConfig {
+        start_from_end: false,
+        poll_interval_ms: 10,
+        ..Default::default()
+    };
+    let mut tailer =
+        FileTailer::new(std::slice::from_ref(&log_path), config, create_test_stats()).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    tailer.poll().unwrap();
+    let original_source_id = tailer
+        .source_id_for_path(&log_path)
+        .expect("non-empty file should have a source id");
+
+    // Truncate in place (same inode) and poll while the file is empty.
+    File::create(&log_path).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    tailer.poll().unwrap();
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&log_path)
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let events = tailer.poll().unwrap();
+    let data_source_id = events
+        .iter()
+        .find_map(|e| match e {
+            TailEvent::Data { source_id, .. } => *source_id,
+            _ => None,
+        })
+        .expect("should read the rewritten contents");
+    assert_ne!(
+        data_source_id, original_source_id,
+        "rewritten contents must not reuse the original contents' id"
+    );
+}
+
 /// Regression test: glob-discovered file deletions must shrink watch_paths
 /// so the list does not grow unboundedly with file churn. (#810)
 #[cfg(unix)]

@@ -11,5 +11,6 @@ MCMaxOffset == 4
 MCMaxErrors == 8
 MCInitialBackoff == 100
 MCMaxBackoff == 5000
+MCMaxGeneration == 3
 
 ======================================================================

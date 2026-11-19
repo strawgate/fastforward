@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use ffwd_types::pipeline::SourceId;
 
-use super::identity::{FileIdentity, MAX_TRUNCATION_GENERATION, truncation_generation_source_id};
-use super::state::EofState;
+use super::identity::{FileIdentity, truncation_generation_source_id};
+use super::state::{EofState, next_truncation_generation};
 
 /// Untracked state: file is not known to the tailer.
 pub struct Untracked;
@@ -94,10 +94,7 @@ impl Active {
             // would let checkpoints from the previous contents (still in
             // flight, or persisted before a crash) resume the new contents
             // past data that was never read.
-            self.generation = self
-                .generation
-                .saturating_add(1)
-                .min(MAX_TRUNCATION_GENERATION);
+            self.generation = next_truncation_generation(self.generation);
             self.offset = 0;
             self.read_buf.clear();
             self.eof_state.on_data();

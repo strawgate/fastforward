@@ -77,6 +77,38 @@ impl EofState {
     }
 }
 
+/// Highest truncation generation a file can reach. Larger counts saturate,
+/// so a file truncated more often than this keeps its last id.
+///
+/// Restores decode a stored id as a generation of a tailed file when it falls
+/// in `0..=MAX_TRUNCATION_GENERATION`, so an unrelated stored id matches by
+/// chance with probability 2^-48 per (stored checkpoint, tailed file) pair.
+/// Checkpoint stores keep stale entries indefinitely, so the bound is kept
+/// small: even 10^9 pairs give a false-match chance below 10^-5, while 65,535
+/// truncations is more than an hourly-truncated file reaches in 7 years.
+pub(super) const MAX_TRUNCATION_GENERATION: u64 = u16::MAX as u64;
+
+/// Pure truncation transition: the generation a file moves to when its
+/// contents are replaced in place (truncation, or a same-inode rewrite).
+///
+/// Increments by one and saturates at [`MAX_TRUNCATION_GENERATION`].
+pub(super) fn next_truncation_generation(generation: u64) -> u64 {
+    generation.saturating_add(1).min(MAX_TRUNCATION_GENERATION)
+}
+
+/// Pure restore decision: whether a checkpoint stored for `stored_generation`
+/// of a file should replace the file's current restore state.
+///
+/// Only a strictly newer generation is adopted. Older generations describe
+/// contents the file no longer has, so restoring them could skip unread data;
+/// the same generation is an exact id match and handled by the caller.
+pub(super) fn should_adopt_restored_generation(
+    current_generation: u64,
+    stored_generation: u64,
+) -> bool {
+    stored_generation > current_generation
+}
+
 /// Compute the bounded exponential backoff delay for a given error streak.
 pub(super) fn backoff_delay_ms(consecutive_error_polls: u32) -> u64 {
     if consecutive_error_polls == 0 {
@@ -225,6 +257,7 @@ mod tests {
         file_size: u64,
         consecutive_errors: u32,
         backoff_ms: u64,
+        generation: u64,
         last_action: &'static str,
     }
 
@@ -237,6 +270,7 @@ mod tests {
                 file_size: 0,
                 consecutive_errors: 0,
                 backoff_ms: 0,
+                generation: 0,
                 last_action: "Init",
             }
         }
@@ -244,7 +278,7 @@ mod tests {
 
     /// TLA+ action indices matching Next == \/ DataStep \/ NoDataEmit \/ ...
     fn arb_action() -> impl proptest::strategy::Strategy<Value = u8> {
-        0u8..7
+        0u8..9
     }
 
     fn apply_tla_action(s: &mut TlaState, action: u8, offset: u64, size: u64) {
@@ -325,6 +359,32 @@ mod tests {
                     s.last_action = "Clean";
                 }
             }
+            7 => {
+                // TruncateStep
+                s.file_offset = 0;
+                let (next, _) = eof_model_transition(
+                    EofModelState {
+                        emitted: s.eof_emitted,
+                        idle_polls: s.idle_polls,
+                    },
+                    true,
+                    false,
+                );
+                s.eof_emitted = next.emitted;
+                s.idle_polls = next.idle_polls;
+                s.generation = next_truncation_generation(s.generation);
+                s.last_action = "Truncate";
+            }
+            8 => {
+                // RestoreStep — `size` doubles as the stored generation.
+                if should_adopt_restored_generation(s.generation, size) {
+                    s.generation = size;
+                    s.file_offset = offset;
+                    s.last_action = "Restore";
+                } else {
+                    s.last_action = "RestoreIgnored";
+                }
+            }
             _ => {}
         }
     }
@@ -373,6 +433,14 @@ mod tests {
                 s.file_size
             );
         }
+        // TruncateRewindsAndResetsEof
+        if s.last_action == "Truncate" {
+            prop_assert_eq!(s.file_offset, 0, "TruncateRewindsAndResetsEof: offset");
+            prop_assert!(!s.eof_emitted, "TruncateRewindsAndResetsEof: eof");
+            prop_assert_eq!(s.idle_polls, 0, "TruncateRewindsAndResetsEof: idle");
+        }
+        // TypeOK: generation bounded
+        prop_assert!(s.generation <= MAX_TRUNCATION_GENERATION);
         // BackoffZeroIffNoErrors
         prop_assert_eq!(
             s.consecutive_errors == 0,
@@ -409,9 +477,37 @@ mod tests {
         ) {
             let mut state = TlaState::init();
             for (action, offset, size) in actions {
+                let previous_generation = state.generation;
                 apply_tla_action(&mut state, action, offset, size);
                 assert_tla_invariants(&state)?;
+                // GenerationNeverDecreases
+                prop_assert!(state.generation >= previous_generation);
+                // TruncateAdvancesGeneration
+                if action == 7 {
+                    prop_assert_eq!(
+                        state.generation,
+                        next_truncation_generation(previous_generation)
+                    );
+                }
             }
+        }
+    }
+
+    proptest! {
+        /// Restoring stored checkpoints in any order ends on the newest
+        /// generation, which is what `FileReader::set_offset_by_source`
+        /// relies on (checkpoints come back in source-id order).
+        #[test]
+        fn restore_ends_on_newest_generation_in_any_order(
+            stored in proptest::collection::vec(0u64..64, 0..16)
+        ) {
+            let mut current = 0u64;
+            for generation in &stored {
+                if should_adopt_restored_generation(current, *generation) {
+                    current = *generation;
+                }
+            }
+            prop_assert_eq!(current, stored.iter().copied().max().unwrap_or(0));
         }
     }
 
