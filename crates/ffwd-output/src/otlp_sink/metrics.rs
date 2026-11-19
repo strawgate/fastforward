@@ -565,19 +565,29 @@ fn group_rows<'a>(cols: &Columns<'a>, num_rows: usize) -> Vec<Resource<'a>> {
             }
         };
         let g = &mut fam.groups[gi];
-        g.start_ms = g.start_ms.max(cols.start_ms(row));
         let bound = skip
             .and_then(|i| cols.labels[i].1.get(row))
             .and_then(|s| parse_prom_value(s.as_bytes()));
-        match role {
+        // Only rows that contribute a value count toward the start time.
+        let contributes = match role {
             Role::Bucket | Role::Quantile => {
                 if let Some(b) = bound {
                     g.entries.push((b, value));
                 }
+                bound.is_some()
             }
-            Role::Sum => g.sum = Some(value),
-            Role::Count => g.count = Some(value),
-            Role::Point | Role::Skip => {}
+            Role::Sum => {
+                g.sum = Some(value);
+                true
+            }
+            Role::Count => {
+                g.count = Some(value);
+                true
+            }
+            Role::Point | Role::Skip => false,
+        };
+        if contributes {
+            g.start_ms = g.start_ms.max(cols.start_ms(row));
         }
     }
     resources
@@ -1473,6 +1483,25 @@ mod tests {
             panic!("summary")
         };
         assert_eq!(sm.data_points[0].start_time_unix_nano, 5_000_000);
+    }
+
+    #[test]
+    fn rows_left_out_of_a_point_do_not_set_its_start_time() {
+        let h = Some("histogram");
+        // A bucket without `le` is ignored, and so is its start time.
+        let b = with_starts(
+            &[
+                ("lat_bucket", 1.0, Some(9), h, &[]),
+                ("lat_count", 1.0, Some(9), h, &[]),
+            ],
+            &[Some(8), Some(2)],
+        );
+        let req = decode(&b);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let Some(Data::Histogram(hist)) = &metrics[0].data else {
+            panic!("histogram")
+        };
+        assert_eq!(hist.data_points[0].start_time_unix_nano, 2_000_000);
     }
 
     #[test]

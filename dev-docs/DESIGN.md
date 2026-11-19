@@ -475,13 +475,17 @@ times) keep their row with `__type__ = created` and are not exported as points.
 
 **Start times (#2927).** The scrape input, not the encoder, owns start-time
 state: it is per target, and output workers run in parallel. Each target fills
-`__start_timestamp_ms__` on counter, histogram and summary rows from the
-family's `_created` sample, else from when it first saw the series; a decrease
-in a counter, bucket or `_count` moves it to the previous scrape's time. Series
-absent from a scrape are forgotten (Prometheus staleness), and at most 2^20
-series per target are remembered. The encoder writes the column as
-`start_time_unix_nano`, taking the latest start among a histogram's or
-summary's samples.
+`__start_timestamp_ms__` on counter, histogram and summary rows. One start time
+belongs to a whole series (a counter, or a histogram or summary with all its
+components); each component keeps its last value only for reset detection. The
+start is the family's `_created` sample (unless it is later than the samples),
+else the series' first sample time; a decrease in a counter, bucket or `_count`
+moves it to that component's previous sample time. Sample times are
+`__timestamp_ms__`, so exposition timestamps count when `honor_timestamps` is
+on. Series absent from a scrape are forgotten (Prometheus staleness) before new
+ones are admitted, and at most 2^20 per target are remembered. The encoder
+writes the column as `start_time_unix_nano`, taking the latest start among the
+samples that make up a histogram or summary point.
 
 **Memory budget (#2928).** `max_inflight_bytes` (default 1 GiB) is a semaphore
 shared by an input's targets, held from before a request until the pipeline
@@ -492,7 +496,9 @@ holding part of the budget cannot deadlock each other. Gunzip output and Arrow
 batches are covered right after they are built, without waiting; those steps
 are synchronous on the input's single-threaded runtime, so at most one scrape
 holds uncovered memory at a time, and a scrape that can't be covered is
-dropped and reserves its peak up front next time. A scrape larger than the whole budget takes all of it and
+dropped (before it touches start-time state) and reserves its peak up front next
+time. Batch memory counts each allocation once, since the string-view columns
+share the response body. A scrape larger than the whole budget takes all of it and
 runs alone rather than failing.
 
 **Alternative considered:** a separate metrics data model in the pipeline. Rejected

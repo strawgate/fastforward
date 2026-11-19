@@ -527,7 +527,7 @@ async fn scrape_once(
     // The next scrape reserves what this one needed, plus headroom.
     *estimate = peak.saturating_add(peak / 4).max(MIN_RESERVATION_BYTES);
     let (batch, body_bytes) = result?;
-    reservation.shrink_to(batch.get_array_memory_size());
+    reservation.shrink_to(batch_memory_bytes(&batch));
     Ok(Scraped {
         batch,
         body_bytes,
@@ -650,14 +650,49 @@ async fn scrape_reserved(
         settings.honor_timestamps,
     )
     .map_err(ScrapeError::Arrow)?;
+    // Admit the batch, with room for the two columns still to come, before
+    // the start-time tracker commits anything from this scrape: a scrape
+    // dropped for lack of budget must leave no trace in its state.
+    let extra = batch.num_rows().saturating_mul(EXTRA_COLUMN_BYTES_PER_ROW) + 4096;
+    cover(reservation, batch_memory_bytes(&batch) + extra, peak)?;
     let batch = tracker.apply(&batch).map_err(ScrapeError::Arrow)?;
     let batch = if settings.series_id {
         append_series_id(&batch).map_err(ScrapeError::Arrow)?
     } else {
         batch
     };
-    cover(reservation, batch.get_array_memory_size(), peak)?;
     Ok((batch, wire_bytes))
+}
+
+/// Upper bound on the bytes per row of the start-time (nullable Int64) and
+/// series-id (UInt64) columns added after admission.
+const EXTRA_COLUMN_BYTES_PER_ROW: usize = 24;
+
+/// Memory held by `batch`, counting each allocation once. The scanner's
+/// string-view columns share the response body, which
+/// `RecordBatch::get_array_memory_size` would count once per column.
+fn batch_memory_bytes(batch: &RecordBatch) -> usize {
+    fn visit(
+        data: &arrow::array::ArrayData,
+        seen: &mut std::collections::HashSet<usize>,
+        total: &mut usize,
+    ) {
+        let nulls = data.nulls().map(arrow::buffer::NullBuffer::buffer);
+        for buffer in data.buffers().iter().chain(nulls) {
+            if seen.insert(buffer.data_ptr().as_ptr() as usize) {
+                *total += buffer.capacity();
+            }
+        }
+        for child in data.child_data() {
+            visit(child, seen, total);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0;
+    for col in batch.columns() {
+        visit(&col.to_data(), &mut seen, &mut total);
+    }
+    total
 }
 
 fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
@@ -1112,8 +1147,13 @@ mod tests {
         let mut input =
             PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
                 .expect("input");
-        // The pipeline does not poll: eight targets, many intervals.
-        std::thread::sleep(Duration::from_millis(400));
+        // The pipeline does not poll. Wait for the first batch, then let
+        // eight targets run for many intervals.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while input.rx.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(200));
         assert_eq!(input.rx.len(), 1, "budget bounds queued batches");
         assert_eq!(input.shared.budget.available_bytes(), 0);
         // Draining resumes scraping.
@@ -1127,6 +1167,21 @@ mod tests {
             seen >= 4,
             "scrapes resume after the pipeline drains ({seen})"
         );
+    }
+
+    #[test]
+    fn shared_body_buffers_are_counted_once() {
+        let batch = scan("a{x=\"long-label-value-one\",y=\"long-label-value-two\"} 1\n");
+        let shared = batch_memory_bytes(&batch);
+        assert!(shared <= batch.get_array_memory_size());
+        let mut wide = String::new();
+        for i in 0..40 {
+            wide.push_str(&format!("l{i}=\"a-value-longer-than-twelve-bytes\","));
+        }
+        let text: &'static str = Box::leak(format!("m{{{wide}}} 1\n").into_boxed_str());
+        let batch = scan(text);
+        // 40 view columns over one body: counted once, not 40 times.
+        assert!(batch_memory_bytes(&batch) * 4 < batch.get_array_memory_size());
     }
 
     #[test]

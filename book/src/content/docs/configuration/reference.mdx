@@ -491,7 +491,7 @@ Columns:
 | `__timestamp_ms__` | Int64 | Exposition timestamp, or the scrape time when the sample has none. |
 | `__type__` | Utf8View | Type from the family's `# TYPE` line (`counter`, `gauge`, `histogram`, ...). Null when there is none. In OpenMetrics, a counter, histogram or summary's `_created` sample has `created`: it is the series' start time and is not exported as an OTLP point. |
 | `__series_id__` | UInt64 | Stable hash of the name and all labels, independent of label order. |
-| `__start_timestamp_ms__` | Int64 | Start time of counter, histogram and summary samples; null on other samples. Taken from the family's OpenMetrics `_created` sample when the scrape has one, otherwise the time the series was first scraped. When a counter, bucket or count decreases (the target restarted), it moves to the previous scrape's time. Exported as the OTLP `start_time_unix_nano`. |
+| `__start_timestamp_ms__` | Int64 | Start time of counter, histogram and summary samples; null on other samples. All samples of one histogram or summary share it. Taken from the family's OpenMetrics `_created` sample when the scrape has one (and it is not later than the samples), otherwise the series' time when it was first scraped. When a counter, bucket or count decreases (the target restarted), it moves to that sample's previous time. These times are the samples' `__timestamp_ms__`: the exposition timestamp when there is one and `honor_timestamps` is on, otherwise the scrape time. Exported as the OTLP `start_time_unix_nano`. |
 | `job`, `instance` | Utf8View | Target labels. `instance` is the target's `host:port`. |
 | one column per label | Utf8View | Null on rows whose sample lacks that label. |
 

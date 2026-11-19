@@ -4,19 +4,27 @@
 //! [`PROM_START_TIMESTAMP_FIELD`] column to every scrape. It follows the
 //! OpenTelemetry Prometheus compatibility spec:
 //!
-//! 1. An OpenMetrics `<family>_created` sample (`__type__ = created`) in the
-//!    same scrape gives the start time of every sample of that family with
-//!    the same labels (`le` and `quantile` aside).
-//! 2. Otherwise the first scrape that sees a series sets its start time to
-//!    the sample's own time, as the OpenTelemetry data model prescribes for
-//!    cumulative streams with an unknown start. Later scrapes reuse it.
-//! 3. When a counter, a histogram bucket or `_count`, or a summary `_count`
-//!    goes down, the process behind it restarted after the previous
-//!    observation, so the start time moves to that observation's time.
+//! A series here is a counter, or a whole histogram or summary (all its
+//! buckets, quantiles, `_sum` and `_count` with the same other labels); all
+//! its samples share one start time.
 //!
-//! Series missing from a scrape are forgotten, as Prometheus marks them
-//! stale. At most `max_series` series are remembered per target; beyond
-//! that, new series get their own time as start time on every scrape.
+//! 1. An OpenMetrics `<family>_created` sample (`__type__ = created`) in the
+//!    same scrape gives the start time, unless it is later than the samples
+//!    (clock skew), in which case it is ignored.
+//! 2. Otherwise the first scrape that sees a series sets its start time to
+//!    the samples' own time (the exposition timestamp when there is one and
+//!    `honor_timestamps` is on, else the scrape time), as the OpenTelemetry
+//!    data model prescribes for cumulative streams with an unknown start.
+//!    Later scrapes reuse it.
+//! 3. When a counter, a histogram bucket or `_count`, or a summary `_count`
+//!    goes down, the process behind it restarted after that sample's
+//!    previous observation, so the start time moves to that observation's
+//!    time. `_sum` and quantiles may go down without a restart.
+//!
+//! Series and components missing from a scrape are forgotten, as Prometheus
+//! marks them stale, before new ones are admitted. At most `max_series` of
+//! each are remembered per target; beyond that, new series get their own
+//! time as start time on every scrape.
 //! Gauges, untyped and info samples and `_created` samples themselves get a
 //! null start time.
 
@@ -30,7 +38,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use ffwd_arrow::prom::PROM_START_TIMESTAMP_FIELD;
 use xxhash_rust::xxh64::xxh64;
 
-/// Default limit on series remembered per target (about 40 bytes each).
+/// Default limit on series (and on series components) remembered per target.
 pub const DEFAULT_MAX_TRACKED_SERIES: usize = 1 << 20;
 
 const SEED: u64 = 0x7374_6172_745f_7473;
@@ -48,32 +56,60 @@ enum Role {
     Other,
 }
 
-struct SeriesState {
+/// Start time shared by every component of one cumulative series: a
+/// counter, or a histogram or summary with all its buckets, quantiles, sum
+/// and count.
+struct Epoch {
     start_ms: i64,
+    generation: u32,
+}
+
+/// Last observation of one component, for reset detection.
+struct Component {
     last_ms: i64,
     last_value: f64,
     generation: u32,
 }
 
+/// What this scrape decided for one family series.
+#[derive(Default)]
+struct Decision {
+    /// Earliest sample time (ms) of the family series in this scrape.
+    first: Option<i64>,
+    /// `_created` start time (ms), if any.
+    created: Option<i64>,
+    /// Latest previous observation (ms) of a component that went down.
+    reset_after: Option<i64>,
+    /// The start time (ms) given to the family series' rows.
+    start: i64,
+}
+
 /// Per-target start-time state. See the module docs.
 pub struct StartTimeTracker {
-    series: HashMap<u64, SeriesState>,
+    epochs: HashMap<u64, Epoch>,
+    components: HashMap<u64, Component>,
     generation: u32,
     max_series: usize,
-    created: HashMap<u64, i64>,
+    decisions: HashMap<u64, Decision>,
+    /// Family series of this scrape in row order, so admission is
+    /// deterministic when the limit is reached.
+    order: Vec<u64>,
     families: Vec<u64>,
     keys: Vec<u64>,
     roles: Vec<Role>,
 }
 
 impl StartTimeTracker {
-    /// A tracker remembering at most `max_series` series.
+    /// A tracker remembering at most `max_series` series (and as many
+    /// series components).
     pub fn new(max_series: usize) -> Self {
         Self {
-            series: HashMap::new(),
+            epochs: HashMap::new(),
+            components: HashMap::new(),
             generation: 0,
             max_series,
-            created: HashMap::new(),
+            decisions: HashMap::new(),
+            order: Vec::new(),
             families: Vec::new(),
             keys: Vec::new(),
             roles: Vec::new(),
@@ -83,7 +119,7 @@ impl StartTimeTracker {
     /// Number of series currently remembered.
     #[cfg(test)]
     pub fn tracked_series(&self) -> usize {
-        self.series.len()
+        self.epochs.len()
     }
 
     /// Return `batch` with a start-time column for one scrape. `batch` must
@@ -92,6 +128,7 @@ impl StartTimeTracker {
     pub fn apply(&mut self, batch: &RecordBatch) -> Result<RecordBatch, ArrowError> {
         let num_rows = batch.num_rows();
         self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
         self.classify(batch)?;
         let values = batch
             .column_by_name("__value__")
@@ -101,82 +138,136 @@ impl StartTimeTracker {
             .and_then(|c| c.as_primitive_opt::<Int64Type>());
         let (Some(values), Some(ts)) = (values, ts) else {
             // An empty scrape has no samples: every series is now stale.
-            self.series.clear();
+            self.epochs.clear();
+            self.components.clear();
             return append_column(batch, Int64Array::new_null(num_rows));
         };
+        let value_at = |row: usize| {
+            if values.is_valid(row) {
+                values.value(row)
+            } else {
+                f64::NAN
+            }
+        };
+        let is_cumulative =
+            |role: Option<&Role>| matches!(role, Some(Role::Monotonic | Role::Other));
 
         // Forget series missing from this scrape before admitting new ones,
         // so stale entries never take the slots of live series.
         for row in 0..num_rows {
-            let is_tracked = matches!(self.roles.get(row), Some(Role::Monotonic | Role::Other));
-            if is_tracked && let Some(s) = self.keys.get(row).and_then(|k| self.series.get_mut(k)) {
-                s.generation = self.generation;
+            if !is_cumulative(self.roles.get(row)) || ts.is_null(row) {
+                continue;
+            }
+            if let Some(e) = self.families.get(row).and_then(|f| self.epochs.get_mut(f)) {
+                e.generation = generation;
+            }
+            if let Some(c) = self.keys.get(row).and_then(|k| self.components.get_mut(k)) {
+                c.generation = generation;
             }
         }
-        let generation = self.generation;
-        self.series.retain(|_, s| s.generation == generation);
+        self.epochs.retain(|_, e| e.generation == generation);
+        self.components.retain(|_, c| c.generation == generation);
 
-        self.created.clear();
+        // Gather, per family series: its first time, its `_created` and any
+        // component that went down since the previous scrape.
+        self.decisions.clear();
+        self.order.clear();
         for row in 0..num_rows {
-            if self.roles.get(row) == Some(&Role::Created)
-                && values.is_valid(row)
-                && let (Some(&family), Some(ms)) =
-                    (self.families.get(row), seconds_to_ms(values.value(row)))
-            {
-                self.created.insert(family, ms);
+            let Some(&family) = self.families.get(row) else {
+                continue;
+            };
+            let role = self.roles.get(row);
+            if role == Some(&Role::Created) {
+                if let Some(ms) = seconds_to_ms(value_at(row)) {
+                    if !self.decisions.contains_key(&family) {
+                        self.order.push(family);
+                    }
+                    self.decisions.entry(family).or_default().created = Some(ms);
+                }
+                continue;
             }
-        }
-
-        let mut starts: Vec<Option<i64>> = Vec::with_capacity(num_rows);
-        for row in 0..num_rows {
-            let role = self.roles.get(row).copied().unwrap_or(Role::None);
-            if matches!(role, Role::None | Role::Created) || ts.is_null(row) {
-                starts.push(None);
+            if !is_cumulative(role) || ts.is_null(row) {
                 continue;
             }
             let t = ts.value(row);
-            let v = if values.is_valid(row) {
-                values.value(row)
-            } else {
-                f64::NAN
-            };
-            let created = self
-                .families
-                .get(row)
-                .and_then(|f| self.created.get(f))
-                .copied();
+            let v = value_at(row);
+            if !self.decisions.contains_key(&family) {
+                self.order.push(family);
+            }
+            let d = self.decisions.entry(family).or_default();
+            d.first = Some(d.first.map_or(t, |f| f.min(t)));
             let key = self.keys.get(row).copied().unwrap_or(0);
-            let start = match self.series.get_mut(&key) {
-                Some(s) => {
-                    if let Some(c) = created {
-                        s.start_ms = c;
-                    } else if role == Role::Monotonic && v < s.last_value {
-                        s.start_ms = if s.last_ms < t { s.last_ms } else { t };
+            let has_room = self.components.len() < self.max_series;
+            match self.components.get_mut(&key) {
+                Some(c) => {
+                    if role == Some(&Role::Monotonic) && v < c.last_value {
+                        let after = c.last_ms.min(t);
+                        d.reset_after = Some(d.reset_after.map_or(after, |r| r.max(after)));
                     }
-                    s.last_ms = t;
-                    s.last_value = v;
-                    s.generation = self.generation;
-                    s.start_ms
+                    c.last_ms = t;
+                    c.last_value = v;
                 }
-                None => {
-                    let start = created.unwrap_or(t);
-                    if self.series.len() < self.max_series {
-                        self.series.insert(
-                            key,
-                            SeriesState {
+                None if has_room => {
+                    self.components.insert(
+                        key,
+                        Component {
+                            last_ms: t,
+                            last_value: v,
+                            generation,
+                        },
+                    );
+                }
+                None => {}
+            }
+        }
+
+        // Decide each family series' start time and update its epoch.
+        for family in &self.order {
+            let Some(d) = self.decisions.get_mut(family) else {
+                continue;
+            };
+            let Some(first) = d.first else {
+                continue;
+            };
+            // A `_created` after the samples (clock skew) is unusable.
+            let created = d.created.filter(|&c| c <= first);
+            d.start = match (self.epochs.get_mut(family), created) {
+                (Some(e), Some(c)) => {
+                    e.start_ms = c;
+                    c
+                }
+                (Some(e), None) => {
+                    if let Some(after) = d.reset_after {
+                        e.start_ms = after;
+                    }
+                    e.start_ms
+                }
+                (None, _) => {
+                    let start = created.unwrap_or(first);
+                    if self.epochs.len() < self.max_series {
+                        self.epochs.insert(
+                            *family,
+                            Epoch {
                                 start_ms: start,
-                                last_ms: t,
-                                last_value: v,
-                                generation: self.generation,
+                                generation,
                             },
                         );
                     }
                     start
                 }
             };
-            starts.push(Some(start.min(t)));
         }
-        append_column(batch, Int64Array::from(starts))
+
+        let starts: Int64Array = (0..num_rows)
+            .map(|row| {
+                if !is_cumulative(self.roles.get(row)) || ts.is_null(row) {
+                    return None;
+                }
+                let d = self.families.get(row).and_then(|f| self.decisions.get(f))?;
+                Some(d.start.min(ts.value(row)))
+            })
+            .collect();
+        append_column(batch, starts)
     }
 
     /// Fill `roles`, `families` (the key shared by a family's series with
@@ -548,12 +639,43 @@ mod tests {
     }
 
     #[test]
-    fn start_time_never_follows_the_sample_time() {
+    fn a_created_after_the_samples_is_ignored() {
         let mut t = StartTimeTracker::new(16);
-        // A `_created` in the future (clock skew) is clamped.
+        // `_created` in the future (clock skew): first-seen time instead.
         let text = "# TYPE x counter\nx_total 1\nx_created 99\n# EOF\n";
-        let rows = scrape(&mut t, text, true, 5000);
+        assert_eq!(scrape(&mut t, text, true, 5000)[0].1, Some(5000));
+        // Not kept as the epoch: a later scrape without it is no reset.
+        let rows = scrape(&mut t, "# TYPE x counter\nx_total 2\n# EOF\n", true, 6000);
         assert_eq!(rows[0].1, Some(5000));
+    }
+
+    #[test]
+    fn created_before_its_samples_still_applies() {
+        let mut t = StartTimeTracker::new(16);
+        let text = "# TYPE x counter\nx_created 1.5\nx_total 1\n# EOF\n";
+        assert_eq!(
+            start_of(&scrape(&mut t, text, true, 5000), "x_total"),
+            Some(1500)
+        );
+    }
+
+    #[test]
+    fn a_returning_quantile_shares_its_summary_start() {
+        let mut t = StartTimeTracker::new(16);
+        let full = |c: u32| {
+            format!(
+                "# TYPE rpc summary\nrpc{{quantile=\"0.5\"}} 1\nrpc{{quantile=\"0.9\"}} 2\nrpc_count {c}\n"
+            )
+        };
+        scrape(&mut t, &full(1), false, 1000);
+        scrape(
+            &mut t,
+            "# TYPE rpc summary\nrpc{quantile=\"0.5\"} 1\nrpc_count 2\n",
+            false,
+            2000,
+        );
+        let rows = scrape(&mut t, &full(3), false, 3000);
+        assert!(rows.iter().all(|(_, s)| *s == Some(1000)), "{rows:?}");
     }
 
     #[test]
