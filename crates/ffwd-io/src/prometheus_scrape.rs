@@ -11,6 +11,16 @@
 //! A malformed exposition rejects the whole scrape, as Prometheus does. The
 //! failure is counted, logged (rate-limited per target) and reflected in the
 //! input's health; the next scrape is attempted on schedule.
+//!
+//! Counters, histograms and summaries get a `__start_timestamp_ms__` column
+//! (see the `start_time` module). Bodies being read and batches not yet taken by the
+//! pipeline share one byte budget per input (see the `budget` module): when it is
+//! used up, scrapes wait instead of buffering more.
+
+mod budget;
+mod start_time;
+
+pub use start_time::DEFAULT_MAX_TRACKED_SERIES;
 
 use std::io;
 use std::io::Read as _;
@@ -28,6 +38,8 @@ use ffwd_core::prom_text::{PROM_TIMESTAMP_FIELD, PromScanConfig};
 use ffwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use tokio::sync::{mpsc, watch};
 
+use self::budget::{Budget, MIN_RESERVATION_BYTES, OverBudget, Reservation};
+use self::start_time::StartTimeTracker;
 use crate::input::{InputSource, SourceEvent};
 
 /// Default scrape interval (Prometheus default).
@@ -36,6 +48,9 @@ pub const DEFAULT_SCRAPE_INTERVAL: Duration = Duration::from_secs(15);
 pub const DEFAULT_SCRAPE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default response size limit.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Default budget for bodies being read plus batches not yet taken by the
+/// pipeline, shared by every target of one input.
+pub const DEFAULT_MAX_INFLIGHT_BYTES: usize = 1024 * 1024 * 1024;
 /// Default limit on distinct label columns in one scrape.
 pub const DEFAULT_MAX_LABEL_COLUMNS: usize = ffwd_arrow::prom::DEFAULT_MAX_LABEL_COLUMNS;
 
@@ -73,6 +88,11 @@ pub struct PrometheusScrapeSettings {
     pub max_label_columns: usize,
     /// Append the `__series_id__` column.
     pub series_id: bool,
+    /// Byte budget shared by all targets: bodies being read plus batches
+    /// not yet taken by the pipeline.
+    pub max_inflight_bytes: usize,
+    /// Most series per target whose start time is remembered.
+    pub max_tracked_series: usize,
 }
 
 impl PrometheusScrapeSettings {
@@ -89,6 +109,8 @@ impl PrometheusScrapeSettings {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_label_columns: DEFAULT_MAX_LABEL_COLUMNS,
             series_id: true,
+            max_inflight_bytes: DEFAULT_MAX_INFLIGHT_BYTES,
+            max_tracked_series: DEFAULT_MAX_TRACKED_SERIES,
         }
     }
 }
@@ -96,6 +118,8 @@ impl PrometheusScrapeSettings {
 struct Scraped {
     batch: RecordBatch,
     body_bytes: u64,
+    /// Share of the input's budget, returned once the pipeline takes the batch.
+    reservation: Reservation,
 }
 
 /// Shared state between the input handle and the scrape tasks.
@@ -104,6 +128,7 @@ struct Shared {
     /// Number of targets whose most recent scrape failed.
     failing: AtomicUsize,
     running: AtomicBool,
+    budget: Arc<Budget>,
 }
 
 /// Input that scrapes Prometheus endpoints. See the module docs.
@@ -170,6 +195,7 @@ impl PrometheusScrapeInput {
             stats,
             failing: AtomicUsize::new(0),
             running: AtomicBool::new(true),
+            budget: Arc::new(Budget::new(settings.max_inflight_bytes)),
         });
         let health = Arc::new(AtomicU8::new(ComponentHealth::Starting.as_repr()));
         let settings = Arc::new(settings);
@@ -241,11 +267,15 @@ impl InputSource for PrometheusScrapeInput {
         let mut events = Vec::new();
         while events.len() < MAX_BATCHES_PER_POLL {
             match self.rx.try_recv() {
-                Ok(s) => events.push(SourceEvent::Batch {
-                    batch: s.batch,
-                    source_id: None,
-                    accounted_bytes: s.body_bytes,
-                }),
+                Ok(s) => {
+                    // The pipeline owns the batch from here.
+                    drop(s.reservation);
+                    events.push(SourceEvent::Batch {
+                        batch: s.batch,
+                        source_id: None,
+                        accounted_bytes: s.body_bytes,
+                    });
+                }
                 Err(_) => break,
             }
         }
@@ -359,6 +389,9 @@ async fn run_target(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut builder = PromBatchBuilder::new(PromScanConfig::default())
         .with_max_label_columns(settings.max_label_columns);
+    let mut tracker = StartTimeTracker::new(settings.max_tracked_series);
+    // Budget reserved before each request: what the last scrape needed.
+    let mut estimate = MIN_RESERVATION_BYTES;
     let mut failing = false;
     let mut last_error_log: Option<Instant> = None;
     let mut suppressed = 0u64;
@@ -370,7 +403,7 @@ async fn run_target(
         }
         // A scrape can take up to the timeout; don't hold up shutdown for it.
         let result = tokio::select! {
-            r = scrape_once(&client, &target, &settings, &mut builder) => r,
+            r = scrape_once(&client, &target, &settings, &shared, &mut estimate, &mut builder, &mut tracker) => r,
             _ = shutdown.changed() => return,
         };
         match result {
@@ -422,6 +455,8 @@ enum ScrapeError {
     Gzip(io::Error),
     Parse(PromToArrowError),
     Arrow(arrow::error::ArrowError),
+    /// The input's `max_inflight_bytes` had no room before the timeout.
+    OverBudget(usize),
 }
 
 impl std::fmt::Display for ScrapeError {
@@ -433,6 +468,10 @@ impl std::fmt::Display for ScrapeError {
             Self::Gzip(e) => write!(f, "gzip decode failed: {e}"),
             Self::Parse(e) => write!(f, "{e}"),
             Self::Arrow(e) => write!(f, "arrow: {e}"),
+            Self::OverBudget(n) => write!(
+                f,
+                "no room in max_inflight_bytes for {n} bytes before the timeout; the next scrape reserves it first"
+            ),
         }
     }
 }
@@ -450,12 +489,77 @@ fn is_openmetrics_content_type(value: &[u8]) -> bool {
         .eq_ignore_ascii_case(b"application/openmetrics-text")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scrape_once(
     client: &reqwest::Client,
     target: &Target,
     settings: &PrometheusScrapeSettings,
+    shared: &Shared,
+    estimate: &mut usize,
     builder: &mut PromBatchBuilder,
+    tracker: &mut StartTimeTracker,
 ) -> Result<Scraped, ScrapeError> {
+    let (mut reservation, waited) = shared
+        .budget
+        .reserve(*estimate)
+        .await
+        .map_err(|e| ScrapeError::OverBudget(e.needed))?;
+    if waited {
+        tracing::debug!(
+            target = %target.display,
+            "prometheus_scrape: scrape delayed until max_inflight_bytes had room"
+        );
+    }
+    // Growth past the estimate may wait only until the scrape's timeout.
+    let deadline = tokio::time::Instant::now() + settings.timeout;
+    let mut peak = 0usize;
+    let result = scrape_reserved(
+        client,
+        target,
+        settings,
+        builder,
+        tracker,
+        &mut reservation,
+        deadline,
+        &mut peak,
+    )
+    .await;
+    // The next scrape reserves what this one needed, plus headroom.
+    *estimate = peak.saturating_add(peak / 4).max(MIN_RESERVATION_BYTES);
+    let (batch, body_bytes) = result?;
+    reservation.shrink_to(batch.get_array_memory_size());
+    Ok(Scraped {
+        batch,
+        body_bytes,
+        reservation,
+    })
+}
+
+/// Grow `reservation` to cover `bytes` and record the peak.
+async fn hold(
+    reservation: &mut Reservation,
+    bytes: usize,
+    deadline: tokio::time::Instant,
+    peak: &mut usize,
+) -> Result<(), ScrapeError> {
+    *peak = (*peak).max(bytes);
+    reservation
+        .grow_to(bytes, deadline)
+        .await
+        .map_err(|OverBudget { needed }| ScrapeError::OverBudget(needed))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scrape_reserved(
+    client: &reqwest::Client,
+    target: &Target,
+    settings: &PrometheusScrapeSettings,
+    builder: &mut PromBatchBuilder,
+    tracker: &mut StartTimeTracker,
+    reservation: &mut Reservation,
+    deadline: tokio::time::Instant,
+    peak: &mut usize,
+) -> Result<(RecordBatch, u64), ScrapeError> {
     let scrape_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
@@ -491,21 +595,28 @@ async fn scrape_once(
         .headers()
         .get(reqwest::header::CONTENT_ENCODING)
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
-    let mut buf = BytesMut::with_capacity(resp.content_length().map_or(64 * 1024, |n| {
+    let initial = resp.content_length().map_or(64 * 1024, |n| {
         usize::try_from(n).unwrap_or(limit).min(limit)
-    }));
+    });
+    hold(reservation, initial, deadline, peak).await?;
+    let mut buf = BytesMut::with_capacity(initial);
     while let Some(chunk) = resp.chunk().await.map_err(http_error)? {
         if buf.len() + chunk.len() > limit {
             return Err(ScrapeError::TooLarge(limit));
         }
         buf.extend_from_slice(&chunk);
+        if buf.capacity() > reservation.bytes() {
+            hold(reservation, buf.capacity(), deadline, peak).await?;
+        }
     }
     let wire_bytes = buf.len() as u64;
     // OpenMetrics timestamps are float seconds; the text format uses
     // integer milliseconds.
     builder.config_mut().openmetrics = resp_is_openmetrics;
     let body: Bytes = if is_gzip {
-        gunzip_limited(&buf, limit)?
+        let decoded = gunzip_limited(&buf, limit)?;
+        hold(reservation, buf.capacity() + decoded.len(), deadline, peak).await?;
+        decoded
     } else {
         buf.freeze()
     };
@@ -519,15 +630,14 @@ async fn scrape_once(
         settings.honor_timestamps,
     )
     .map_err(ScrapeError::Arrow)?;
+    let batch = tracker.apply(&batch).map_err(ScrapeError::Arrow)?;
     let batch = if settings.series_id {
         append_series_id(&batch).map_err(ScrapeError::Arrow)?
     } else {
         batch
     };
-    Ok(Scraped {
-        batch,
-        body_bytes: wire_bytes,
-    })
+    hold(reservation, batch.get_array_memory_size(), deadline, peak).await?;
+    Ok((batch, wire_bytes))
 }
 
 fn gunzip_limited(input: &[u8], limit: usize) -> Result<Bytes, ScrapeError> {
@@ -946,11 +1056,72 @@ mod tests {
         };
         let mut builder = PromBatchBuilder::new(PromScanConfig::default())
             .with_max_label_columns(settings.max_label_columns);
+        let mut tracker = StartTimeTracker::new(settings.max_tracked_series);
+        let shared = Shared {
+            stats: Arc::new(ComponentStats::new()),
+            failing: AtomicUsize::new(0),
+            running: AtomicBool::new(true),
+            budget: Arc::new(Budget::new(settings.max_inflight_bytes)),
+        };
+        let mut estimate = MIN_RESERVATION_BYTES;
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(scrape_once(&client, &target, settings, &mut builder))
+            .block_on(scrape_once(
+                &client,
+                &target,
+                settings,
+                &shared,
+                &mut estimate,
+                &mut builder,
+                &mut tracker,
+            ))
+    }
+
+    #[test]
+    fn scrapes_wait_for_budget_while_the_pipeline_is_blocked() {
+        let body = b"# TYPE reqs counter\nreqs_total 1\n".to_vec();
+        let targets: Vec<String> = (0..8).map(|_| serve(body.clone(), "")).collect();
+        let mut settings = PrometheusScrapeSettings::new(targets, "test".into());
+        settings.interval = Duration::from_millis(20);
+        settings.timeout = Duration::from_secs(5);
+        // Smaller than one scrape: each scrape takes the whole budget, so
+        // only one batch can be waiting at a time.
+        settings.max_inflight_bytes = 1;
+        let mut input =
+            PrometheusScrapeInput::new("prom", settings, Arc::new(ComponentStats::new()))
+                .expect("input");
+        // The pipeline does not poll: eight targets, many intervals.
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(input.rx.len(), 1, "budget bounds queued batches");
+        assert_eq!(input.shared.budget.available_bytes(), 0);
+        // Draining resumes scraping.
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen < 4 && Instant::now() < deadline {
+            seen += input.poll().expect("poll").len();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            seen >= 4,
+            "scrapes resume after the pipeline drains ({seen})"
+        );
+    }
+
+    #[test]
+    fn scraped_counters_carry_start_times_from_created_samples() {
+        let body =
+            b"# TYPE jobs counter\njobs_total 3\njobs_created 1700000000.5\n# EOF\n".to_vec();
+        let url = serve_typed(body, "application/openmetrics-text; version=1.0.0", "");
+        let settings = PrometheusScrapeSettings::new(vec![url], "test".into());
+        let batch = scrape_direct(&settings).expect("scrape").batch;
+        let starts = batch
+            .column_by_name(ffwd_arrow::prom::PROM_START_TIMESTAMP_FIELD)
+            .expect("start column")
+            .as_primitive::<Int64Type>();
+        assert_eq!(starts.value(0), 1_700_000_000_500);
+        assert!(starts.is_null(1), "the _created sample itself has none");
     }
 
     /// Serve a redirect from `/metrics` to `location` (a path or URL), and

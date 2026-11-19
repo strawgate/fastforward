@@ -729,6 +729,9 @@ pub(super) fn build_input_state(
             if let Some(max) = p.max_label_columns {
                 settings.max_label_columns = max;
             }
+            if let Some(max) = p.max_inflight_bytes {
+                settings.max_inflight_bytes = max;
+            }
             if let Some(headers) = &p.headers {
                 let mut headers: Vec<(String, String)> = headers
                     .iter()

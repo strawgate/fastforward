@@ -471,8 +471,25 @@ are rebuilt from their component samples; incomplete or inconsistent ones
 exactly `_count`, quantiles outside `[0, 1]`) are dropped rather than guessed.
 Counts are rounded to integers only when written. GaugeHistograms are dropped,
 as the OpenTelemetry Prometheus compatibility spec requires. OpenMetrics `<family>_created` samples (start
-times) keep their row with `__type__ = created` and are not exported as points
-until start-time tracking exists.
+times) keep their row with `__type__ = created` and are not exported as points.
+
+**Start times (#2927).** The scrape input, not the encoder, owns start-time
+state: it is per target, and output workers run in parallel. Each target fills
+`__start_timestamp_ms__` on counter, histogram and summary rows from the
+family's `_created` sample, else from when it first saw the series; a decrease
+in a counter, bucket or `_count` moves it to the previous scrape's time. Series
+absent from a scrape are forgotten (Prometheus staleness), and at most 2^20
+series per target are remembered. The encoder writes the column as
+`start_time_unix_nano`, taking the latest start among a histogram's or
+summary's samples.
+
+**Memory budget (#2928).** `max_inflight_bytes` (default 1 GiB) is a semaphore
+shared by an input's targets, held from before a request until the pipeline
+takes the batch. A scrape reserves what its previous scrape needed and waits,
+holding nothing, while the budget is used up. Growth beyond that waits only
+until the scrape's timeout, so targets holding part of the budget cannot
+deadlock each other. A scrape larger than the whole budget takes all of it and
+runs alone rather than failing.
 
 **Alternative considered:** a separate metrics data model in the pipeline. Rejected
 because it would fork every transform and sink; metric rows reuse the log

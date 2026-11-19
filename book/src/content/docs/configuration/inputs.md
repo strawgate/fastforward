@@ -267,8 +267,11 @@ pipelines:
 
 Scrape Prometheus `/metrics` endpoints. Each scrape becomes one Arrow batch
 with one row per sample: `__name__`, `__value__`, `__timestamp_ms__`,
-`__type__`, `__series_id__`, `job`, `instance`, and one column per label.
-Send it to an `otlp` output to export OTLP metrics.
+`__type__`, `__series_id__`, `__start_timestamp_ms__` (counters, histograms
+and summaries), `job`, `instance`, and one column per label. Send it to an
+`otlp` output to export OTLP metrics with start times. All targets of one input
+share a memory budget (`max_inflight_bytes`), so a slow output delays scrapes
+instead of buffering without bound.
 
 ```yaml
 pipelines:

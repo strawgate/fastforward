@@ -661,4 +661,9 @@ pub struct PrometheusScrapeTypeConfig {
     /// (default: true).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub series_id: Option<bool>,
+    /// Memory budget in bytes shared by every target of this input: response
+    /// bodies being read plus scraped batches the pipeline has not taken yet
+    /// (default: 1073741824). When it is used up, scrapes wait.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub max_inflight_bytes: Option<usize>,
 }

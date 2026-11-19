@@ -763,7 +763,7 @@ pipelines:
     #[test]
     fn prometheus_scrape_parses_all_fields() {
         let yaml = single_pipeline_yaml(
-            "type: prometheus_scrape\njob: node\ntargets:\n  - http://a:9100/metrics\n  - https://b/metrics\nscrape_interval_ms: 30000\nscrape_timeout_ms: 5000\ncompression: gzip\nhonor_timestamps: false\nheaders:\n  Authorization: Bearer x\nmax_body_bytes: 1024\nmax_label_columns: 10\nseries_id: false",
+            "type: prometheus_scrape\njob: node\ntargets:\n  - http://a:9100/metrics\n  - https://b/metrics\nscrape_interval_ms: 30000\nscrape_timeout_ms: 5000\ncompression: gzip\nhonor_timestamps: false\nheaders:\n  Authorization: Bearer x\nmax_body_bytes: 1024\nmax_label_columns: 10\nseries_id: false\nmax_inflight_bytes: 4096",
             "type: stdout",
         );
         let cfg = Config::load_str(yaml).expect("valid prometheus_scrape config");
@@ -793,6 +793,7 @@ pipelines:
         assert_eq!(p.max_body_bytes, Some(1024));
         assert_eq!(p.max_label_columns, Some(10));
         assert_eq!(p.series_id, Some(false));
+        assert_eq!(p.max_inflight_bytes, Some(4096));
     }
 
     #[test]
@@ -823,6 +824,10 @@ pipelines:
                 "has an invalid value",
             ),
             ("targets: [\"http://a/m\"]\nformat: json", "format"),
+            (
+                "targets: [\"http://a/m\"]\nmax_inflight_bytes: 0",
+                "'max_inflight_bytes' must be at least 1",
+            ),
             (
                 "targets: [\"http://a/m\"]\ncompression: zstd",
                 "unknown variant",

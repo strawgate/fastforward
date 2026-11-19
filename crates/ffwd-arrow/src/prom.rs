@@ -41,13 +41,21 @@ use ffwd_core::scanner::ScanBuilder;
 /// without comparing every label column.
 pub const PROM_SERIES_ID_FIELD: &str = "__series_id__";
 
+/// Column holding the start time (Unix milliseconds) of each cumulative
+/// sample: counters, histograms and summaries. Null for other samples. The
+/// `prometheus_scrape` input fills it from OpenMetrics `_created` samples or
+/// from when it first saw the series, and the OTLP metrics encoder writes it
+/// as `start_time_unix_nano`.
+pub const PROM_START_TIMESTAMP_FIELD: &str = "__start_timestamp_ms__";
+
 /// Columns a Prometheus batch always types as non-strings. SQL validation
 /// probes, which have no real batch to read types from, use this list so
 /// arithmetic such as `__value__ + 1` plans the same way it runs.
-pub static PROM_TYPED_COLUMNS: [(&str, DataType); 3] = [
+pub static PROM_TYPED_COLUMNS: [(&str, DataType); 4] = [
     ("__value__", DataType::Float64),
     ("__timestamp_ms__", DataType::Int64),
     (PROM_SERIES_ID_FIELD, DataType::UInt64),
+    (PROM_START_TIMESTAMP_FIELD, DataType::Int64),
 ];
 
 /// Default limit on distinct label columns in one body.
