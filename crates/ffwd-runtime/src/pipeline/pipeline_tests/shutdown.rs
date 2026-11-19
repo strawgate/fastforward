@@ -282,6 +282,237 @@ async fn drain_ingress_then_shutdown_delivers_queued_batches() {
     );
 }
 
+/// Passes batches through until `shutdown` is cancelled, then fails fatally.
+#[derive(Debug)]
+struct FatalAfterShutdownProcessor {
+    shutdown: CancellationToken,
+}
+
+impl Processor for FatalAfterShutdownProcessor {
+    fn process(
+        &mut self,
+        batch: RecordBatch,
+        _meta: &BatchMetadata,
+    ) -> Result<smallvec::SmallVec<[RecordBatch; 1]>, crate::processor::ProcessorError> {
+        if self.shutdown.is_cancelled() {
+            return Err(crate::processor::ProcessorError::Fatal(
+                "fatal during shutdown drain".to_string(),
+            ));
+        }
+        Ok(smallvec::smallvec![batch])
+    }
+
+    fn flush(&mut self) -> smallvec::SmallVec<[RecordBatch; 1]> {
+        smallvec::SmallVec::new()
+    }
+
+    fn name(&self) -> &'static str {
+        "fatal_after_shutdown"
+    }
+
+    fn is_stateful(&self) -> bool {
+        false
+    }
+}
+
+/// A terminal result while draining the input channel at shutdown must not
+/// leave producers blocked on the full channel.
+///
+/// The sink blocks, so the input channel fills and the CPU worker parks in
+/// `blocking_send` with more lines behind it. Shutdown is then requested and
+/// the sink released. The first batch drained at shutdown hits a fatal
+/// processor error, which stops the drain early. `run_async` must close the
+/// receiver before joining producers; otherwise the join waits forever on the
+/// parked worker.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn fatal_processor_during_shutdown_drain_does_not_hang_on_full_channel() {
+    const LINES: usize = 200;
+
+    let dir = tempfile::tempdir().unwrap();
+    let empty_path = dir.path().join("unused.log");
+    std::fs::write(&empty_path, b"").unwrap();
+    let yaml = single_pipeline_yaml(
+        &format!("type: file\npath: \"{}\"\nformat: json", empty_path.display()),
+        "type: stdout\nformat: json",
+    );
+    let config = ffwd_config::Config::load_str(&yaml).unwrap();
+    let pipe_cfg = &config.pipelines["default"];
+
+    let release = CancellationToken::new();
+    let shutdown = CancellationToken::new();
+    let sink_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+    pipeline.batch_target_bytes = 1;
+    pipeline.batch_timeout = Duration::from_millis(5);
+    pipeline.set_pool_drain_timeout(Duration::from_secs(2));
+    pipeline = pipeline
+        .with_input("one-line", Box::new(OneLinePerPollInput::new(LINES)))
+        .with_processor(Box::new(FatalAfterShutdownProcessor {
+            shutdown: shutdown.clone(),
+        }))
+        .with_sink(Box::new(GatedCountingSink {
+            release: release.clone(),
+            entered: Arc::clone(&sink_entered),
+            rows: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }));
+
+    let metrics = Arc::clone(&pipeline.metrics);
+    let capacity = metrics.channel_capacity.load(Ordering::Relaxed);
+    let sd = shutdown.clone();
+    let run = tokio::spawn(async move { pipeline.run_async(&sd).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let at_sink = sink_entered.load(Ordering::Relaxed);
+        let queued = metrics.channel_depth.load(Ordering::Relaxed);
+        if at_sink && queued >= capacity {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            shutdown.cancel();
+            release.cancel();
+            panic!("setup did not fill the input channel (at_sink={at_sink}, queued={queued})");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    shutdown.cancel();
+    release.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(15), run)
+        .await
+        .expect("shutdown must not hang when the drain stops early on a full channel");
+    result
+        .expect("pipeline task should not panic")
+        .expect("pipeline run should succeed");
+}
+
+/// Blocks sends until `release` is cancelled, then takes `delay` per batch:
+/// a collector that is up but slow.
+struct GatedSlowSink {
+    release: CancellationToken,
+    entered: Arc<std::sync::atomic::AtomicBool>,
+    delay: Duration,
+    rows: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Sink for GatedSlowSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+        Box::pin(async move {
+            self.entered.store(true, Ordering::Relaxed);
+            self.release.cancelled().await;
+            tokio::time::sleep(self.delay).await;
+            self.rows
+                .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+            SendResult::Ok
+        })
+    }
+
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        "gated-slow"
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Draining queued batches at shutdown is bounded by the pool drain timeout.
+///
+/// The input channel is full when shutdown arrives and every send then takes
+/// 250ms. Submitting all queued batches one by one would take seconds; with a
+/// 500ms drain timeout, shutdown must stop submitting once the budget is spent
+/// and leave the rest unsent.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_drain_of_queued_batches_is_bounded_by_drain_timeout() {
+    const LINES: usize = 64;
+    const SEND_DELAY: Duration = Duration::from_millis(250);
+    const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+
+    let dir = tempfile::tempdir().unwrap();
+    let empty_path = dir.path().join("unused.log");
+    std::fs::write(&empty_path, b"").unwrap();
+    let yaml = single_pipeline_yaml(
+        &format!("type: file\npath: \"{}\"\nformat: json", empty_path.display()),
+        "type: stdout\nformat: json",
+    );
+    let config = ffwd_config::Config::load_str(&yaml).unwrap();
+    let pipe_cfg = &config.pipelines["default"];
+
+    let release = CancellationToken::new();
+    let shutdown = CancellationToken::new();
+    let sink_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let delivered_rows = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+    pipeline.batch_target_bytes = 1;
+    pipeline.batch_timeout = Duration::from_millis(5);
+    pipeline.set_pool_drain_timeout(DRAIN_TIMEOUT);
+    pipeline = pipeline
+        .with_input("one-line", Box::new(OneLinePerPollInput::new(LINES)))
+        .with_sink(Box::new(GatedSlowSink {
+            release: release.clone(),
+            entered: Arc::clone(&sink_entered),
+            delay: SEND_DELAY,
+            rows: Arc::clone(&delivered_rows),
+        }));
+
+    let metrics = Arc::clone(&pipeline.metrics);
+    let capacity = metrics.channel_capacity.load(Ordering::Relaxed);
+    let sd = shutdown.clone();
+    let run = tokio::spawn(async move { pipeline.run_async(&sd).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let at_sink = sink_entered.load(Ordering::Relaxed);
+        let queued = metrics.channel_depth.load(Ordering::Relaxed);
+        if at_sink && queued >= capacity {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            shutdown.cancel();
+            release.cancel();
+            panic!("setup did not fill the input channel (at_sink={at_sink}, queued={queued})");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let queued_at_shutdown = metrics.channel_depth.load(Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    shutdown.cancel();
+    release.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(20), run)
+        .await
+        .expect("shutdown must not hang");
+    result
+        .expect("pipeline task should not panic")
+        .expect("pipeline run should succeed");
+    let elapsed = started.elapsed();
+    let unbounded = SEND_DELAY * u32::try_from(queued_at_shutdown).unwrap_or(u32::MAX);
+
+    // Budget (500ms) + one send that started before the deadline (250ms) +
+    // the pool's cancel grace if a send is still in flight, with slack.
+    assert!(
+        elapsed < Duration::from_millis(2_000),
+        "shutdown took {elapsed:?}; draining all {queued_at_shutdown} queued batches \
+         one by one would take about {unbounded:?}"
+    );
+    assert!(
+        delivered_rows.load(Ordering::Relaxed) < LINES as u64,
+        "the budget should run out before every line is delivered"
+    );
+}
+
 /// After all file data is read, shutdown must still drain everything.
 /// The file tailer keeps polling after EOF (it's a tailer, not a
 /// reader), so the pipeline only exits via shutdown signal.

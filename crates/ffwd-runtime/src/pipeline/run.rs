@@ -134,10 +134,17 @@ impl Pipeline {
         // for a worker slot) and would never see `shutdown`. When the window
         // closes the busy worker gives up its batch (held for replay), which
         // frees the slot so the blocked submit completes and the loop exits.
+        //
+        // The task also records when shutdown was requested, so the shutdown
+        // drain budget below counts from the signal rather than from the
+        // moment the (possibly blocked) loop notices it.
         let retry_grace = self.pool.shutdown_retry_grace();
         let shutdown_for_stop = shutdown.clone();
+        let shutdown_requested_at = Arc::new(std::sync::OnceLock::new());
+        let requested_at = Arc::clone(&shutdown_requested_at);
         let stop_retrying_link = tokio::spawn(async move {
             shutdown_for_stop.cancelled().await;
+            let _ = requested_at.set(tokio::time::Instant::now());
             retry_grace.begin();
         });
 
@@ -267,22 +274,58 @@ impl Pipeline {
         self.pool.stop_retrying();
         stop_retrying_link.abort();
 
+        // Shutdown budget: queued-batch submission and pool drain together
+        // get `pool_drain_timeout`, counted from when shutdown was requested.
+        // Without it, a collector that accepts connections but stalls each
+        // send (up to the per-batch send timeout) would make every queued
+        // batch wait its turn, and shutdown could take many minutes.
+        let shutdown_deadline = shutdown_requested_at
+            .get()
+            .copied()
+            .unwrap_or_else(tokio::time::Instant::now)
+            + self.pool_drain_timeout;
+
         if should_drain_input_channel && !internal_faults::shutdown_skip_channel_drain() {
             // Drain channel messages before joining input threads.
             // This prevents deadlock during shutdown if a producer is blocked in
             // `blocking_send` while the bounded channel is full.
-            while let Some(msg) = rx.recv().await {
+            loop {
+                // Bound the wait too: an empty channel whose producer is still
+                // alive must not hold shutdown past the budget.
+                let msg = match tokio::time::timeout_at(shutdown_deadline, rx.recv()).await {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            queued = rx.len(),
+                            timeout = ?self.pool_drain_timeout,
+                            "pipeline: shutdown drain budget spent; leaving queued batches unsent"
+                        );
+                        break;
+                    }
+                };
                 self.metrics.dec_channel_depth();
+                if tokio::time::Instant::now() >= shutdown_deadline {
+                    // Budget spent: stop submitting. This batch and any still
+                    // queued are dropped unsent with `rx` below; their
+                    // checkpoints never advance, so file inputs replay them.
+                    tracing::warn!(
+                        queued = rx.len() + 1,
+                        timeout = ?self.pool_drain_timeout,
+                        "pipeline: shutdown drain budget spent; leaving queued batches unsent"
+                    );
+                    break;
+                }
                 if self.submit_batch(msg, shutdown).await {
                     break;
                 }
             }
-        } else {
-            // Terminal paths intentionally stop accepting more input, but the
-            // receiver must still be closed before joining producers. Otherwise
-            // a producer blocked on the bounded channel can keep shutdown stuck.
-            drop(rx);
         }
+        // Close the receiver before joining producers on every path: terminal
+        // paths that skip the drain, and a drain that stops early because a
+        // batch hit a terminal processor or checkpoint path. Otherwise a
+        // producer blocked on the full bounded channel keeps shutdown stuck.
+        drop(rx);
 
         // All sender clones have now been dropped, so input threads/tasks can
         // be joined without risking a channel backpressure deadlock.
@@ -325,7 +368,11 @@ impl Pipeline {
             },
         )
         .await;
-        self.pool.drain(self.pool_drain_timeout).await;
+        // The pool gets whatever budget is left. A submit that started just
+        // before the deadline can overrun it by one batch send at most.
+        let pool_drain_budget =
+            shutdown_deadline.saturating_duration_since(tokio::time::Instant::now());
+        self.pool.drain(pool_drain_budget).await;
 
         // Drain remaining acks that workers sent before exiting.
         while let Some(ack) = self.pool.try_recv_ack() {

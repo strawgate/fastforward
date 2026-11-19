@@ -59,7 +59,7 @@ use ffwd_io::input::InputSource;
 use ffwd_io::input::SourceEvent;
 use ffwd_io::tail::ByteOffset;
 use ffwd_output::OnceAsyncFactory;
-#[cfg(feature = "turmoil")]
+#[cfg(any(test, feature = "turmoil"))]
 use ffwd_output::SinkFactory;
 #[cfg(test)]
 use ffwd_output::build_sink_factory;
@@ -255,6 +255,25 @@ impl Pipeline {
         self
     }
 
+    /// Replace the output with a sink factory served by up to `max_workers`
+    /// workers (for tests that need concurrent sends and out-of-order acks).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_sink_factory(
+        mut self,
+        factory: Arc<dyn SinkFactory>,
+        max_workers: usize,
+    ) -> Self {
+        self.pool = OutputWorkerPool::new(
+            factory,
+            max_workers,
+            Duration::MAX,
+            Arc::clone(&self.metrics),
+        );
+        self.apply_shutdown_retry_grace();
+        self
+    }
+
     /// Add an input source for testing. Bypasses config-based input construction.
     ///
     /// Each new input gets its own passthrough `Scanner + Transform` pair
@@ -364,7 +383,7 @@ impl Pipeline {
     ///
     /// Must be called BEFORE `with_input()` since input buffers are sized
     /// from `batch_target_bytes`.
-    #[cfg(feature = "turmoil")]
+    #[cfg(any(test, feature = "turmoil"))]
     pub fn set_batch_target_bytes(&mut self, bytes: usize) {
         self.batch_target_bytes = bytes;
     }

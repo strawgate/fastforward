@@ -590,50 +590,49 @@ pub async fn run_pipelines(
                 let mut cycle_error: Option<io::Error> = None;
                 let mut break_outer = false;
                 if let Some(mut main_pipe) = main_pipeline {
-                    tokio::select! {
-                        result = main_pipe.run_async(&pipeline_shutdown) => {
-                            pipeline_shutdown.cancel();
+                    let exit = drive_main_pipeline(
+                        &mut main_pipe,
+                        &pipeline_shutdown,
+                        &shutdown,
+                        &mut reload_rx,
+                        RELOAD_DRAIN_TIMEOUT,
+                    )
+                    .await;
+                    match exit {
+                        MainPipelineExit::Completed(result) => {
                             if let Err(ref e) = result {
                                 tracing::error!(error = %e, "main pipeline error");
                                 cycle_error = Some(io::Error::new(e.kind(), e.to_string()));
                             }
                             // Join siblings first, then report completion.
                             join_siblings(&mut handles, &reload_error).await?;
-                            let effects = coordinator.step(Event::PipelineCompleted { error: cycle_error });
+                            let effects =
+                                coordinator.step(Event::PipelineCompleted { error: cycle_error });
                             for effect in &effects {
                                 if let Effect::Shutdown = effect {
                                     break_outer = true;
                                 }
                             }
                         }
-                        _ = shutdown.cancelled() => {
-                            pipeline_shutdown.cancel();
-                            let _ = main_pipe.run_async(&pipeline_shutdown).await;
+                        MainPipelineExit::ShutdownRequested => {
                             join_siblings(&mut handles, &reload_error).await?;
                             // ShutdownRequested is handled uniformly by the coordinator.
                             let _effects = coordinator.step(Event::ShutdownRequested);
                             break_outer = true;
                         }
-                        signal = reload_rx.recv() => {
-                            // Reload signal received. Capture the payload:
+                        MainPipelineExit::ReloadRequested { yaml, is_drained } => {
                             // Some(yaml) = OpAMP pushed config, None = read from disk.
-                            reload_yaml = signal.flatten();
-                            // Drain pipelines.
-                            tracing::info!("config reload: draining pipelines");
-                            pipeline_shutdown.cancel();
-                            let drain_ok = tokio::time::timeout(
-                                Duration::from_secs(30),
-                                main_pipe.run_async(&pipeline_shutdown),
-                            )
-                            .await
-                            .is_ok();
+                            reload_yaml = yaml;
                             join_siblings(&mut handles, &reload_error).await?;
                             // DrainPipelines already performed inline above.
                             let _effects = coordinator.step(Event::ReloadRequested);
-                            if drain_ok {
+                            if is_drained {
                                 coordinator.step(Event::DrainCompleted);
                             } else {
-                                tracing::error!("main pipeline did not drain within 30s");
+                                tracing::error!(
+                                    "main pipeline did not drain within {}s",
+                                    RELOAD_DRAIN_TIMEOUT.as_secs()
+                                );
                                 let effects = coordinator.step(Event::DrainTimedOut);
                                 for effect in effects {
                                     if let Effect::FatalShutdown(msg) = effect {
@@ -800,6 +799,64 @@ pub async fn run_pipelines(
     }
 
     Ok(())
+}
+
+/// How long a config reload waits for the main pipeline to drain.
+const RELOAD_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why the main pipeline's run ended.
+#[derive(Debug)]
+enum MainPipelineExit {
+    /// The pipeline finished on its own.
+    Completed(io::Result<()>),
+    /// The process is shutting down; the pipeline drained before returning.
+    ShutdownRequested,
+    /// A config reload was requested.
+    ReloadRequested {
+        /// `Some(yaml)` = OpAMP pushed config, `None` = re-read from disk.
+        yaml: Option<String>,
+        /// Whether the pipeline drained within `reload_drain_timeout`.
+        is_drained: bool,
+    },
+}
+
+/// Run the main pipeline until it finishes, shutdown is requested, or a
+/// reload arrives.
+///
+/// On shutdown or reload this cancels `pipeline_shutdown` and keeps awaiting
+/// the *same* `run_async` future, so its own shutdown path runs: batches
+/// already queued in the input channel are submitted, input threads are
+/// joined, the output pool drains, and checkpoints are flushed. Dropping the
+/// future and calling `run_async` again would discard the queued batches,
+/// because the first call already took the inputs and owned the channel.
+async fn drive_main_pipeline(
+    main_pipe: &mut Pipeline,
+    pipeline_shutdown: &CancellationToken,
+    shutdown: &CancellationToken,
+    reload_rx: &mut tokio::sync::mpsc::Receiver<Option<String>>,
+    reload_drain_timeout: Duration,
+) -> MainPipelineExit {
+    let run = main_pipe.run_async(pipeline_shutdown);
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => {
+            pipeline_shutdown.cancel();
+            MainPipelineExit::Completed(result)
+        }
+        () = shutdown.cancelled() => {
+            pipeline_shutdown.cancel();
+            if let Err(e) = run.await {
+                tracing::error!(error = %e, "main pipeline error during shutdown");
+            }
+            MainPipelineExit::ShutdownRequested
+        }
+        signal = reload_rx.recv() => {
+            tracing::info!("config reload: draining pipelines");
+            pipeline_shutdown.cancel();
+            let is_drained = tokio::time::timeout(reload_drain_timeout, run).await.is_ok();
+            MainPipelineExit::ReloadRequested { yaml: signal.flatten(), is_drained }
+        }
+    }
 }
 
 /// Join sibling pipeline tasks with a 30s timeout each.
@@ -1274,6 +1331,378 @@ mod tests {
     }
 
     use std::time::Duration;
+
+    mod main_pipeline_shutdown {
+        use std::collections::VecDeque;
+        use std::future::Future;
+        use std::io;
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::Duration;
+
+        use arrow::record_batch::RecordBatch;
+        use bytes::Bytes;
+        use ffwd_diagnostics::diagnostics::ComponentHealth;
+        use ffwd_io::input::{InputSource, SourceEvent};
+        use ffwd_output::{BatchMetadata, SendResult, Sink, SinkFactory};
+        use tokio_util::sync::CancellationToken;
+
+        use super::super::{MainPipelineExit, drive_main_pipeline};
+        use crate::pipeline::Pipeline;
+
+        /// Emits one JSON line per `poll()`, so with a 1-byte batch target
+        /// every line becomes its own batch in the input channel.
+        struct OneLinePerPollInput {
+            lines: VecDeque<Vec<u8>>,
+        }
+
+        impl InputSource for OneLinePerPollInput {
+            fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
+                Ok(self
+                    .lines
+                    .pop_front()
+                    .map(|line| {
+                        let accounted_bytes = line.len() as u64;
+                        vec![SourceEvent::Data {
+                            bytes: Bytes::from(line),
+                            source_id: None,
+                            accounted_bytes,
+                            cri_metadata: None,
+                        }]
+                    })
+                    .unwrap_or_default())
+            }
+
+            fn name(&self) -> &str {
+                "one-line-per-poll"
+            }
+
+            fn health(&self) -> ComponentHealth {
+                ComponentHealth::Healthy
+            }
+        }
+
+        /// Blocks every send until `release` is cancelled, then counts rows.
+        struct GatedCountingSink {
+            release: CancellationToken,
+            entered: Arc<AtomicBool>,
+            rows: Arc<AtomicU64>,
+        }
+
+        impl Sink for GatedCountingSink {
+            fn send_batch<'a>(
+                &'a mut self,
+                batch: &'a RecordBatch,
+                _metadata: &'a BatchMetadata,
+            ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+                Box::pin(async move {
+                    self.entered.store(true, Ordering::Relaxed);
+                    self.release.cancelled().await;
+                    self.rows
+                        .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+                    SendResult::Ok
+                })
+            }
+
+            fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn name(&self) -> &str {
+                "gated-counting"
+            }
+
+            fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        /// Process shutdown must let the running pipeline drain the batches
+        /// already queued in its input channel.
+        ///
+        /// The sink blocks, so the run loop stalls submitting to the one-slot
+        /// output pool and later batches pile up in the bounded input channel.
+        /// Shutdown is requested only once every line has been transformed and
+        /// the channel holds batches; then the sink is released. Every line
+        /// must reach the sink. Dropping the in-flight `run_async` future and
+        /// starting a new one loses the queued batches.
+        // `serial` keeps this test from overlapping the `#[serial]` failpoint
+        // tests: the process-wide `skip_channel_drain` failpoint would drop
+        // queued batches.
+        #[serial_test::serial]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_drains_batches_queued_in_main_pipeline_input_channel() {
+            const LINES: u64 = 12;
+
+            let dir = tempfile::tempdir().unwrap();
+            // The config needs one input; this empty file never produces data.
+            let empty_path = dir.path().join("unused.log");
+            std::fs::write(&empty_path, b"").unwrap();
+            let yaml = format!(
+                "pipelines:\n  default:\n    inputs:\n      - type: file\n        path: \"{}\"\n        format: json\n    outputs:\n      - type: stdout\n        format: json\n",
+                empty_path.display()
+            );
+            let config = ffwd_config::Config::load_str(&yaml).unwrap();
+            let pipe_cfg = &config.pipelines["default"];
+            let meter = opentelemetry::global::meter("test");
+
+            let release = CancellationToken::new();
+            let delivered_rows = Arc::new(AtomicU64::new(0));
+            let sink_entered = Arc::new(AtomicBool::new(false));
+
+            let mut pipeline = Pipeline::from_config("default", pipe_cfg, &meter, None).unwrap();
+            pipeline.set_batch_target_bytes(1);
+            pipeline.set_batch_timeout(Duration::from_millis(5));
+            pipeline.set_pool_drain_timeout(Duration::from_secs(5));
+            let lines = (0..LINES)
+                .map(|i| format!("{{\"seq\":{i}}}\n").into_bytes())
+                .collect();
+            let mut pipeline = pipeline
+                .with_input("one-line", Box::new(OneLinePerPollInput { lines }))
+                .with_sink(Box::new(GatedCountingSink {
+                    release: release.clone(),
+                    entered: Arc::clone(&sink_entered),
+                    rows: Arc::clone(&delivered_rows),
+                }));
+
+            let metrics = Arc::clone(pipeline.metrics());
+            let shutdown = CancellationToken::new();
+            let pipeline_shutdown = CancellationToken::new();
+            let observed_shutdown = pipeline_shutdown.clone();
+            let sd = shutdown.clone();
+            let gate = release.clone();
+            let entered = Arc::clone(&sink_entered);
+            let driver = tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let transformed = metrics.transform_in.lines_total.load(Ordering::Relaxed);
+                    let queued = metrics.channel_depth.load(Ordering::Relaxed);
+                    let at_sink = entered.load(Ordering::Relaxed);
+                    if at_sink && transformed == LINES && queued > 0 {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        sd.cancel();
+                        gate.cancel();
+                        panic!(
+                            "setup did not queue batches in the input channel \
+                             (at_sink={at_sink}, transformed={transformed}, queued={queued})"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let queued = metrics.channel_depth.load(Ordering::Relaxed);
+                sd.cancel();
+                // Keep the sink blocked until the driver has entered its
+                // shutdown arm, so the queued batches are still in the channel
+                // when it decides what to do with the running future.
+                observed_shutdown.cancelled().await;
+                gate.cancel();
+                queued
+            });
+
+            // Keep the sender alive so the reload arm never fires.
+            let (_reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
+            let exit = tokio::time::timeout(
+                Duration::from_secs(20),
+                drive_main_pipeline(
+                    &mut pipeline,
+                    &pipeline_shutdown,
+                    &shutdown,
+                    &mut reload_rx,
+                    Duration::from_secs(30),
+                ),
+            )
+            .await
+            .expect("shutdown should not hang");
+            let queued_at_shutdown = driver.await.expect("driver task should not panic");
+
+            assert!(matches!(exit, MainPipelineExit::ShutdownRequested));
+            assert!(
+                queued_at_shutdown > 0,
+                "test setup must have batches queued in the input channel at shutdown"
+            );
+            assert_eq!(
+                delivered_rows.load(Ordering::Relaxed),
+                LINES,
+                "shutdown must deliver the {queued_at_shutdown} batches queued in the input channel"
+            );
+        }
+
+        /// Counts delivered rows after a per-batch delay. The delay varies
+        /// from batch to batch (0 to `max_delay_ms`), so with several workers
+        /// sends finish, and acks arrive, out of submission order.
+        struct SlowCountingSink {
+            max_delay_ms: u64,
+            sends: Arc<AtomicU64>,
+            rows: Arc<AtomicU64>,
+        }
+
+        impl Sink for SlowCountingSink {
+            fn send_batch<'a>(
+                &'a mut self,
+                batch: &'a RecordBatch,
+                _metadata: &'a BatchMetadata,
+            ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+                Box::pin(async move {
+                    let n = self.sends.fetch_add(1, Ordering::Relaxed);
+                    let delay_ms = (n * 7) % (self.max_delay_ms + 1);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    self.rows
+                        .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+                    SendResult::Ok
+                })
+            }
+
+            fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn name(&self) -> &str {
+                "slow-counting"
+            }
+
+            fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        /// Hands every worker a `SlowCountingSink` sharing one row counter.
+        struct SlowCountingFactory {
+            max_delay_ms: u64,
+            sends: Arc<AtomicU64>,
+            rows: Arc<AtomicU64>,
+        }
+
+        impl SinkFactory for SlowCountingFactory {
+            fn create(&self) -> io::Result<Box<dyn Sink>> {
+                Ok(Box::new(SlowCountingSink {
+                    max_delay_ms: self.max_delay_ms,
+                    sends: Arc::clone(&self.sends),
+                    rows: Arc::clone(&self.rows),
+                }))
+            }
+
+            fn name(&self) -> &str {
+                "slow-counting"
+            }
+        }
+
+        /// Run one shutdown scenario and return (lines read into the
+        /// pipeline, lines delivered).
+        fn run_shutdown_scenario(
+            lines: u64,
+            shutdown_after_delivered: u64,
+            max_delay_ms: u64,
+            workers: usize,
+        ) -> (u64, u64) {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let dir = tempfile::tempdir().unwrap();
+                let empty_path = dir.path().join("unused.log");
+                std::fs::write(&empty_path, b"").unwrap();
+                let yaml = format!(
+                    "pipelines:\n  default:\n    inputs:\n      - type: file\n        path: \"{}\"\n        format: json\n    outputs:\n      - type: stdout\n        format: json\n",
+                    empty_path.display()
+                );
+                let config = ffwd_config::Config::load_str(&yaml).unwrap();
+                let pipe_cfg = &config.pipelines["default"];
+                let meter = opentelemetry::global::meter("test");
+                let delivered = Arc::new(AtomicU64::new(0));
+
+                let mut pipeline = Pipeline::from_config("default", pipe_cfg, &meter, None).unwrap();
+                pipeline.set_batch_target_bytes(1);
+                pipeline.set_batch_timeout(Duration::from_millis(5));
+                pipeline.set_pool_drain_timeout(Duration::from_secs(5));
+                let input_lines = (0..lines)
+                    .map(|i| format!("{{\"seq\":{i}}}\n").into_bytes())
+                    .collect();
+                let mut pipeline = pipeline
+                    .with_input("one-line", Box::new(OneLinePerPollInput { lines: input_lines }))
+                    .with_sink_factory(
+                        Arc::new(SlowCountingFactory {
+                            max_delay_ms,
+                            sends: Arc::new(AtomicU64::new(0)),
+                            rows: Arc::clone(&delivered),
+                        }),
+                        workers,
+                    );
+
+                let metrics = Arc::clone(pipeline.metrics());
+                let shutdown = CancellationToken::new();
+                let sd = shutdown.clone();
+                let seen = Arc::clone(&delivered);
+                let trigger = tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    while seen.load(Ordering::Relaxed) < shutdown_after_delivered
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    sd.cancel();
+                });
+
+                let (_reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
+                let pipeline_shutdown = CancellationToken::new();
+                let exit = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    drive_main_pipeline(
+                        &mut pipeline,
+                        &pipeline_shutdown,
+                        &shutdown,
+                        &mut reload_rx,
+                        Duration::from_secs(30),
+                    ),
+                )
+                .await
+                .expect("shutdown should not hang");
+                trigger.await.expect("trigger task should not panic");
+                assert!(matches!(exit, MainPipelineExit::ShutdownRequested));
+                (
+                    metrics.transform_in.lines_total.load(Ordering::Relaxed),
+                    delivered.load(Ordering::Relaxed),
+                )
+            })
+        }
+
+        proptest::proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+            /// Whatever the batch count, worker count, sink latency and moment
+            /// shutdown arrives, every line read into the main pipeline is
+            /// delivered before shutdown returns: batches in flight, in the
+            /// output queue and in the input channel are all drained. With
+            /// several workers and varying latency, acks arrive out of order.
+            #[test]
+            #[serial_test::serial]
+            fn shutdown_delivers_every_line_read_into_main_pipeline(
+                lines in 1u64..48,
+                shutdown_pct in 0u64..=100,
+                max_delay_ms in 0u64..4,
+                workers in 1usize..=4,
+            ) {
+                let shutdown_after_delivered = lines * shutdown_pct / 100;
+                let (read, delivered) = run_shutdown_scenario(
+                    lines,
+                    shutdown_after_delivered,
+                    max_delay_ms,
+                    workers,
+                );
+                proptest::prop_assert!(delivered >= shutdown_after_delivered);
+                proptest::prop_assert_eq!(
+                    delivered, read,
+                    "{} of {} lines read were delivered", delivered, read
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn otlp_http_exporter_speaks_tls_to_https_endpoints() {
