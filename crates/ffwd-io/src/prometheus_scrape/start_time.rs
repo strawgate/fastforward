@@ -76,8 +76,9 @@ struct Component {
 struct Decision {
     /// Earliest sample time (ms) of the family series in this scrape.
     first: Option<i64>,
-    /// `_created` start time (ms), if any.
-    created: Option<i64>,
+    /// Key of the `_created` sample that would apply: the family name and
+    /// labels, without the metric kind (a `_created` sample has none).
+    created_key: u64,
     /// Latest previous observation (ms) of a component that went down.
     reset_after: Option<i64>,
     /// The start time (ms) given to the family series' rows.
@@ -91,10 +92,17 @@ pub struct StartTimeTracker {
     generation: u32,
     max_series: usize,
     decisions: HashMap<u64, Decision>,
+    /// `_created` start times (ms) of this scrape, by family name and labels.
+    created: HashMap<u64, i64>,
     /// Family series of this scrape in row order, so admission is
     /// deterministic when the limit is reached.
     order: Vec<u64>,
+    /// Per row: the series key (family name, metric kind and labels without
+    /// `le` / `quantile`), which owns the start time.
     families: Vec<u64>,
+    /// Per row: family name and labels without the kind, to match `_created`.
+    created_keys: Vec<u64>,
+    /// Per row: the component key (sample name and all labels).
     keys: Vec<u64>,
     roles: Vec<Role>,
 }
@@ -109,8 +117,10 @@ impl StartTimeTracker {
             generation: 0,
             max_series,
             decisions: HashMap::new(),
+            created: HashMap::new(),
             order: Vec::new(),
             families: Vec::new(),
+            created_keys: Vec::new(),
             keys: Vec::new(),
             roles: Vec::new(),
         }
@@ -171,18 +181,17 @@ impl StartTimeTracker {
         // Gather, per family series: its first time, its `_created` and any
         // component that went down since the previous scrape.
         self.decisions.clear();
+        self.created.clear();
         self.order.clear();
         for row in 0..num_rows {
             let Some(&family) = self.families.get(row) else {
                 continue;
             };
             let role = self.roles.get(row);
+            let created_key = self.created_keys.get(row).copied().unwrap_or(0);
             if role == Some(&Role::Created) {
                 if let Some(ms) = seconds_to_ms(value_at(row)) {
-                    if !self.decisions.contains_key(&family) {
-                        self.order.push(family);
-                    }
-                    self.decisions.entry(family).or_default().created = Some(ms);
+                    self.created.insert(created_key, ms);
                 }
                 continue;
             }
@@ -195,6 +204,7 @@ impl StartTimeTracker {
                 self.order.push(family);
             }
             let d = self.decisions.entry(family).or_default();
+            d.created_key = created_key;
             d.first = Some(d.first.map_or(t, |f| f.min(t)));
             let key = self.keys.get(row).copied().unwrap_or(0);
             let has_room = self.components.len() < self.max_series;
@@ -230,7 +240,11 @@ impl StartTimeTracker {
                 continue;
             };
             // A `_created` after the samples (clock skew) is unusable.
-            let created = d.created.filter(|&c| c <= first);
+            let created = self
+                .created
+                .get(&d.created_key)
+                .copied()
+                .filter(|&c| c <= first);
             d.start = match (self.epochs.get_mut(family), created) {
                 (Some(e), Some(c)) => {
                     e.start_ms = c;
@@ -278,6 +292,8 @@ impl StartTimeTracker {
         self.roles.resize(num_rows, Role::None);
         self.families.clear();
         self.families.resize(num_rows, 0);
+        self.created_keys.clear();
+        self.created_keys.resize(num_rows, 0);
         self.keys.clear();
         self.keys.resize(num_rows, 0);
         let (Some(names), Some(types)) = (
@@ -340,8 +356,19 @@ impl StartTimeTracker {
             if let Some(slot) = self.roles.get_mut(row) {
                 *slot = role;
             }
+            let created_key = xxh64(family.as_bytes(), SEED).wrapping_add(family_labels);
+            // Counters, histograms and summaries are separate series even
+            // when their family names and labels match.
+            let kind = match folded {
+                Folded::Le => 1,
+                Folded::Quantile => 2,
+                Folded::Nothing => 3,
+            };
+            if let Some(slot) = self.created_keys.get_mut(row) {
+                *slot = created_key;
+            }
             if let Some(slot) = self.families.get_mut(row) {
-                *slot = xxh64(family.as_bytes(), SEED).wrapping_add(family_labels);
+                *slot = created_key.wrapping_add(xxh64(&[kind], SEED ^ 2));
             }
             if let Some(slot) = self.keys.get_mut(row) {
                 *slot = xxh64(name.as_bytes(), SEED ^ 1)
@@ -657,6 +684,24 @@ mod tests {
             start_of(&scrape(&mut t, text, true, 5000), "x_total"),
             Some(1500)
         );
+    }
+
+    #[test]
+    fn a_counter_and_a_histogram_with_one_name_keep_separate_starts() {
+        let mut t = StartTimeTracker::new(16);
+        let text = |c: u32, h: u32| {
+            format!(
+                "# TYPE foo counter\nfoo_total {c}\n# TYPE foo histogram\nfoo_bucket{{le=\"+Inf\"}} {h}\nfoo_count {h}\n"
+            )
+        };
+        scrape(&mut t, &text(5, 5), false, 1000);
+        // The counter resets; the histogram does not.
+        let rows = scrape(&mut t, &text(1, 6), false, 2000);
+        assert_eq!(start_of(&rows, "foo_total"), Some(1000));
+        assert_eq!(start_of(&rows, "foo_count"), Some(1000));
+        let rows = scrape(&mut t, &text(0, 7), false, 3000);
+        assert_eq!(start_of(&rows, "foo_total"), Some(2000));
+        assert_eq!(start_of(&rows, "foo_count"), Some(1000));
     }
 
     #[test]
