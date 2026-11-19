@@ -238,8 +238,10 @@ batch wait out a send timeout in turn. A `submit_batch` already in progress is n
 because dropping its `Sending` tickets would block the drain, so the worst case is the budget
 plus one batch send. The budget bounds graceful delivery work, not total exit time: pool
 cancellation grace and checkpoint flushing can follow it. A config reload additionally caps
-its wait for the old pipeline at 30s (`RELOAD_DRAIN_TIMEOUT`), so queued batches get at most
-that long before the new pipeline starts. The receiver is closed before joining producers on every path, so a
+its wait for the old pipeline at 30s (`RELOAD_DRAIN_TIMEOUT`); a drain that overruns it is a
+fatal `DrainTimedOut`, and the process exits rather than starting the new pipeline. A fatal
+processor result also ends the drain early, leaving the remaining queued batches unsent with
+the same replay semantics. The receiver is closed before joining producers on every path, so a
 drain that stops early cannot leave a producer parked on the full channel.
 
 ### Per-source independent checkpoints
