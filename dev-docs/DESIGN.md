@@ -200,9 +200,13 @@ cannot be retried, but it must be metered.
 
 Output workers retry transient failures forever while running, so a down output turns into
 backpressure, not data loss. Once shutdown begins (`ShutdownRetryGrace::begin`, called as
-soon as the pipeline's shutdown token is cancelled), workers keep retrying with their normal
-backoff for a bounded window: `shutdown_retry_grace_ms`, default 10s, capped by the pool
-drain timeout. When the window closes, a worker in backoff gives up at once and later
+soon as the pipeline's shutdown token is cancelled), workers keep retrying for a bounded
+window: `shutdown_retry_grace_ms`, default 10s, capped by the pool drain timeout. Inside the
+window backoff is capped at `SHUTDOWN_RETRY_MAX_DELAY` (1s), and a backoff already under way
+is cut to that cap when the window opens. Normal backoff reaches 30s during a long outage, so
+without the cap a worker would sleep through the whole window and hold its batch even if the
+output had recovered (found by a soak test: scrapes lost on reload while the collector was
+back). When the window closes, a worker in backoff gives up at once and later
 transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
 advanced). The window bounds retries cooperatively: a retry can still start at or just after
 expiry, and a retry that is mid-send is abandoned at its next poll, with the batch held
