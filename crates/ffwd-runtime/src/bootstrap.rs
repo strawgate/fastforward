@@ -1529,6 +1529,142 @@ mod tests {
                 "shutdown must deliver the {queued_at_shutdown} batches queued in the input channel"
             );
         }
+
+        /// Counts delivered rows after an optional per-batch delay.
+        struct SlowCountingSink {
+            delay: Duration,
+            rows: Arc<AtomicU64>,
+        }
+
+        impl Sink for SlowCountingSink {
+            fn send_batch<'a>(
+                &'a mut self,
+                batch: &'a RecordBatch,
+                _metadata: &'a BatchMetadata,
+            ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+                Box::pin(async move {
+                    if !self.delay.is_zero() {
+                        tokio::time::sleep(self.delay).await;
+                    }
+                    self.rows
+                        .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+                    SendResult::Ok
+                })
+            }
+
+            fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn name(&self) -> &str {
+                "slow-counting"
+            }
+
+            fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        /// Run one shutdown scenario and return (lines read into the
+        /// pipeline, lines delivered).
+        fn run_shutdown_scenario(
+            lines: u64,
+            shutdown_after_delivered: u64,
+            sink_delay_ms: u64,
+        ) -> (u64, u64) {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let dir = tempfile::tempdir().unwrap();
+                let empty_path = dir.path().join("unused.log");
+                std::fs::write(&empty_path, b"").unwrap();
+                let yaml = format!(
+                    "pipelines:\n  default:\n    inputs:\n      - type: file\n        path: \"{}\"\n        format: json\n    outputs:\n      - type: stdout\n        format: json\n",
+                    empty_path.display()
+                );
+                let config = ffwd_config::Config::load_str(&yaml).unwrap();
+                let pipe_cfg = &config.pipelines["default"];
+                let meter = opentelemetry::global::meter("test");
+                let delivered = Arc::new(AtomicU64::new(0));
+
+                let mut pipeline = Pipeline::from_config("default", pipe_cfg, &meter, None).unwrap();
+                pipeline.set_batch_target_bytes(1);
+                pipeline.set_batch_timeout(Duration::from_millis(5));
+                pipeline.set_pool_drain_timeout(Duration::from_secs(5));
+                let input_lines = (0..lines)
+                    .map(|i| format!("{{\"seq\":{i}}}\n").into_bytes())
+                    .collect();
+                let mut pipeline = pipeline
+                    .with_input("one-line", Box::new(OneLinePerPollInput { lines: input_lines }))
+                    .with_sink(Box::new(SlowCountingSink {
+                        delay: Duration::from_millis(sink_delay_ms),
+                        rows: Arc::clone(&delivered),
+                    }));
+
+                let metrics = Arc::clone(pipeline.metrics());
+                let shutdown = CancellationToken::new();
+                let sd = shutdown.clone();
+                let seen = Arc::clone(&delivered);
+                let trigger = tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    while seen.load(Ordering::Relaxed) < shutdown_after_delivered
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    sd.cancel();
+                });
+
+                let (_reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
+                let pipeline_shutdown = CancellationToken::new();
+                let exit = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    drive_main_pipeline(
+                        &mut pipeline,
+                        &pipeline_shutdown,
+                        &shutdown,
+                        &mut reload_rx,
+                        Duration::from_secs(30),
+                    ),
+                )
+                .await
+                .expect("shutdown should not hang");
+                trigger.await.expect("trigger task should not panic");
+                assert!(matches!(exit, MainPipelineExit::ShutdownRequested));
+                (
+                    metrics.transform_in.lines_total.load(Ordering::Relaxed),
+                    delivered.load(Ordering::Relaxed),
+                )
+            })
+        }
+
+        proptest::proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+            /// Whatever the batch count, sink speed and moment shutdown
+            /// arrives, every line read into the main pipeline is delivered
+            /// before shutdown returns: batches in flight, in the output
+            /// queue and in the input channel are all drained.
+            #[test]
+            #[serial_test::serial]
+            fn shutdown_delivers_every_line_read_into_main_pipeline(
+                lines in 1u64..48,
+                shutdown_pct in 0u64..=100,
+                sink_delay_ms in 0u64..4,
+            ) {
+                let shutdown_after_delivered = lines * shutdown_pct / 100;
+                let (read, delivered) =
+                    run_shutdown_scenario(lines, shutdown_after_delivered, sink_delay_ms);
+                proptest::prop_assert!(delivered >= shutdown_after_delivered);
+                proptest::prop_assert_eq!(
+                    delivered, read,
+                    "{} of {} lines read were delivered", delivered, read
+                );
+            }
+        }
     }
 
     #[tokio::test]
