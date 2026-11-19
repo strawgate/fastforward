@@ -364,7 +364,7 @@ impl Pipeline {
     ///
     /// Must be called BEFORE `with_input()` since input buffers are sized
     /// from `batch_target_bytes`.
-    #[cfg(feature = "turmoil")]
+    #[cfg(any(test, feature = "turmoil"))]
     pub fn set_batch_target_bytes(&mut self, bytes: usize) {
         self.batch_target_bytes = bytes;
     }
