@@ -1681,7 +1681,7 @@ mod tests {
             ("inf", Some(f64::INFINITY)),
             ("-infinity", Some(f64::NEG_INFINITY)),
             ("+INFINITY", Some(f64::INFINITY)),
-            ("Infinit", None),
+            ("infin", None),
             ("infx", None),
             ("1e+06", Some(1e6)),
             ("1E-06", Some(1e-6)),
