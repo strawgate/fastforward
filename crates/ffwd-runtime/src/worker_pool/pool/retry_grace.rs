@@ -14,14 +14,23 @@
 /// Default time workers keep retrying failed sends after shutdown begins.
 pub const DEFAULT_SHUTDOWN_RETRY_GRACE: Duration = Duration::from_secs(10);
 
+/// Longest wait between retries once shutdown has begun.
+///
+/// Normal backoff grows to `max_retry_delay` (30s by default) during a long
+/// outage, which is longer than the whole grace window. Without this cap a
+/// worker already deep in backoff when shutdown starts would sleep through
+/// the window and never retry, even if the output recovered right away.
+pub const SHUTDOWN_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
+
 /// Bounded retry window that opens when shutdown begins.
 ///
 /// Before shutdown, workers retry failed sends forever. Once
 /// [`ShutdownRetryGrace::begin`] is called, workers keep retrying with
-/// their normal backoff for `grace`, so a brief output blip during a
-/// restart still delivers. When the window closes, the stop token fires:
-/// a worker that is backing off gives up at once, and later failures are
-/// not retried. Stopping is cooperative: a retry can start at or just after
+/// backoff capped at `SHUTDOWN_RETRY_MAX_DELAY` (1s) for `grace` (a worker
+/// already backing off retries within that cap of the window opening), so
+/// a brief output blip during a restart still delivers. When the window
+/// closes, the stop token fires: a worker that is backing off gives up at
+/// once, and later failures are not retried. Stopping is cooperative: a retry can start at or just after
 /// expiry and is abandoned when the worker next polls it. Those batches
 /// resolve as [`DeliveryOutcome::PoolClosed`],
 /// so their checkpoints are held and they replay on the next start.
@@ -38,6 +47,9 @@ struct RetryGraceInner {
     is_started: std::sync::atomic::AtomicBool,
     /// Window length in milliseconds.
     grace_ms: std::sync::atomic::AtomicU64,
+    /// Fired when the window opens (or is expired before opening). Workers
+    /// shorten their retry backoff from then on.
+    started: CancellationToken,
     /// Fired when the window closes. Workers watch this token.
     stop: CancellationToken,
 }
@@ -49,6 +61,7 @@ impl ShutdownRetryGrace {
             inner: Arc::new(RetryGraceInner {
                 is_started: std::sync::atomic::AtomicBool::new(false),
                 grace_ms: std::sync::atomic::AtomicU64::new(duration_to_millis(grace)),
+                started: CancellationToken::new(),
                 stop: CancellationToken::new(),
             }),
         }
@@ -99,8 +112,10 @@ impl ShutdownRetryGrace {
         let grace = cap.map_or(configured, |cap| configured.min(cap));
         if grace.is_zero() {
             self.inner.stop.cancel();
+            self.inner.started.cancel();
             return;
         }
+        self.inner.started.cancel();
         tracing::info!(
             grace_ms = duration_to_millis(grace),
             "worker_pool: shutdown started; retrying failed sends for the grace window"
@@ -121,6 +136,7 @@ impl ShutdownRetryGrace {
             .is_started
             .store(true, std::sync::atomic::Ordering::Release);
         self.inner.stop.cancel();
+        self.inner.started.cancel();
     }
 
     /// Whether the window has opened.
@@ -133,6 +149,12 @@ impl ShutdownRetryGrace {
     /// Token that fires when the window closes. Workers stop retrying then.
     pub(crate) fn stop_token(&self) -> CancellationToken {
         self.inner.stop.clone()
+    }
+
+    /// Token that fires when the window opens. Workers cap their retry
+    /// backoff at [`SHUTDOWN_RETRY_MAX_DELAY`] from then on.
+    pub(crate) fn started_token(&self) -> CancellationToken {
+        self.inner.started.clone()
     }
 }
 

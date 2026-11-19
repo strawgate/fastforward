@@ -349,6 +349,7 @@ impl OutputWorkerPool {
         let cfg = WorkerConfig {
             cancel: self.cancel.clone(),
             stop_retrying: self.retry_grace.stop_token(),
+            shutdown_started: self.retry_grace.started_token(),
             idle_timeout: self.idle_timeout,
             max_retry_delay: self.max_retry_delay,
             metrics: Arc::clone(&self.metrics),
