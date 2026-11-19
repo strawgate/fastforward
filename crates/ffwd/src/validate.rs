@@ -755,7 +755,7 @@ pub(crate) fn validate_input_format_read_only(
 // Test helpers (cfg(test) only)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "datafusion"))]
 pub(crate) fn collect_yaml_files_recursive(
     dir: &std::path::Path,
     out: &mut Vec<std::path::PathBuf>,
@@ -912,6 +912,7 @@ mod tests {
             .expect("sensor input without format should validate");
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn prometheus_value_is_numeric_in_the_read_only_probe() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -969,6 +970,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn select_star_probe_does_not_duplicate_referenced_metadata_column() {
         let yaml = r#"
@@ -998,6 +1000,7 @@ pipelines:
         assert!(failures.is_empty(), "probe failed validation: {failures:?}");
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn full_validation_accepts_prometheus_select_star_with_typed_where() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1030,6 +1033,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_accepts_mixed_case_generator_logs_columns() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1070,6 +1074,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_skips_strict_check_when_enrichment_tables_are_present() {
         let yaml = single_pipeline_yaml_with_sections(
@@ -1093,6 +1098,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_skips_strict_check_for_complex_generator_logs() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1123,6 +1129,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_accepts_valid_cri_columns() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1138,6 +1145,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_accepts_cri_user_json_columns() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1153,6 +1161,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_allows_json_format_any_columns() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1168,6 +1177,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_skips_cri_check_when_enrichment_present() {
         let yaml = single_pipeline_yaml_with_sections(
@@ -1186,6 +1196,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn issue_1955_dry_run_skips_cri_check_for_auto_format() {
         let yaml = single_pipeline_yaml_with_transform(
@@ -1211,6 +1222,7 @@ pipelines:
         );
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn all_yaml_examples_parse_and_validate_read_only() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1324,6 +1336,7 @@ pipelines:
         }
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn transform_probe_accepts_numeric_comparison_and_division() {
         let yaml = r#"
@@ -1352,6 +1365,7 @@ pipelines:
         assert!(failures.is_empty(), "probe failed validation: {failures:?}");
     }
 
+    #[cfg(feature = "datafusion")]
     #[test]
     fn select_star_probe_includes_where_columns() {
         let yaml = r#"

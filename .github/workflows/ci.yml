@@ -45,6 +45,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       miri: ${{ steps.filter.outputs.miri }}
       rust: ${{ steps.filter.outputs.rust }}
+      datafusion: ${{ steps.filter.outputs.datafusion }}
       kani_matrix: ${{ steps.kani-plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
@@ -100,6 +101,31 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+            # Paths whose changes can break the DataFusion SQL path. When none
+            # changed, PR test jobs skip building DataFusion (see
+            # `Test (Linux)`). Push to main and `ci:full` always test it.
+            datafusion:
+              - 'crates/ffwd-transform/**'
+              - 'crates/ffwd-bench/**'
+              - 'crates/ffwd-core/**'
+              - 'crates/ffwd-arrow/**'
+              - 'crates/ffwd-types/**'
+              - 'crates/ffwd-config/**'
+              - 'crates/ffwd-runtime/src/transform.rs'
+              - 'crates/ffwd-runtime/src/pipeline/**'
+              - 'crates/ffwd-runtime/Cargo.toml'
+              - 'crates/ffwd/src/transform.rs'
+              - 'crates/ffwd/src/validate.rs'
+              - 'crates/ffwd/tests/**'
+              - 'crates/ffwd/Cargo.toml'
+              - 'examples/**'
+              - 'bench/scenarios/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain.toml'
+              - '.github/actions/setup-rust/**'
               - '.github/workflows/ci.yml'
       # Kani shards to run: on PRs, only crates whose code or workspace deps
       # changed (see scripts/kani_plan.py); on push to main and ci:full, all.
@@ -276,7 +302,7 @@ jobs:
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.rust == 'true')
+      (github.event.pull_request.draft == false && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.datafusion == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -286,8 +312,23 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@nextest
 
+      # DataFusion is the slowest dependency to compile. On PRs that touch
+      # none of the `datafusion` paths, test without it: skip
+      # ffwd-transform and ffwd-bench, and build the rest without the
+      # `datafusion` feature (tests that need SQL are cfg-gated). Lint's
+      # `clippy --workspace` still type-checks the DataFusion code.
       - name: Tests
-        run: cargo nextest run --workspace --profile ci
+        env:
+          FULL: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full') || needs.changes.outputs.datafusion == 'true' }}
+        run: |
+          if [ "$FULL" = "true" ]; then
+            cargo nextest run --workspace --profile ci
+          else
+            echo "::notice::No DataFusion-relevant paths changed; testing without DataFusion (add the ci:full label to force it)."
+            cargo nextest run --workspace --profile ci \
+              --exclude ffwd-transform --exclude ffwd-bench \
+              --no-default-features --features ffwd/opamp
+          fi
 
   # macOS: push + ci:full only (expensive runner, no path filter or draft check).
   # Exclude Linux-only eBPF crates (aya does not compile on macOS).
@@ -517,7 +558,10 @@ jobs:
       - name: Run Miri test suite (ffwd-core)
         run: cargo +nightly miri test -p ffwd-core --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
@@ -548,7 +592,10 @@ jobs:
       - name: Run Miri test suite (ffwd-types)
         run: cargo +nightly miri test -p ffwd-types --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
@@ -579,7 +626,10 @@ jobs:
       - name: Run targeted Miri regression (ffwd-io shared buffer)
         run: cargo +nightly miri test -p ffwd-io framed::tests::poll_into_miri_shared_buffer_alias_regression --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
@@ -794,7 +844,7 @@ jobs:
   # -------------------------------------------------------------------------
   coverage:
     name: Code Coverage
-    needs: [test-linux]
+    needs: [changes, test-linux]
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -808,8 +858,18 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
 
+      # Same DataFusion scoping as `Test (Linux)`.
       - name: Generate workspace coverage
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --profile ci
+        env:
+          FULL: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full') || needs.changes.outputs.datafusion == 'true' }}
+        run: |
+          if [ "$FULL" = "true" ]; then
+            cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --profile ci
+          else
+            cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --profile ci \
+              --exclude ffwd-transform --exclude ffwd-bench \
+              --no-default-features --features ffwd/opamp
+          fi
 
       - name: Generate HTML report
         run: cargo llvm-cov report --html --output-dir htmlcov

@@ -122,6 +122,13 @@ just fuzz scanner 300        # fuzz a target for 300s (nightly)
 > Adding the `ci:full` PR label includes the slower verification lanes in
 > subsequent CI runs (for example, after pushing a commit or rerunning CI):
 > `miri`, macOS tests, and the deeper TLA/TLC sweeps.
+>
+> On PRs that change none of the DataFusion-relevant paths (the `datafusion`
+> filter in `.github/workflows/ci.yml`), `Test (Linux)` and coverage skip
+> DataFusion: they exclude `ffwd-transform` and `ffwd-bench` and build with
+> `--no-default-features --features ffwd/opamp`. Tests that need SQL must be
+> gated with `#[cfg(feature = "datafusion")]`. Reproduce the lite run with
+> `cargo nextest run --workspace --exclude ffwd-transform --exclude ffwd-bench --no-default-features --features ffwd/opamp`.
 
 ## Test filtering and proptest regressions
 

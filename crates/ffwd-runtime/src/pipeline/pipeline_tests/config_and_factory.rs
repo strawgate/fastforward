@@ -102,6 +102,7 @@ fn test_pipeline_from_config() {
     assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
 }
 
+#[cfg(feature = "datafusion")]
 #[test]
 fn test_pipeline_from_config_with_transform() {
     let dir = tempfile::tempdir().unwrap();
@@ -119,6 +120,7 @@ fn test_pipeline_from_config_with_transform() {
     assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
 }
 
+#[cfg(feature = "datafusion")]
 #[test]
 fn test_pipeline_from_config_per_input_sql() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,6 +151,7 @@ pipelines:
     assert_eq!(pipeline.input_transforms.len(), 1);
 }
 
+#[cfg(feature = "datafusion")]
 #[test]
 fn test_pipeline_from_config_per_input_sql_overrides_transform() {
     let dir = tempfile::tempdir().unwrap();

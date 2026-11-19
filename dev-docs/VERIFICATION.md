@@ -181,6 +181,12 @@ MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test -p ffwd-types --li
 MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test -p ffwd-io framed::tests::poll_into_miri_shared_buffer_alias_regression --lib
 ```
 
+Miri hides host environment variables from the program under test, so
+settings such as `PROPTEST_CASES` only take effect when forwarded:
+`MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES" PROPTEST_CASES=1`.
+CI runs Miri with one proptest case per property this way; without the
+forward, every property ran its default 256 cases under Miri.
+
 ### Non-core pure seam boundary contract
 
 Non-core Kani scope is explicitly tracked in:

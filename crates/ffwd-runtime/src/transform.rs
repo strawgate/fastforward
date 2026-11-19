@@ -345,7 +345,9 @@ mod tests {
 
         #[test]
         fn passthrough_rejects_non_passthrough_sql() {
-            let err = PassthroughTransform::new("SELECT id FROM logs").unwrap_err();
+            let Err(err) = PassthroughTransform::new("SELECT id FROM logs") else {
+                panic!("non-passthrough SQL must be rejected without DataFusion");
+            };
             assert!(err.to_string().contains("DataFusion"));
         }
 

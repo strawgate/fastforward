@@ -223,6 +223,7 @@ fn test_pipeline_flush_on_shutdown() {
     assert!(lines_in > 0, "expected transform_in > 0, got {lines_in}");
 }
 
+#[cfg(feature = "datafusion")]
 /// A SQL that references a column that does not exist in the batch should
 /// cause the transform to return an error.  The pipeline must log the error,
 /// drop that batch, and continue running — it must NOT return `Err`.

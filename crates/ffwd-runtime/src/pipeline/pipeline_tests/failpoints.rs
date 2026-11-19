@@ -104,6 +104,7 @@ fn test_failpoint_shutdown_skip_channel_drain_remains_safe() {
     scenario.teardown();
 }
 
+#[cfg(feature = "datafusion")]
 #[test]
 fn test_transform_filter_all_rows_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
