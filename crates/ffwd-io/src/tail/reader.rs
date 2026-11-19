@@ -9,7 +9,10 @@ use ffwd_types::pipeline::SourceId;
 use super::identity::{
     ByteOffset, FileIdentity, compute_fingerprint, identify_open_file, truncation_generation_of,
 };
-use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState, should_adopt_restored_generation};
+use super::state::{
+    EOF_IDLE_POLLS_BEFORE_EMIT, EofState, next_truncation_generation,
+    should_adopt_restored_generation,
+};
 use super::tailer::{TailConfig, TailEvent};
 
 /// State tracked per tailed file.
@@ -188,10 +191,21 @@ impl FileReader {
                 && evicted.identity.inode == identity.inode
             {
                 // Empty-file sentinel case: fingerprint can legitimately change
-                // from 0 to non-zero when data is first appended.
+                // from 0 to non-zero when data is first appended. Keep the
+                // generation: a file truncated to empty already moved to a new
+                // one, and the appended bytes belong to it.
+                stored_generation = evicted.generation;
                 0
             } else {
                 tracing::warn!(path = %path.display(), evicted_identity = ?evicted.identity, current_identity = ?identity, "evicted offset identity mismatch — ignoring saved offset");
+                if evicted.identity.device == identity.device
+                    && evicted.identity.inode == identity.inode
+                {
+                    // Same inode, different contents: rewritten in place while
+                    // evicted. Advance the generation like a truncation so the
+                    // new contents never reuse an older contents' id.
+                    stored_generation = next_truncation_generation(evicted.generation);
+                }
                 if start_from_end {
                     file.seek(SeekFrom::End(0))?
                 } else {
@@ -1156,6 +1170,55 @@ mod tests {
         reader.open_file_at(&path, false).unwrap();
         assert_eq!(reader.source_id_for_path(&path), Some(after));
         assert_eq!(reader.get_offset(&path), Some(23));
+    }
+
+    #[test]
+    fn evicted_truncate_to_empty_keeps_generation_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evict-empty.log");
+        let contents = b"same-leading-bytes original contents\n";
+        fs::write(&path, contents).unwrap();
+        let mut reader = FileReader {
+            config: TailConfig {
+                fingerprint_bytes: 16,
+                ..TailConfig::default()
+            },
+            ..test_reader()
+        };
+        reader.open_file_at(&path, false).unwrap();
+        assert!(matches!(
+            reader.read_new_data(&path).unwrap(),
+            ReadResult::Data(_)
+        ));
+        let original = reader.source_id_for_path(&path).unwrap();
+
+        // Truncate to empty, observe it, then evict while empty.
+        fs::write(&path, b"").unwrap();
+        assert!(matches!(
+            reader.read_new_data(&path).unwrap(),
+            ReadResult::Truncated
+        ));
+        reader.evict_lru(0);
+
+        // The same leading bytes come back while the file is evicted.
+        fs::write(&path, contents).unwrap();
+        reader.open_file_at(&path, false).unwrap();
+        let reopened = reader.source_id_for_path(&path).unwrap();
+        assert_ne!(reopened, original, "rewritten contents must get a new id");
+        assert_eq!(reader.files.get(&path).unwrap().generation, 1);
+    }
+
+    #[test]
+    fn evicted_same_inode_rewrite_advances_generation_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evict-rewrite.log");
+        let (mut reader, _) = reader_after_same_prefix_truncation(&path);
+        reader.evict_lru(0);
+
+        // Rewritten in place with different leading bytes while evicted.
+        fs::write(&path, b"different-leading-bytes now\n").unwrap();
+        reader.open_file_at(&path, false).unwrap();
+        assert_eq!(reader.files.get(&path).unwrap().generation, 2);
     }
 
     #[test]
