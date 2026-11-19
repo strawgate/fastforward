@@ -257,6 +257,35 @@ committing. Equivalent to per-partition independent offsets in Kafka. Differs fr
 global checkpoint barrier, which is required for stateful stream processing but adds
 blocking a stateless forwarder should not need.
 
+### Truncated files get a new `SourceId` (truncation generations)
+
+**Context:** a tailed file's `SourceId` hashes its device, inode and first
+1024 bytes. A file truncated and rewritten with the same leading bytes kept its
+id, so checkpoints of the old contents (in flight, or persisted before a
+restart) could resume the new contents past unread data, and committed offsets
+for one id went backward.
+
+**Decision:** each detected truncation, and each same-inode rewrite seen on
+reopen, advances a per-file truncation generation (`tail/state.rs`
+`next_truncation_generation`). The id is `base + generation × odd stride
+(mod 2^64)` (`tail/identity.rs`). Generation 0 is the base id, so checkpoints
+from earlier versions restore unchanged. The stride is invertible, so a
+restore decodes a stored id's generation in O(1) and adopts only newer
+generations (`should_adopt_restored_generation`), whatever order the
+checkpoints arrive in. We did not add the base identity and generation to
+`SourceCheckpoint`: that would change the store format and make the runtime
+aware of file identities.
+
+**Consequences:** generations are capped at 2^16 (a file truncated more often
+keeps its last id), which keeps the chance that an unrelated stored id decodes
+as a generation at 2^-48 per (stored checkpoint, tailed file) pair. With
+`source_metadata: fastforward`, rows from a truncated file's new contents carry
+a new `source_id`. If the process stops after a truncation but before the new
+generation commits, a restart still resumes from the old generation's
+checkpoint (the copytruncate race window). Kani, proptest and
+`tla/TailLifecycle.tla` (`GenerationNeverDecreases`,
+`TruncateAdvancesGeneration`) cover the transitions.
+
 ### `fail()` is invisible to the pipeline machine
 
 A `fail()`'d batch returns its ticket to Queued state, but the machine still tracks it as
