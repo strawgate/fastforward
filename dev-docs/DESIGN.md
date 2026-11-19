@@ -220,6 +220,25 @@ Filebeat's default (`shutdown_timeout: 0`, no waiting for acks at shutdown) and 
 waits up to its graceful shutdown limit (60s). Modeled in `tla/DeliveryRetry.tla`
 (`BeginShutdown`/`StopRetrying`, checked under `GracefulSpec`).
 
+### Shutdown drains queued batches within one drain budget
+
+On SIGTERM or a config reload, the bootstrap loop cancels the pipeline token and keeps
+awaiting the same `run_async` future (`drive_main_pipeline`). Dropping that future and
+calling `run_async` again discarded every batch queued in the input channel, because the
+first call had already taken the inputs and owned the channel. `run_async`'s own shutdown
+path now runs once: submit queued batches, close the channel receiver, join input threads,
+drain the pool, flush checkpoints.
+
+Submitting queued batches and draining the pool share one budget, `pool_drain_timeout`
+(60s), counted from when shutdown was requested. Once it is spent, batches still queued are
+left unsent and the pool drains with whatever is left. Checkpoints for unsent batches never
+advance, so file inputs replay them; inputs without checkpoints lose them. Without the
+budget, a collector that accepts connections but stalls each send would make every queued
+batch wait out a send timeout in turn. A `submit_batch` already in progress is not cancelled,
+because dropping its `Sending` tickets would block the drain, so the worst case is the budget
+plus one batch send. The receiver is closed before joining producers on every path, so a
+drain that stops early cannot leave a producer parked on the full channel.
+
 ### Per-source independent checkpoints
 
 Each source has its own `committed[s]`. A slow source doesn't block a fast source from
