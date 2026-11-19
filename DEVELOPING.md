@@ -466,6 +466,17 @@ Fix: put the background rationale first and end the comment with the `// SAFETY:
 
 When an output is down and the worker pool is full, `run_async` sits inside `submit_batch` waiting for a worker slot, so its `select!` never sees the shutdown token. Workers retry forever, so the slot never frees, and shutdown waits out the whole pool drain timeout (60s). That is why `run_async` spawns a small task that opens the pool's shutdown retry window (`ShutdownRetryGrace::begin`) the moment the token fires, independently of the loop. When the window (`shutdown_retry_grace_ms`, default 10s) closes, the busy worker gives up its batch without acking it, the blocked submit completes, and the loop exits. An unacked batch is not durably held: checkpointed inputs (files) replay it from their last committed checkpoint on restart, while inputs without checkpoints (TCP/UDP/OTLP receivers) lose it. A test that only uses a few hundred lines never fills the pool and passes without the fix; `shutdown_with_down_output_and_saturated_pool_exits_promptly` uses 50,000 lines and 64-byte batches for this reason.
 
+### A long retry backoff can sleep through the whole shutdown grace window
+
+During an outage, output retry backoff grows to `max_retry_delay` (30s), longer than the 10s
+`shutdown_retry_grace_ms` window. Before the fix, a worker in that sleep when shutdown or a
+reload began slept through the whole window and held its batch even if the output came back
+seconds in, so non-checkpointed inputs (Prometheus scrapes) lost data on every reload during
+an outage. `ShutdownRetryGrace` now fires a started token, and `wait_before_retry` caps backoff
+at `SHUTDOWN_RETRY_MAX_DELAY` (1s) from then on, including a sleep already in progress. Test:
+`process_item_retries_soon_after_shutdown_starts_during_long_backoff`. Time-dependent behavior
+like this isn't visible to the TLA+ model, which abstracts backoff duration.
+
 ### Never drop a running `run_async` future to stop a pipeline
 
 `run_async` takes the pipeline's inputs and owns the input channel, and its shutdown path is what submits the batches still queued in that channel, joins input threads, drains the output pool and flushes checkpoints. If a caller races it in a `select!` against a shutdown or reload signal and lets the losing branch drop it, the queued batches are discarded with the channel; calling `run_async` again only drains the pool, because the inputs are already gone. The bootstrap loop therefore pins one `run_async` future (`drive_main_pipeline`), cancels the pipeline token, and keeps awaiting that same future. `shutdown_drains_batches_queued_in_main_pipeline_input_channel` covers this; with the old drop-and-rerun code it delivered 2 of 12 lines.
