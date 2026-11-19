@@ -45,12 +45,16 @@ const GENERATION_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 /// Multiplicative inverse of [`GENERATION_STRIDE`] modulo 2^64.
 const GENERATION_STRIDE_INV: u64 = modular_inverse_u64(GENERATION_STRIDE);
 
-/// Highest truncation generation a file can reach. Larger counts saturate.
+/// Highest truncation generation a file can reach. Larger counts saturate,
+/// so a file truncated more often than this keeps its last id.
 ///
-/// Restores only accept generations up to this bound, which keeps the chance
-/// that an unrelated stored id decodes to a valid generation negligible
-/// (about 2^-32 per stored checkpoint and tailed file).
-pub(super) const MAX_TRUNCATION_GENERATION: u64 = u32::MAX as u64;
+/// Restores decode a stored id as a generation of a tailed file when it falls
+/// in `0..=MAX_TRUNCATION_GENERATION`, so an unrelated stored id matches by
+/// chance with probability 2^-48 per (stored checkpoint, tailed file) pair.
+/// Checkpoint stores keep stale entries indefinitely, so the bound is kept
+/// small: even 10^9 pairs give a false-match chance below 10^-5, while 65,535
+/// truncations is more than an hourly-truncated file reaches in 7 years.
+pub(super) const MAX_TRUNCATION_GENERATION: u64 = u16::MAX as u64;
 
 /// Newton iteration for the inverse of an odd `u64` modulo 2^64.
 const fn modular_inverse_u64(value: u64) -> u64 {
@@ -238,6 +242,15 @@ mod tests {
         let base = SourceId(0x1234_5678_9ABC_DEF0);
         let other = SourceId(0x0FED_CBA9_8765_4321);
         assert_eq!(truncation_generation_of(base, other), None);
+    }
+
+    #[test]
+    fn far_generation_id_is_not_decoded() {
+        // Decodes as generation 81,837,719, past the bound, so a stale
+        // checkpoint from another file cannot be adopted.
+        let base = SourceId(0xd10c_ce99_2cf0_6c9f);
+        let unrelated = SourceId(0xb869_d299_7057_3302);
+        assert_eq!(truncation_generation_of(base, unrelated), None);
     }
 
     #[test]
