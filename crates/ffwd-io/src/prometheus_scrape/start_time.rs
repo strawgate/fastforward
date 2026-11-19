@@ -367,8 +367,14 @@ impl StartTimeTracker {
             if let Some(slot) = self.created_keys.get_mut(row) {
                 *slot = created_key;
             }
+            // A counter's sample name is its series: `foo` and `foo_total`
+            // are exported as separate metrics.
+            let series = match folded {
+                Folded::Nothing => xxh64(name.as_bytes(), SEED).wrapping_add(family_labels),
+                Folded::Le | Folded::Quantile => created_key,
+            };
             if let Some(slot) = self.families.get_mut(row) {
-                *slot = created_key.wrapping_add(xxh64(&[kind], SEED ^ 2));
+                *slot = series.wrapping_add(xxh64(&[kind], SEED ^ 2));
             }
             if let Some(slot) = self.keys.get_mut(row) {
                 *slot = xxh64(name.as_bytes(), SEED ^ 1)
@@ -702,6 +708,18 @@ mod tests {
         let rows = scrape(&mut t, &text(0, 7), false, 3000);
         assert_eq!(start_of(&rows, "foo_total"), Some(2000));
         assert_eq!(start_of(&rows, "foo_count"), Some(1000));
+    }
+
+    #[test]
+    fn counters_named_with_and_without_total_keep_separate_starts() {
+        let mut t = StartTimeTracker::new(16);
+        let text = |a: u32, b: u32| format!("# TYPE foo counter\nfoo {a}\nfoo_total {b}\n");
+        scrape(&mut t, &text(5, 5), false, 1000);
+        scrape(&mut t, &text(6, 6), false, 2000);
+        // `foo` resets; `foo_total` does not.
+        let rows = scrape(&mut t, &text(1, 7), false, 3000);
+        assert_eq!(start_of(&rows, "foo"), Some(2000));
+        assert_eq!(start_of(&rows, "foo_total"), Some(1000));
     }
 
     #[test]
