@@ -517,7 +517,10 @@ jobs:
       - name: Run Miri test suite (ffwd-core)
         run: cargo +nightly miri test -p ffwd-core --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
@@ -548,7 +551,10 @@ jobs:
       - name: Run Miri test suite (ffwd-types)
         run: cargo +nightly miri test -p ffwd-types --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
@@ -579,7 +585,10 @@ jobs:
       - name: Run targeted Miri regression (ffwd-io shared buffer)
         run: cargo +nightly miri test -p ffwd-io framed::tests::poll_into_miri_shared_buffer_alias_regression --lib
         env:
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          # Miri's isolation hides host env vars from the test unless they
+          # are forwarded; without these flags proptest ignored
+          # PROPTEST_CASES=1 and ran 256 cases per test (~35 min).
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
           PROPTEST_CASES: "1"
 
