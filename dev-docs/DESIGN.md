@@ -206,7 +206,9 @@ window backoff is capped at `SHUTDOWN_RETRY_MAX_DELAY` (1s), and a backoff alrea
 is cut to that cap when the window opens. Normal backoff reaches 30s during a long outage, so
 without the cap a worker would sleep through the whole window and hold its batch even if the
 output had recovered (found by a soak test: scrapes lost on reload while the collector was
-back). When the window closes, a worker in backoff gives up at once and later
+back). The cost is up to about one extra request per worker per second against an output
+that is still down, so about 10 per worker at the 10s default. That is cheap next to losing
+data from non-checkpointed inputs on every reload during an outage. When the window closes, a worker in backoff gives up at once and later
 transient failures are not retried: the batch resolves as `PoolClosed` (held, checkpoint not
 advanced). The window bounds retries cooperatively: a retry can still start at or just after
 expiry, and a retry that is mid-send is abandoned at its next poll, with the batch held
