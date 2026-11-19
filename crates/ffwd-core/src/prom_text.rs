@@ -434,9 +434,18 @@ pub fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
 /// exponents, `NaN`, `Inf` and long mantissas. `digits` is `bytes` without
 /// its sign. Kept separate so Kani proofs can stub `core`'s parser, whose
 /// state space is too large for CBMC; `core` itself is trusted.
+///
+/// The accepted syntax matches Prometheus, which parses values with Go's
+/// `strconv.ParseFloat` but first rejects any value containing `p`, `P` or
+/// `_` (so hex floats and digit separators are errors there too). `core`'s
+/// grammar for the remaining decimal forms is the same as Go's, except that
+/// `core` also accepts a signed `NaN`, which Go rejects.
 fn parse_prom_value_fallback(bytes: &[u8], digits: &[u8]) -> Option<f64> {
     let s = core::str::from_utf8(bytes).ok()?;
     let v = s.parse::<f64>().ok()?;
+    if v.is_nan() && digits.len() != bytes.len() {
+        return None;
+    }
     // `core` rounds out-of-range literals such as `1e999` to infinity;
     // Prometheus rejects them. Only an explicit `Inf` may be infinite.
     if v.is_infinite()
@@ -1658,6 +1667,62 @@ mod tests {
         }
         let rows = scan("a +Inf\nb -inf\nc Infinity\n").expect("explicit infinities");
         assert_eq!(rows.len(), 3);
+    }
+
+    /// Expected results come from Prometheus' `parseFloat` (Go's
+    /// `strconv.ParseFloat` after rejecting `p`, `P` and `_`); `None` is a
+    /// Go error. A differential run over 200k random strings found no other
+    /// disagreement.
+    #[test]
+    fn value_syntax_matches_prometheus() {
+        let cases: &[(&str, Option<f64>)] = &[
+            ("+Inf", Some(f64::INFINITY)),
+            ("-Inf", Some(f64::NEG_INFINITY)),
+            ("inf", Some(f64::INFINITY)),
+            ("-infinity", Some(f64::NEG_INFINITY)),
+            ("+INFINITY", Some(f64::INFINITY)),
+            ("Infinit", None),
+            ("infx", None),
+            ("1e+06", Some(1e6)),
+            ("1E-06", Some(1e-6)),
+            ("1.", Some(1.0)),
+            (".5", Some(0.5)),
+            ("-.5", Some(-0.5)),
+            ("-0", Some(-0.0)),
+            ("0e0", Some(0.0)),
+            ("1e-400", Some(0.0)),
+            ("4.9e-324", Some(5e-324)),
+            ("1.7976931348623157e308", Some(f64::MAX)),
+            ("1.7976931348623159e308", None),
+            (
+                "123456789012345678901234567890",
+                Some(1.2345678901234568e29),
+            ),
+            (".", None),
+            ("+", None),
+            ("e5", None),
+            ("1e", None),
+            ("1e+", None),
+            ("0x10", None),
+            ("0x1p-2", None),
+            ("0X1P3", None),
+            ("1_000", None),
+            ("-NaN", None),
+            ("+nan", None),
+        ];
+        for &(s, want) in cases {
+            assert_eq!(
+                parse_prom_value(s.as_bytes()).map(f64::to_bits),
+                want.map(f64::to_bits),
+                "{s}"
+            );
+        }
+        for s in ["NaN", "nan", "NAN"] {
+            assert!(
+                parse_prom_value(s.as_bytes()).is_some_and(f64::is_nan),
+                "{s}"
+            );
+        }
     }
 
     #[test]
