@@ -304,9 +304,13 @@ The file path is:
 - The current worker/pipeline seam does not yet retain enough batch payload
   state to requeue held batches in-process, so non-advancing failures are
   replayed on restart if shutdown force-stops with unresolved tickets.
-- Once shutdown begins, output workers keep retrying failed sends with their
-  normal backoff for a bounded window (`shutdown_retry_grace_ms`, default 10s,
-  capped by the pool drain timeout), so a brief output blip still delivers.
+- Once shutdown begins, output workers keep retrying failed sends for a
+  bounded window (`shutdown_retry_grace_ms`, default 10s, capped by the pool
+  drain timeout), so a brief output blip still delivers. Inside the window the
+  backoff is capped at `SHUTDOWN_RETRY_MAX_DELAY` (1s), and a worker already
+  sleeping in a longer backoff when shutdown begins retries within that cap;
+  otherwise a worker deep in the 30s backoff of a long outage would sleep
+  through the whole window.
   When the window closes, a worker in backoff gives up at once and later
   transient failures are not retried: the batch resolves as `PoolClosed` (held,
   checkpoint not advanced). Stopping is cooperative, not a hard barrier: a

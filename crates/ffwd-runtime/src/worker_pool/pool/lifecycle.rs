@@ -33,6 +33,7 @@ pub(super) struct WorkerConfig {
     pub(super) idle_timeout: Duration,
     pub(super) cancel: CancellationToken,
     pub(super) stop_retrying: CancellationToken,
+    pub(super) shutdown_started: CancellationToken,
     pub(super) max_retry_delay: Duration,
     pub(super) metrics: Arc<PipelineMetrics>,
     pub(super) output_health: Arc<OutputHealthTracker>,
