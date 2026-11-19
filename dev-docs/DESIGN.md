@@ -236,7 +236,10 @@ advance, so file inputs replay them; inputs without checkpoints lose them. Witho
 budget, a collector that accepts connections but stalls each send would make every queued
 batch wait out a send timeout in turn. A `submit_batch` already in progress is not cancelled,
 because dropping its `Sending` tickets would block the drain, so the worst case is the budget
-plus one batch send. The receiver is closed before joining producers on every path, so a
+plus one batch send. The budget bounds graceful delivery work, not total exit time: pool
+cancellation grace and checkpoint flushing can follow it. A config reload additionally caps
+its wait for the old pipeline at 30s (`RELOAD_DRAIN_TIMEOUT`), so queued batches get at most
+that long before the new pipeline starts. The receiver is closed before joining producers on every path, so a
 drain that stops early cannot leave a producer parked on the full channel.
 
 ### Per-source independent checkpoints
