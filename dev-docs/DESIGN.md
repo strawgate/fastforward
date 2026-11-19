@@ -486,9 +486,13 @@ summary's samples.
 **Memory budget (#2928).** `max_inflight_bytes` (default 1 GiB) is a semaphore
 shared by an input's targets, held from before a request until the pipeline
 takes the batch. A scrape reserves what its previous scrape needed and waits,
-holding nothing, while the budget is used up. Growth beyond that waits only
-until the scrape's timeout, so targets holding part of the budget cannot
-deadlock each other. A scrape larger than the whole budget takes all of it and
+holding nothing, while the budget is used up. The response buffer is reserved
+before it grows and may wait only until the scrape's timeout, so targets
+holding part of the budget cannot deadlock each other. Gunzip output and Arrow
+batches are covered right after they are built, without waiting; those steps
+are synchronous on the input's single-threaded runtime, so at most one scrape
+holds uncovered memory at a time, and a scrape that can't be covered is
+dropped and reserves its peak up front next time. A scrape larger than the whole budget takes all of it and
 runs alone rather than failing.
 
 **Alternative considered:** a separate metrics data model in the pipeline. Rejected

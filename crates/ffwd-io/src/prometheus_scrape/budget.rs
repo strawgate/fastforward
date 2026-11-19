@@ -7,10 +7,19 @@
 //! Before a request a scrape reserves its estimate (what its previous scrape
 //! needed) and waits while the budget is exhausted, holding nothing; that
 //! wait is what delays scrapes when the output is slow. If the scrape then
-//! needs more, it may wait for the extra only until its timeout. Waiting
-//! while holding part of the budget could otherwise deadlock targets that
-//! each hold some and wait for more; a scrape that times out is counted as
-//! failed and its next attempt reserves enough up front.
+//! needs more:
+//!
+//! - for the response body, it reserves before growing the buffer and may
+//!   wait only until its timeout. Waiting while holding part of the budget
+//!   could otherwise deadlock targets that each hold some and wait for more.
+//! - gunzip output and Arrow batches are allocated before their size is
+//!   known, so they are covered right after, without waiting
+//!   ([`Reservation::try_grow_to`]). These steps are synchronous on the
+//!   input's single-threaded runtime, so at most one scrape at a time holds
+//!   uncovered memory.
+//!
+//! A scrape that can't get the extra is counted as failed and drops its
+//! data; its next attempt reserves enough up front.
 //!
 //! A single scrape larger than the whole budget takes all of it, so it runs
 //! alone instead of failing.
@@ -96,6 +105,7 @@ pub struct OverBudget {
 
 impl Reservation {
     /// Bytes currently held.
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.permit.num_permits().saturating_mul(UNIT)
     }
@@ -119,6 +129,21 @@ impl Reservation {
                 }
             }
         };
+        self.permit.merge(more);
+        Ok(())
+    }
+
+    /// Hold at least `bytes` (capped at the whole budget) only if the extra
+    /// is available right now.
+    pub fn try_grow_to(&mut self, bytes: usize) -> Result<(), OverBudget> {
+        let want = self.budget.units_for(bytes);
+        let held = u32::try_from(self.permit.num_permits()).unwrap_or(u32::MAX);
+        if want <= held {
+            return Ok(());
+        }
+        let more = Arc::clone(&self.budget.sem)
+            .try_acquire_many_owned(want - held)
+            .map_err(|_no_room| OverBudget { needed: bytes })?;
         self.permit.merge(more);
         Ok(())
     }
@@ -184,6 +209,11 @@ mod tests {
             assert_eq!(b.available_bytes(), 3 * UNIT);
             a.grow_to(8 * UNIT, deadline).await.expect("room now");
             assert_eq!(a.bytes(), 8 * UNIT);
+            // Growth without waiting fails at once when there is no room.
+            assert_eq!(a.try_grow_to(9 * UNIT).expect_err("full").needed, 9 * UNIT);
+            c.shrink_to(UNIT);
+            a.try_grow_to(9 * UNIT).expect("room now");
+            assert_eq!(b.available_bytes(), 0);
         });
     }
 

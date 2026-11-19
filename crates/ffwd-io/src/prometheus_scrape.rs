@@ -535,7 +535,9 @@ async fn scrape_once(
     })
 }
 
-/// Grow `reservation` to cover `bytes` and record the peak.
+/// Grow `reservation` to cover `bytes`, waiting until `deadline` at most,
+/// and record the peak. Only for memory not allocated yet: a scrape must
+/// never wait while it holds memory the budget does not cover.
 async fn hold(
     reservation: &mut Reservation,
     bytes: usize,
@@ -546,6 +548,19 @@ async fn hold(
     reservation
         .grow_to(bytes, deadline)
         .await
+        .map_err(|OverBudget { needed }| ScrapeError::OverBudget(needed))
+}
+
+/// Cover `bytes` that are already allocated, without waiting, and record the
+/// peak. Gunzip and Arrow materialization can't be reserved for ahead of
+/// time; they run synchronously on the input's single-threaded runtime, so
+/// at most one scrape at a time holds memory the budget does not cover, and
+/// only until this call. On failure the caller drops that memory, and the
+/// next scrape reserves the peak up front.
+fn cover(reservation: &mut Reservation, bytes: usize, peak: &mut usize) -> Result<(), ScrapeError> {
+    *peak = (*peak).max(bytes);
+    reservation
+        .try_grow_to(bytes)
         .map_err(|OverBudget { needed }| ScrapeError::OverBudget(needed))
 }
 
@@ -601,13 +616,18 @@ async fn scrape_reserved(
     hold(reservation, initial, deadline, peak).await?;
     let mut buf = BytesMut::with_capacity(initial);
     while let Some(chunk) = resp.chunk().await.map_err(http_error)? {
-        if buf.len() + chunk.len() > limit {
+        let needed = buf.len() + chunk.len();
+        if needed > limit {
             return Err(ScrapeError::TooLarge(limit));
         }
-        buf.extend_from_slice(&chunk);
-        if buf.capacity() > reservation.bytes() {
-            hold(reservation, buf.capacity(), deadline, peak).await?;
+        if needed > buf.capacity() {
+            // Reserve the grown buffer before allocating it, so a wait
+            // holds only memory already covered (plus this one chunk).
+            let new_cap = needed.max(buf.capacity().saturating_mul(2)).min(limit);
+            hold(reservation, new_cap, deadline, peak).await?;
+            buf.reserve(new_cap - buf.len());
         }
+        buf.extend_from_slice(&chunk);
     }
     let wire_bytes = buf.len() as u64;
     // OpenMetrics timestamps are float seconds; the text format uses
@@ -615,7 +635,7 @@ async fn scrape_reserved(
     builder.config_mut().openmetrics = resp_is_openmetrics;
     let body: Bytes = if is_gzip {
         let decoded = gunzip_limited(&buf, limit)?;
-        hold(reservation, buf.capacity() + decoded.len(), deadline, peak).await?;
+        cover(reservation, buf.capacity() + decoded.len(), peak)?;
         decoded
     } else {
         buf.freeze()
@@ -636,7 +656,7 @@ async fn scrape_reserved(
     } else {
         batch
     };
-    hold(reservation, batch.get_array_memory_size(), deadline, peak).await?;
+    cover(reservation, batch.get_array_memory_size(), peak)?;
     Ok((batch, wire_bytes))
 }
 
