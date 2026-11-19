@@ -256,6 +256,9 @@ The file path is:
 - Rotate, truncate, delete/recreate, and EOF/stall notifications are explicit events.
 - `Truncated` must be emitted before post-truncate data so framing state can be
   cleared safely.
+- `Truncated` carries the pre-truncation `SourceId`. Post-truncate data carries
+  a new `SourceId` (the file's next truncation generation), so checkpoints for
+  the old contents never apply to the new contents.
 - Every `InputSource` implementation must define its control-plane `health()`
   semantics explicitly; input lifecycle truth must not rely on a trait-level
   default.

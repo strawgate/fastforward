@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use ffwd_types::pipeline::SourceId;
 
-use super::identity::FileIdentity;
+use super::identity::{FileIdentity, MAX_TRUNCATION_GENERATION, truncation_generation_source_id};
 use super::state::EofState;
 
 /// Untracked state: file is not known to the tailer.
@@ -22,6 +22,9 @@ pub struct DiscoveredUnopened;
 /// Active state: file is open and actively being tailed.
 pub struct Active {
     pub identity: FileIdentity,
+    /// Number of truncations detected on this file. Each one gives the file a
+    /// new `SourceId`, so rewritten content is checkpointed as a new source.
+    pub generation: u64,
     pub comparison_fingerprint: u64,
     pub fingerprint_len: u64,
     pub file: File,
@@ -34,6 +37,8 @@ pub struct Active {
 /// Evicted, closed, and cached: file was closed due to LRU, state is preserved.
 pub struct EvictedClosedCached {
     pub identity: FileIdentity,
+    /// Truncation generation of the file when it was evicted.
+    pub generation: u64,
     pub comparison_fingerprint: u64,
     pub fingerprint_len: u64,
     pub eof_state: EofState,
@@ -63,6 +68,14 @@ impl Active {
     /// Default reserve size when the per-file `BytesMut` needs more capacity.
     const READ_BUF_RESERVE: usize = 64 * 1024;
 
+    /// Checkpoint identity of the file's current contents.
+    ///
+    /// Combines the device/inode/fingerprint identity with the truncation
+    /// generation. `SourceId(0)` still means the file is empty.
+    pub(super) fn source_id(&self) -> SourceId {
+        truncation_generation_source_id(self.identity.source_id(), self.generation)
+    }
+
     pub(super) fn read_new_data(
         &mut self,
         per_file_budget: usize,
@@ -77,6 +90,14 @@ impl Active {
 
         let was_truncated = current_size < self.offset;
         if was_truncated {
+            // Treat the rewritten file as a new source. Keeping the old id
+            // would let checkpoints from the previous contents (still in
+            // flight, or persisted before a crash) resume the new contents
+            // past data that was never read.
+            self.generation = self
+                .generation
+                .saturating_add(1)
+                .min(MAX_TRUNCATION_GENERATION);
             self.offset = 0;
             self.read_buf.clear();
             self.eof_state.on_data();

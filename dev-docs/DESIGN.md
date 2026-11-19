@@ -154,11 +154,17 @@ invariants.
 nondecreasing checkpoints in creation order. The machine commits each batch's
 own checkpoint, so the committed checkpoint is monotonic only when that
 precondition holds. The TLA+ model has it built in: there `committed[s]` is a
-batch sequence number. Real inputs do not always satisfy it. When a tailed file
-is truncated, the reader resets its offset to 0 (`ffwd-io` `tail/lifecycle.rs`),
-and if the rewritten file keeps the same device, inode and leading bytes it
-keeps its `SourceId`, so later batches carry smaller offsets and the committed
-checkpoint goes back with them. The proof does not cover that path.
+batch sequence number. The file tailer keeps it across truncation: when a
+tailed file is truncated, the reader resets its offset to 0 and bumps the
+file's truncation generation (`ffwd-io` `tail/lifecycle.rs`), which gives the
+rewritten contents a new `SourceId` even when the device, inode and leading
+bytes are unchanged. Offsets for one `SourceId` therefore never go back.
+Restores decode the generation from a stored `SourceId` and resume from the
+newest generation, ignoring checkpoints of contents the file no longer has
+(`tail/identity.rs`). If the process stops after a truncation but before any
+batch of the new generation is committed, only the old generation's checkpoint
+exists and a restart resumes from it; this is part of the documented
+copytruncate race window.
 
 ### `BTreeMap` replaced by `ArrayMap` under Kani
 

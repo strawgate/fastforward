@@ -203,6 +203,74 @@ fn test_poll_truncated_then_data_uses_new_source_id() {
     }
 }
 
+/// A file truncated and rewritten with the same leading bytes (same device,
+/// inode and fingerprint) must be read from the start under a new source id,
+/// so checkpoints for its old contents cannot skip the new data.
+#[test]
+fn test_truncated_rewrite_with_same_leading_bytes_is_new_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("same_header.log");
+    // A header longer than the 1024-byte fingerprint window, so the old and
+    // new contents have identical fingerprints.
+    let header = format!("{}\n", "H".repeat(1100));
+    fs::write(
+        &log_path,
+        format!("{header}{}", "old line\n".repeat(50)).as_bytes(),
+    )
+    .unwrap();
+
+    let config = TailConfig {
+        start_from_end: false,
+        poll_interval_ms: 10,
+        ..Default::default()
+    };
+    let mut tailer =
+        FileTailer::new(std::slice::from_ref(&log_path), config, create_test_stats()).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    tailer.poll().unwrap();
+    let old_source_id = tailer
+        .source_id_for_path(&log_path)
+        .expect("non-empty file should have a source id");
+
+    let new_contents = format!("{header}new line\n");
+    fs::write(&log_path, new_contents.as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let events = tailer.poll().unwrap();
+
+    let truncated_source_id = events.iter().find_map(|e| match e {
+        TailEvent::Truncated { source_id, .. } => Some(*source_id),
+        _ => None,
+    });
+    assert_eq!(
+        truncated_source_id,
+        Some(Some(old_source_id)),
+        "Truncated must name the pre-truncation source"
+    );
+    let (data, data_source_id) = events
+        .iter()
+        .find_map(|e| match e {
+            TailEvent::Data {
+                bytes, source_id, ..
+            } => Some((bytes.clone(), *source_id)),
+            _ => None,
+        })
+        .expect("should read the rewritten contents");
+    assert_eq!(
+        data.as_ref(),
+        new_contents.as_bytes(),
+        "must re-read from 0"
+    );
+    let new_source_id = data_source_id.expect("data must carry a source id");
+    assert_ne!(
+        new_source_id, old_source_id,
+        "truncation must give a new id"
+    );
+    assert_eq!(
+        tailer.file_offsets(),
+        vec![(new_source_id, ByteOffset(new_contents.len() as u64))]
+    );
+}
+
 /// Regression test: glob-discovered file deletions must shrink watch_paths
 /// so the list does not grow unboundedly with file churn. (#810)
 #[cfg(unix)]

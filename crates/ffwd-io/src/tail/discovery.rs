@@ -369,6 +369,7 @@ mod tests {
         reader.evicted_offsets.insert(
             path.clone(),
             EvictedFile {
+                generation: 0,
                 identity: FileIdentity {
                     device: 111,
                     inode: 222,
@@ -461,7 +462,7 @@ mod tests {
 
         let tailed = reader.files.get(&path).expect("tailed file");
         assert_eq!(tailed.fingerprint_len, 32);
-        let source_id = tailed.identity.source_id();
+        let source_id = tailed.source_id();
 
         fs::write(&path, b"LINE-00000000\nrewritten-after-promoted-window\n").unwrap();
 
@@ -600,6 +601,7 @@ mod tests {
         reader.files.insert(
             path.clone(),
             TailedFile {
+                generation: 0,
                 comparison_fingerprint: stale_identity.fingerprint,
                 identity: stale_identity,
                 fingerprint_len: 1024,

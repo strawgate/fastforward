@@ -304,7 +304,7 @@ impl FileTailer {
             if already_emitted || !shutdown_should_emit_eof(tailed.offset, file_size) {
                 return None;
             }
-            let source_id = nonzero_source_id(tailed.identity.source_id())?;
+            let source_id = nonzero_source_id(tailed.source_id())?;
             Some((path.clone(), Some(source_id)))
         });
 

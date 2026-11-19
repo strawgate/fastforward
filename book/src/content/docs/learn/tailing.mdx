@@ -18,7 +18,7 @@ The simulation auto-rotates after 30 lines. You can also trigger it manually.
 
 ## Truncation
 
-Truncation is different: the file path and inode stay the same, but the file is suddenly smaller than the last recorded offset. A naive tailer would either block waiting for more data or keep seeking past end-of-file. FastForward detects that the current offset exceeds the file size and rewinds to 0 — no new file, no inode change.
+Truncation is different: the file path and inode stay the same, but the file is suddenly smaller than the last recorded offset. A naive tailer would either block waiting for more data or keep seeking past end-of-file. FastForward detects that the current offset exceeds the file size, rewinds to 0, and treats the rewritten contents as a new source with its own checkpoint, even when they start with the same bytes as before. Checkpoints saved for the old contents are never applied to the new ones, so a restart cannot skip past data that was never read.
 
 <TruncationDemo />
 
@@ -29,6 +29,7 @@ The key insight: FastForward doesn't track files by **path** — it tracks them 
 - **Device ID** — which filesystem the file lives on
 - **Inode number** — the kernel's unique identifier for the file
 - **Fingerprint** — xxhash64 of the first 1024 bytes
+- **Truncation generation** — how many times FastForward has seen the file truncated
 
 When logrotate renames `app.log` to `app.log.1` and creates a new `app.log`, the path is the same but the inode is different. FastForward detects this on the next poll and switches to the new file.
 
