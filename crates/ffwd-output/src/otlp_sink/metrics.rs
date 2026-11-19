@@ -373,8 +373,10 @@ pub(crate) fn encode_metrics_batch(
 fn unprefixed_label(key: &str) -> &str {
     match key.strip_prefix(RESERVED_LABEL_PREFIX) {
         Some(rest)
-            if matches!(rest, VALUE_COL | TS_COL | TYPE_COL | SERIES_ID_COL)
-                || rest.starts_with(RESERVED_LABEL_PREFIX) =>
+            if matches!(
+                rest,
+                VALUE_COL | TS_COL | TYPE_COL | SERIES_ID_COL | START_COL
+            ) || rest.starts_with(RESERVED_LABEL_PREFIX) =>
         {
             rest
         }

@@ -100,8 +100,21 @@ impl StartTimeTracker {
             .column_by_name("__timestamp_ms__")
             .and_then(|c| c.as_primitive_opt::<Int64Type>());
         let (Some(values), Some(ts)) = (values, ts) else {
+            // An empty scrape has no samples: every series is now stale.
+            self.series.clear();
             return append_column(batch, Int64Array::new_null(num_rows));
         };
+
+        // Forget series missing from this scrape before admitting new ones,
+        // so stale entries never take the slots of live series.
+        for row in 0..num_rows {
+            let is_tracked = matches!(self.roles.get(row), Some(Role::Monotonic | Role::Other));
+            if is_tracked && let Some(s) = self.keys.get(row).and_then(|k| self.series.get_mut(k)) {
+                s.generation = self.generation;
+            }
+        }
+        let generation = self.generation;
+        self.series.retain(|_, s| s.generation == generation);
 
         self.created.clear();
         for row in 0..num_rows {
@@ -163,8 +176,6 @@ impl StartTimeTracker {
             };
             starts.push(Some(start.min(t)));
         }
-        let generation = self.generation;
-        self.series.retain(|_, s| s.generation == generation);
         append_column(batch, Int64Array::from(starts))
     }
 
@@ -477,6 +488,63 @@ mod tests {
         // Not tracked: its start time is unknown, so it is the sample time.
         assert_eq!(start_of(&rows, "c"), Some(2000));
         assert_eq!(t.tracked_series(), 2);
+    }
+
+    #[test]
+    fn stale_series_do_not_take_the_slots_of_live_ones() {
+        let mut t = StartTimeTracker::new(2);
+        scrape(
+            &mut t,
+            "# TYPE a counter\na 1\n# TYPE b counter\nb 1\n",
+            false,
+            1000,
+        );
+        let ac = "# TYPE a counter\na 1\n# TYPE c counter\nc 1\n";
+        assert_eq!(start_of(&scrape(&mut t, ac, false, 2000), "c"), Some(2000));
+        let rows = scrape(&mut t, ac, false, 3000);
+        assert_eq!(start_of(&rows, "a"), Some(1000));
+        assert_eq!(start_of(&rows, "c"), Some(2000));
+    }
+
+    #[test]
+    fn an_empty_scrape_makes_every_series_stale() {
+        let mut t = StartTimeTracker::new(16);
+        let text = "# TYPE a counter\na 1\n";
+        scrape(&mut t, text, false, 1000);
+        let (empty, _) = PromBatchBuilder::new(PromScanConfig::default())
+            .scan(Bytes::from_static(b"# HELP a nothing\n"))
+            .expect("valid exposition");
+        let empty = super::super::finish_batch(&empty, "j", "i:1", 2000, true).expect("finish");
+        t.apply(&empty).expect("apply");
+        assert_eq!(t.tracked_series(), 0);
+        assert_eq!(scrape(&mut t, text, false, 3000)[0].1, Some(3000));
+    }
+
+    #[test]
+    fn an_exposition_label_named_like_the_start_column_is_kept() {
+        let mut t = StartTimeTracker::new(16);
+        let mut builder = PromBatchBuilder::new(PromScanConfig::default());
+        let (batch, _) = builder
+            .scan(Bytes::from_static(
+                b"# TYPE a counter\na{__start_timestamp_ms__=\"x\"} 1\n",
+            ))
+            .expect("valid exposition");
+        let batch = super::super::finish_batch(&batch, "j", "i:1", 5, true).expect("finish");
+        let out = t.apply(&batch).expect("apply");
+        let kept = out
+            .column_by_name("label:__start_timestamp_ms__")
+            .expect("prefixed label")
+            .as_string_view();
+        assert_eq!(kept.value(0), "x");
+        let starts = out
+            .column_by_name(PROM_START_TIMESTAMP_FIELD)
+            .expect("start")
+            .as_primitive::<Int64Type>();
+        assert_eq!(starts.value(0), 5);
+        assert_eq!(
+            PROM_START_TIMESTAMP_FIELD.as_bytes(),
+            ffwd_core::prom_text::PROM_START_TIMESTAMP_FIELD
+        );
     }
 
     #[test]
