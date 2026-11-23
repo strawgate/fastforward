@@ -55,7 +55,7 @@ edition = "2024"
 rust-version = "1.94"
 
 [workspace.dependencies]
-arrow = { version = "59", default-features = false, features = [
+arrow = { version = "60", default-features = false, features = [
     "ipc_compression",
 ] }
 async-trait = "0.1"
@@ -66,8 +66,8 @@ clap = "4.5"
 clap_complete = "4.5"
 clap_complete_nushell = "4.6"
 config = { version = "0.15.22", default-features = false }
-arrow-json = "59"
-parquet = { version = "59", default-features = false, features = [
+arrow-json = "60"
+parquet = { version = "60", default-features = false, features = [
     "arrow",
     "zstd",
 ] }
