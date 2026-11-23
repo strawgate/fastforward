@@ -48,8 +48,8 @@ jobs:
       datafusion: ${{ steps.filter.outputs.datafusion }}
       kani_matrix: ${{ steps.kani-plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@f3ceefdc7ef57bc2d8560787d4b6c33e44044cec
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@f3360c560367c9daf72b88c0e6164162034c5721
         id: filter
         with:
           list-files: json
@@ -163,8 +163,8 @@ jobs:
       run:
         working-directory: dashboard
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -177,7 +177,7 @@ jobs:
       - name: oxlint
         run: npx oxlint .
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: dashboard/tsconfig.tsbuildinfo
           key: tsc-${{ hashFiles('dashboard/src/**/*.ts', 'dashboard/src/**/*.tsx', 'dashboard/tsconfig.app.json') }}
@@ -210,7 +210,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -248,7 +248,7 @@ jobs:
         run: python3 scripts/check_no_raw_payload_injection.py
 
       - name: Set up Python for verification scripts
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Kani boundary contract
@@ -306,7 +306,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -338,7 +338,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -362,7 +362,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -390,7 +390,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -425,7 +425,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
 
       - uses: ./.github/actions/setup-rust
@@ -484,7 +484,7 @@ jobs:
       # Keep in step with nightly-testing.yml.
       KANI_VERSION: '0.68.0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -493,7 +493,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
       - name: Cache Kani install
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.kani
@@ -537,7 +537,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -575,7 +575,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -609,7 +609,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -650,7 +650,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       # --no-default-features drops the SQL stack (ffwd-transform + datafusion
       # ~5–8 min of compile on a 4-vCPU runner) which the turmoil tests do not
@@ -675,7 +675,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - name: Loom seam test
         run: cargo test -p ffwd-runtime --lib --features loom-tests worker_pool::pool::tests::loom_worker_removal_vs_late_event_model_never_resurrects_slot -- --exact
@@ -699,7 +699,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: "TLC: PipelineMachine — safety"
         uses: ./.github/actions/run-tlc
         with:
@@ -786,7 +786,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: "TLC: PipelineMachine — liveness"
         uses: ./.github/actions/run-tlc
         with:
@@ -850,7 +850,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/build-dashboard
       - uses: ./.github/actions/setup-rust
       - run: rustup component add llvm-tools-preview
